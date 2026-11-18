@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import confetti from 'canvas-confetti';
-import { Award, CheckCircle2, Sparkles } from 'lucide-react';
+import { Award } from 'lucide-react';
 import { TitleScreen } from './components/TitleScreen';
 import { WorldMap } from './components/WorldMap';
 import { HUD, ModalTab } from './components/HUD';
 import { LinesPanel } from './components/LinesPanel';
-import { UpgradesPanel } from './components/UpgradesPanel';
 import { SkillTreePanel } from './components/SkillTreePanel';
 import { AchievementsPanel } from './components/AchievementsPanel';
 import { PrestigePanel } from './components/PrestigePanel';
@@ -18,57 +17,79 @@ import {
   MinigamesState,
   ReactorCellType,
   StartingCity,
-  TransportLine,
 } from './game/types';
 import {
   backfillMinigamesState,
+  BioUpgradeKind,
   boostShipyardChain,
+  buyBioUpgrade,
+  buyColliderUpgrade,
   buyMineUpgrade,
   buyQuantumUpgrade,
   buyReactorUpgrade,
   buyShipyardUnit,
+  buySolarUpgrade,
+  ColliderUpgradeKind,
+  collideParticles,
+  cultivateBioDome,
   digMineLayer,
   evaluateMinigameMilestones,
+  evolveBioDome,
   exchangeMoneyToMinigameCurrency,
-  MINIGAME_META,
+  leapQuantumDimension,
   MineUpgradeKind,
+  mistBioHumidity,
   placeReactorCell,
   prestigeShipyardFleet,
   pulseQuantumExperiment,
+  pulseSolarArray,
   QuantumUpgradeKind,
   ReactorUpgradeKind,
+  setSolarOrbitalAngle,
   ShipyardUnitKind,
+  SolarUpgradeKind,
+  triggerColliderBurst,
+  triggerMineSeismicBlast,
   tuneQuantumWave,
+  unlockMinigame,
   ventReactorHeat,
 } from './game/minigames';
 import {
   advanceTick,
-  buyUpgrade,
+  buyAllAffordableSkills,
+  buyMaxSkill,
   calculateMultipliers,
-  calculatePrestigeGain,
   calculateTotalIncomePerSec,
-  CompletedOsmWayEvent,
   connectOsmPath,
   createInitialGameState,
   dispatchClickBonus,
+  getRegionUnlockCost,
+  isNodeInUnlockedRegion,
   mergeOsmChunk,
+  registerDiscoveredProvincialRegion,
+  registerStartingProvincialRegion,
+  resetSkillTree,
   scopeGameStateToStartingCity,
+  selectIsolatedRegionSeed,
+  unlockProvincialRegion,
   unlockSkill,
 } from './game/rules';
 import {
   chunkKeyForCoords,
+  fetchNearbyProvincialRegions,
   fetchOsmProvincialRegion,
   fetchOsmRoadChunk,
+  fetchProvincialRegionInfo,
   generateCustomCityNetwork,
 } from './game/osmService';
-import { INITIAL_SKILLS, INITIAL_UPGRADES } from './game/worldCatalog';
+import { PRESET_CITIES } from './game/worldCatalog';
 import { soundManager } from './game/audio';
 
 const SAVE_KEY = 'TERRALINE_SAVE_V4';
 
 interface ToastNotification {
   id: string;
-  kind: 'line' | 'achievement' | 'info';
+  kind: 'achievement';
   title: string;
   subtitle: string;
 }
@@ -78,23 +99,9 @@ function loadSavedGame(): GameState | null {
     const raw = localStorage.getItem(SAVE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as GameState;
-    if (!parsed || !parsed.startingCity || !Array.isArray(parsed.segments)) {
+    if (!parsed || !parsed.startingCity) {
       return null;
     }
-
-    // Backfill newly introduced fields if needed
-    const skills =
-      Array.isArray(parsed.skills) && parsed.skills.length === INITIAL_SKILLS.length
-        ? parsed.skills
-        : INITIAL_SKILLS.map((sk) => ({ ...sk, requires: [...sk.requires] }));
-
-    const upgrades =
-      Array.isArray(parsed.upgrades) && parsed.upgrades.length === INITIAL_UPGRADES.length
-        ? parsed.upgrades
-        : INITIAL_UPGRADES.map((u) => ({
-            ...u,
-            unlockRequirement: u.unlockRequirement ? { ...u.unlockRequirement } : undefined,
-          }));
 
     return scopeGameStateToStartingCity({
       ...parsed,
@@ -102,21 +109,25 @@ function loadSavedGame(): GameState | null {
       osmEdges: Array.isArray(parsed.osmEdges) ? parsed.osmEdges : [],
       loadedOsmChunks: Array.isArray(parsed.loadedOsmChunks) ? parsed.loadedOsmChunks : [],
       loadedOsmRegions: Array.isArray(parsed.loadedOsmRegions) ? parsed.loadedOsmRegions : [],
+      provincialRegions: Array.isArray(parsed.provincialRegions) ? parsed.provincialRegions : [],
+      pendingSeedRegionIds: Array.isArray(parsed.pendingSeedRegionIds)
+        ? parsed.pendingSeedRegionIds
+        : [],
       completedOsmWays: Array.isArray(parsed.completedOsmWays) ? parsed.completedOsmWays : [],
-      skills,
-      upgrades,
+      skills: Array.isArray(parsed.skills) ? parsed.skills : [],
+      upgrades: [],
       minigames: backfillMinigamesState(parsed.minigames),
       stats: {
         totalSegmentsBuilt: parsed.stats?.totalSegmentsBuilt || 0,
         totalOsmEdgesBuilt: parsed.stats?.totalOsmEdgesBuilt || 0,
         connectedOsmNodes: parsed.stats?.connectedOsmNodes || 0,
         totalScaledNodes: parsed.stats?.totalScaledNodes || 0,
-        totalLinesCompleted: parsed.stats?.totalLinesCompleted || 0,
-        totalTownsCompleted: parsed.stats?.totalTownsCompleted || 0,
+        totalLinesCompleted: 0,
+        totalTownsCompleted: 0,
         totalClicks: parsed.stats?.totalClicks || 0,
         mapped1to1Km: parsed.stats?.mapped1to1Km || 0,
         totalNetworkKm: parsed.stats?.totalNetworkKm || 0,
-        prestigeCount: parsed.stats?.prestigeCount || 0,
+        prestigeCount: 0,
       },
     });
   } catch {
@@ -130,6 +141,8 @@ export default function App() {
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [activeModal, setActiveModal] = useState<ModalTab>(null);
   const [hasMapBottomCard, setHasMapBottomCard] = useState(false);
+  const [isLoadingOsm, setIsLoadingOsm] = useState(false);
+  const [unlockingRegionId, setUnlockingRegionId] = useState<string | null>(null);
   const [flyToTarget, setFlyToTarget] = useState<{
     lat: number;
     lng: number;
@@ -141,34 +154,34 @@ export default function App() {
   const stateRef = useRef<GameState | null>(null);
   stateRef.current = gameState;
 
+  const unlockingRegionRef = useRef<string | null>(null);
   const checkedProvinceCellsRef = useRef<Set<string>>(new Set());
   const inFlightProvinceCellsRef = useRef<Set<string>>(new Set());
   const inFlightChunkKeysRef = useRef<Set<string>>(new Set());
+  const autoStartedRef = useRef(false);
 
   useEffect(() => {
     document.body.dataset.state = screenState;
   }, [screenState]);
 
-  const pushToast = useCallback(
-    (kind: ToastNotification['kind'], title: string, subtitle: string) => {
-      const id = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      setToasts((prev) => [...prev.slice(-3), { id, kind, title, subtitle }]);
-      setTimeout(() => {
-        setToasts((prev) => prev.filter((t) => t.id !== id));
-      }, 4500);
-    },
-    []
-  );
+  // Strict Rule: ONLY achievement notifications appear on screen
+  const pushToast = useCallback((kind: string, title: string, subtitle: string) => {
+    if (kind !== 'achievement') return;
+    const id = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    setToasts((prev) => [...prev.slice(-3), { id, kind: 'achievement', title, subtitle }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 4500);
+  }, []);
 
   const announceMilestones = useCallback(
     (milestones: MinigameMilestoneDef[]) => {
       if (milestones.length === 0) return;
       soundManager.playUpgradeUnlocked();
       milestones.forEach((ms) => {
-        const meta = MINIGAME_META[ms.gameId];
         pushToast(
           'achievement',
-          `${meta.shortName} 마일스톤 달성: ${ms.title}`,
+          `업적 달성: ${ms.title}`,
           `${ms.description} · 메인 자금 수익 +${ms.incomeBoostPct}% 부스트!`
         );
       });
@@ -176,14 +189,9 @@ export default function App() {
     [pushToast]
   );
 
-  const announceCompletions = useCallback(
-    (
-      lines: TransportLine[],
-      achievements: Achievement[],
-      osmWays: CompletedOsmWayEvent[] = []
-    ) => {
-      if (lines.length === 0 && achievements.length === 0 && osmWays.length === 0) return;
-
+  const announceAchievements = useCallback(
+    (achievements: Achievement[]) => {
+      if (achievements.length === 0) return;
       soundManager.playRouteBuilt();
       try {
         confetti({
@@ -192,25 +200,8 @@ export default function App() {
           origin: { y: 0.75 },
         });
       } catch {
-        // Ignore confetti failures in constrained environments
+        // Ignore confetti failures in headless/constrained environments
       }
-
-      lines.forEach((line) => {
-        pushToast(
-          'line',
-          `노선 완공: ${line.lineCode}`,
-          `${line.name} · ${line.completionBonus.label}`
-        );
-      });
-
-      osmWays.forEach((way) => {
-        pushToast(
-          'line',
-          `실제 ${way.mode === 'rail' ? '철도' : '도로'} 완공: ${way.wayName}`,
-          `${way.edgeCount}개 노드 구간 완전 연결 · 보너스 +$${way.bonusCash.toLocaleString()}`
-        );
-      });
-
       achievements.forEach((ach) => {
         pushToast('achievement', `업적 달성: ${ach.title}`, ach.rewardText);
       });
@@ -218,91 +209,236 @@ export default function App() {
     [pushToast]
   );
 
-  // Load OpenStreetMap dense street/rail chunk around coordinates
-  const handleLoadOsmChunk = useCallback(
-    async (lat: number, lng: number, silent = false) => {
-      const key = chunkKeyForCoords(lat, lng);
-      if (inFlightChunkKeysRef.current.has(key)) return;
-      inFlightChunkKeysRef.current.add(key);
-      try {
-        const chunk = await fetchOsmRoadChunk(lat, lng);
-        setGameState((prev) => {
-          if (!prev) return prev;
-          return mergeOsmChunk(prev, chunk.chunkKey, chunk.osmNodes, chunk.osmEdges);
-        });
-        if (!silent && chunk.usedLiveOverpass) {
-          pushToast(
-            'info',
-            '주변 실측 OpenStreetMap 도로 로드 완료',
-            `도로·철도 노드 ${chunk.osmNodes.length}개 · ${chunk.osmEdges.length}개 구간이 자동으로 추가되었습니다.`
-          );
-        }
-      } finally {
-        inFlightChunkKeysRef.current.delete(key);
+  const discoverNearbyProvinces = useCallback(async (lat: number, lng: number) => {
+    const nearby = await fetchNearbyProvincialRegions(lat, lng).catch(() => []);
+    if (nearby.length === 0) return;
+    setGameState((prev) => {
+      if (!prev) return prev;
+      let next = prev;
+      for (const meta of nearby) {
+        next = registerDiscoveredProvincialRegion(next, meta);
       }
-    },
-    [pushToast]
-  );
+      return next;
+    });
+  }, []);
 
-  // Auto-load entire enclosing OSM provincial region whenever a connected node is owned inside it
-  const handleAutoLoadProvince = useCallback(
-    async (lat: number, lng: number) => {
-      const cellKey = `${(Math.round(lat * 25) / 25).toFixed(3)}_${(
-        Math.round(lng * 25) / 25
-      ).toFixed(3)}`;
-      if (
-        checkedProvinceCellsRef.current.has(cellKey) ||
-        inFlightProvinceCellsRef.current.has(cellKey)
-      ) {
+  // Load OpenStreetMap dense street/rail chunk around coordinates (only for unlocked regions)
+  const handleLoadOsmChunk = useCallback(async (lat: number, lng: number) => {
+    const curState = stateRef.current;
+    let owningRegionId: string | undefined;
+    if (curState) {
+      const regions = curState.provincialRegions || [];
+      const unlockedMatches = regions
+        .filter(
+          (r) =>
+            r.unlocked &&
+            lat >= r.bbox[0] - 0.002 &&
+            lat <= r.bbox[2] + 0.002 &&
+            lng >= r.bbox[1] - 0.002 &&
+            lng <= r.bbox[3] + 0.002
+        )
+        .sort(
+          (a, b) =>
+            (a.bbox[2] - a.bbox[0]) * (a.bbox[3] - a.bbox[1]) -
+            (b.bbox[2] - b.bbox[0]) * (b.bbox[3] - b.bbox[1])
+        );
+      const unlockedMatch = unlockedMatches[0];
+      if (!unlockedMatch && regions.some((r) => r.unlocked)) {
         return;
       }
-      inFlightProvinceCellsRef.current.add(cellKey);
-      try {
+      owningRegionId = unlockedMatch?.regionId;
+    }
+
+    const key = chunkKeyForCoords(lat, lng);
+    if (inFlightChunkKeysRef.current.has(key)) return;
+    inFlightChunkKeysRef.current.add(key);
+    setIsLoadingOsm(true);
+    try {
+      const chunk = await fetchOsmRoadChunk(lat, lng);
+      if (chunk.osmNodes.length > 0 || chunk.osmEdges.length > 0) {
+        setGameState((prev) => {
+          if (!prev) return prev;
+          const filteredNodes = chunk.osmNodes.filter((n) =>
+            isNodeInUnlockedRegion(prev, n)
+          );
+          const allowedIds = new Set(filteredNodes.map((n) => n.id));
+          const filteredEdges = chunk.osmEdges.filter(
+            (e) => allowedIds.has(e.fromNodeId) && allowedIds.has(e.toNodeId)
+          );
+          return mergeOsmChunk(prev, chunk.chunkKey, filteredNodes, filteredEdges, owningRegionId);
+        });
+      }
+    } finally {
+      inFlightChunkKeysRef.current.delete(key);
+      setIsLoadingOsm(inFlightChunkKeysRef.current.size > 0);
+    }
+  }, []);
+
+  // Discover adjacent cities & auto-load ALL nodes/edges once for unlocked cities
+  const handleAutoLoadProvince = useCallback(async (lat: number, lng: number) => {
+    const cellKey = `${(Math.round(lat * 25) / 25).toFixed(3)}_${(
+      Math.round(lng * 25) / 25
+    ).toFixed(3)}`;
+    if (
+      checkedProvinceCellsRef.current.has(cellKey) ||
+      inFlightProvinceCellsRef.current.has(cellKey)
+    ) {
+      return;
+    }
+    inFlightProvinceCellsRef.current.add(cellKey);
+    try {
+      const [info, nearby] = await Promise.all([
+        fetchProvincialRegionInfo(lat, lng).catch(() => null),
+        fetchNearbyProvincialRegions(lat, lng).catch(() => []),
+      ]);
+      checkedProvinceCellsRef.current.add(cellKey);
+
+      const cur = stateRef.current;
+      if (!cur) return;
+
+      setGameState((prev) => {
+        if (!prev) return prev;
+        let next = prev;
+        if (info) {
+          next = registerDiscoveredProvincialRegion(next, info);
+        }
+        for (const meta of nearby) {
+          next = registerDiscoveredProvincialRegion(next, meta);
+        }
+        return next;
+      });
+
+      const latestRegions = stateRef.current?.provincialRegions || [];
+      const matchedUnlocked = info
+        ? latestRegions.find((r) => r.regionId === info.regionId && r.unlocked)
+        : latestRegions.find(
+            (r) =>
+              r.unlocked &&
+              lat >= r.bbox[0] &&
+              lat <= r.bbox[2] &&
+              lng >= r.bbox[1] &&
+              lng <= r.bbox[3]
+          );
+
+      if (
+        matchedUnlocked &&
+        !(stateRef.current?.loadedOsmRegions || []).includes(matchedUnlocked.regionId)
+      ) {
         const region = await fetchOsmProvincialRegion(lat, lng);
         if (region.osmNodes.length > 0) {
-          checkedProvinceCellsRef.current.add(cellKey);
           setGameState((prev) => {
             if (!prev) return prev;
-            const isNewRegion = !(prev.loadedOsmRegions || []).includes(region.regionId);
-            const merged = mergeOsmChunk(
+            const isUnlockedNow = (prev.provincialRegions || []).some(
+              (r) => r.regionId === matchedUnlocked.regionId && r.unlocked
+            );
+            if (!isUnlockedNow) return prev;
+            return mergeOsmChunk(
               prev,
               region.chunkKey,
               region.osmNodes,
               region.osmEdges,
-              region.regionId
+              matchedUnlocked.regionId,
+              {
+                boundaryGeoJson: region.boundaryGeoJson,
+                totalNodeCount: region.totalNodeCount ?? region.osmNodes.length,
+              }
             );
-            if (isNewRegion) {
-              queueMicrotask(() =>
-                pushToast(
-                  'info',
-                  `${region.regionName} 광역 노드 자동 로드`,
-                  `해당 행정구역의 실측 도로·철도 노드 ${region.osmNodes.length}개를 자동으로 불러왔습니다.`
-                )
-              );
-            }
-            return merged;
           });
         }
-      } finally {
-        inFlightProvinceCellsRef.current.delete(cellKey);
       }
-    },
-    [pushToast]
-  );
+    } finally {
+      inFlightProvinceCellsRef.current.delete(cellKey);
+    }
+  }, []);
+
+  // Load ALL nodes of a city in one pass (with local starter fallback if Overpass is empty)
+  const loadFullStartingCityIntoState = useCallback(async (lat: number, lng: number, targetRegionId?: string) => {
+    setIsLoadingOsm(true);
+    try {
+      const regionData = await fetchOsmProvincialRegion(lat, lng);
+      let chunkKey = regionData.chunkKey;
+      let osmNodes = regionData.osmNodes;
+      let osmEdges = regionData.osmEdges;
+      let totalNodeCount = regionData.totalNodeCount ?? osmNodes.length;
+
+      if (osmNodes.length === 0) {
+        const fallback = await fetchOsmRoadChunk(lat, lng);
+        chunkKey = fallback.chunkKey;
+        osmNodes = fallback.osmNodes;
+        osmEdges = fallback.osmEdges;
+        totalNodeCount = Math.max(totalNodeCount, osmNodes.length);
+      }
+
+      if (osmNodes.length > 0 || osmEdges.length > 0) {
+        setGameState((prev) => {
+          if (!prev) return prev;
+          const rid =
+            targetRegionId ||
+            prev.provincialRegions.find((r) => r.isStartingRegion)?.regionId ||
+            regionData.regionId;
+          return mergeOsmChunk(prev, chunkKey, osmNodes, osmEdges, rid, {
+            boundaryGeoJson: regionData.boundaryGeoJson,
+            totalNodeCount,
+          });
+        });
+      }
+    } finally {
+      setIsLoadingOsm(false);
+    }
+  }, []);
 
   // Start new game with selected preset or OSM-searched custom city
   const handleStartWithCity = useCallback(
     async (city: StartingCity) => {
-      let customNetwork;
-      if (city.isCustom) {
-        customNetwork = await generateCustomCityNetwork(city);
-      }
-
       checkedProvinceCellsRef.current.clear();
       inFlightProvinceCellsRef.current.clear();
       inFlightChunkKeysRef.current.clear();
 
-      const fresh = createInitialGameState(city, customNetwork);
+      const [customNetwork, fullCityData, startRegionInfo] = await Promise.all([
+        city.isCustom ? generateCustomCityNetwork(city) : Promise.resolve(undefined),
+        fetchOsmProvincialRegion(city.lat, city.lng),
+        fetchProvincialRegionInfo(city.lat, city.lng).catch(() => null),
+      ]);
+
+      let fresh = createInitialGameState(city, customNetwork);
+      const regionMeta = startRegionInfo || {
+        regionId: fullCityData.regionId,
+        regionName: fullCityData.regionName || city.name.split(' ')[0],
+        adminLevel: fullCityData.adminLevel,
+        bbox: fullCityData.bbox,
+        boundaryGeoJson: fullCityData.boundaryGeoJson,
+        centerLat: city.lat,
+        centerLng: city.lng,
+        totalNodeCount: fullCityData.totalNodeCount ?? fullCityData.osmNodes.length,
+      };
+      if (regionMeta.regionId && !regionMeta.regionId.startsWith('osm_prov_')) {
+        fresh = registerStartingProvincialRegion(fresh, {
+          ...regionMeta,
+          boundaryGeoJson: regionMeta.boundaryGeoJson || fullCityData.boundaryGeoJson,
+          totalNodeCount: fullCityData.totalNodeCount ?? fullCityData.osmNodes.length,
+        });
+      }
+
+      const startRegionId = fresh.provincialRegions.find((r) => r.isStartingRegion)?.regionId;
+      let initialNodes = fullCityData.osmNodes;
+      let initialEdges = fullCityData.osmEdges;
+      let initialChunkKey = fullCityData.chunkKey;
+
+      if (initialNodes.length === 0) {
+        const starterChunk = await fetchOsmRoadChunk(city.lat, city.lng);
+        initialNodes = starterChunk.osmNodes;
+        initialEdges = starterChunk.osmEdges;
+        initialChunkKey = starterChunk.chunkKey;
+      }
+
+      if (initialNodes.length > 0 || initialEdges.length > 0) {
+        fresh = mergeOsmChunk(fresh, initialChunkKey, initialNodes, initialEdges, startRegionId, {
+          boundaryGeoJson: fullCityData.boundaryGeoJson || startRegionInfo?.boundaryGeoJson,
+          totalNodeCount:
+            fullCityData.totalNodeCount > 0 ? fullCityData.totalNodeCount : initialNodes.length,
+        });
+      }
+
       soundManager.enabled = fresh.settings.soundEnabled;
       setGameState(fresh);
       setSavedSnapshot(fresh);
@@ -311,17 +447,12 @@ export default function App() {
       setActiveModal(null);
       setScreenState('playing');
 
-      // Immediately stream starting city local dense grid & enclosing OSM provincial region
-      handleLoadOsmChunk(city.lat, city.lng, true);
-      handleAutoLoadProvince(city.lat, city.lng);
-
-      pushToast(
-        'info',
-        `${city.name} 거점 개설 완료`,
-        '개척된 노드 끝단에서 보이는 미개척 노드(거리 d≤5)를 연결하면 해당 광역 지역의 도로·철도가 자동으로 이어집니다!'
-      );
+      if (fresh.osmNodes.length === 0) {
+        handleLoadOsmChunk(city.lat, city.lng);
+      }
+      discoverNearbyProvinces(city.lat, city.lng);
     },
-    [handleAutoLoadProvince, handleLoadOsmChunk, pushToast]
+    [discoverNearbyProvinces, handleLoadOsmChunk]
   );
 
   // Resume saved game + settle offline idle income (capped at 2 hours)
@@ -355,19 +486,31 @@ export default function App() {
     setActiveModal(null);
     setScreenState('playing');
 
-    if ((resumed.osmNodes || []).length === 0) {
-      handleLoadOsmChunk(resumed.startingCity.lat, resumed.startingCity.lng, true);
-      handleAutoLoadProvince(resumed.startingCity.lat, resumed.startingCity.lng);
-    }
-
-    if (offlineEarned > 0) {
-      pushToast(
-        'info',
-        '오프라인 자동 운행 정산',
-        `부재 중 네트워크 수익 +$${offlineEarned.toLocaleString()} 적립되었습니다.`
+    const startRegion = resumed.provincialRegions.find((r) => r.isStartingRegion);
+    if (
+      (resumed.osmNodes || []).length === 0 ||
+      (startRegion && !(resumed.loadedOsmRegions || []).includes(startRegion.regionId))
+    ) {
+      loadFullStartingCityIntoState(
+        resumed.startingCity.lat,
+        resumed.startingCity.lng,
+        startRegion?.regionId
       );
     }
-  }, [handleAutoLoadProvince, handleLoadOsmChunk, pushToast]);
+    discoverNearbyProvinces(resumed.startingCity.lat, resumed.startingCity.lng);
+  }, [discoverNearbyProvinces, loadFullStartingCityIntoState]);
+
+  // Support ?autostart=1 URL query param for instant entry
+  useEffect(() => {
+    if (autoStartedRef.current) return;
+    if (typeof window !== 'undefined' && window.location.search.includes('autostart=1')) {
+      autoStartedRef.current = true;
+      const seoul = PRESET_CITIES.find((c) => c.id === 'seoul') || PRESET_CITIES[0];
+      if (seoul) {
+        void handleStartWithCity(seoul);
+      }
+    }
+  }, [handleStartWithCity]);
 
   // Automatically load OSM provincial region & dense local chunks whenever >= 1 connected node enters them
   const connectedProvinceSig = (() => {
@@ -427,7 +570,7 @@ export default function App() {
         const lat = Number(latStr);
         const lng = Number(lngStr);
         if (Number.isFinite(lat) && Number.isFinite(lng)) {
-          handleLoadOsmChunk(lat, lng, true);
+          handleLoadOsmChunk(lat, lng);
         }
       }
     }
@@ -438,6 +581,18 @@ export default function App() {
     handleAutoLoadProvince,
     handleLoadOsmChunk,
   ]);
+
+  // Safety net: if playing with 0 OSM nodes, retry loading starting city automatically
+  const hasAnyOsmNodes = (gameState?.osmNodes || []).length > 0;
+  useEffect(() => {
+    if (screenState !== 'playing' || !gameState || hasAnyOsmNodes) return;
+    const { lat, lng } = gameState.startingCity;
+    handleLoadOsmChunk(lat, lng);
+    const timer = setInterval(() => {
+      handleLoadOsmChunk(lat, lng);
+    }, 3500);
+    return () => clearInterval(timer);
+  }, [screenState, hasAnyOsmNodes, gameState?.startingCity.id, handleLoadOsmChunk]);
 
   // Simulation loop (~10Hz state tick via requestAnimationFrame)
   useEffect(() => {
@@ -459,17 +614,9 @@ export default function App() {
         setGameState((prev) => {
           if (!prev) return prev;
           const res = advanceTick(prev, step);
-          if (
-            res.newlyCompletedLines.length > 0 ||
-            res.newlyUnlockedAchievements.length > 0 ||
-            res.newlyCompletedOsmWays.length > 0
-          ) {
+          if (res.newlyUnlockedAchievements.length > 0) {
             queueMicrotask(() => {
-              announceCompletions(
-                res.newlyCompletedLines,
-                res.newlyUnlockedAchievements,
-                res.newlyCompletedOsmWays
-              );
+              announceAchievements(res.newlyUnlockedAchievements);
             });
           } else if (res.autoBuiltSomething) {
             soundManager.playBlip();
@@ -488,7 +635,7 @@ export default function App() {
 
     rafId = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(rafId);
-  }, [screenState, announceCompletions, announceMilestones]);
+  }, [screenState, announceAchievements, announceMilestones]);
 
   // Auto-save every 2.5 seconds while playing
   useEffect(() => {
@@ -513,50 +660,18 @@ export default function App() {
       setGameState((prev) => {
         if (!prev) return prev;
         const res = connectOsmPath(prev, fromId, toId);
-        if (!res.success) {
-          if (res.reason) {
-            queueMicrotask(() => pushToast('info', '노드 연결 안내', res.reason!));
-          }
-          return prev;
-        }
+        if (!res.success) return prev;
         soundManager.playBlip();
-        if (res.builtCount > 1) {
-          queueMicrotask(() =>
-            pushToast(
-              'info',
-              `${res.builtCount}개 도로·철도 구간 연속 연결 완료`,
-              '선택한 노드가 새 시점으로 유지되어 계속 노드를 이어 나갈 수 있습니다.'
-            )
-          );
-        }
-        if (
-          res.newlyCompletedLines.length > 0 ||
-          res.newlyUnlockedAchievements.length > 0 ||
-          res.newlyCompletedOsmWays.length > 0
-        ) {
+        if (res.newlyUnlockedAchievements.length > 0) {
           queueMicrotask(() => {
-            announceCompletions(
-              res.newlyCompletedLines,
-              res.newlyUnlockedAchievements,
-              res.newlyCompletedOsmWays
-            );
+            announceAchievements(res.newlyUnlockedAchievements);
           });
         }
         return res.newState;
       });
     },
-    [announceCompletions, pushToast]
+    [announceAchievements]
   );
-
-  const handleBuyUpgrade = useCallback((upgradeId: string, count: 1 | 10 | 'max') => {
-    setGameState((prev) => {
-      if (!prev) return prev;
-      const res = buyUpgrade(prev, upgradeId, count);
-      if (!res.success) return prev;
-      soundManager.playUpgradeUnlocked();
-      return res.newState;
-    });
-  }, []);
 
   const handleUnlockSkill = useCallback(
     (skillId: string) => {
@@ -567,14 +682,57 @@ export default function App() {
         soundManager.playUpgradeUnlocked();
         if (res.newlyUnlockedAchievements.length > 0) {
           queueMicrotask(() => {
-            announceCompletions([], res.newlyUnlockedAchievements);
+            announceAchievements(res.newlyUnlockedAchievements);
           });
         }
         return res.newState;
       });
     },
-    [announceCompletions]
+    [announceAchievements]
   );
+
+  const handleBuyMaxSkill = useCallback(
+    (skillId: string) => {
+      setGameState((prev) => {
+        if (!prev) return prev;
+        const res = buyMaxSkill(prev, skillId);
+        if (!res.success) return prev;
+        soundManager.playUpgradeUnlocked();
+        if (res.newlyUnlockedAchievements.length > 0) {
+          queueMicrotask(() => {
+            announceAchievements(res.newlyUnlockedAchievements);
+          });
+        }
+        return res.newState;
+      });
+    },
+    [announceAchievements]
+  );
+
+  const handleBuyAllSkills = useCallback(() => {
+    setGameState((prev) => {
+      if (!prev) return prev;
+      const res = buyAllAffordableSkills(prev);
+      if (!res.success) return prev;
+      soundManager.playUpgradeUnlocked();
+      if (res.newlyUnlockedAchievements.length > 0) {
+        queueMicrotask(() => {
+          announceAchievements(res.newlyUnlockedAchievements);
+        });
+      }
+      return res.newState;
+    });
+  }, [announceAchievements]);
+
+  const handleResetSkillTree = useCallback(() => {
+    setGameState((prev) => {
+      if (!prev) return prev;
+      const res = resetSkillTree(prev);
+      if (!res.success) return prev;
+      soundManager.playBlip();
+      return res.newState;
+    });
+  }, []);
 
   const handleDispatchClick = useCallback(() => {
     setGameState((prev) => {
@@ -613,52 +771,82 @@ export default function App() {
     setFlyToTarget({ lat, lng, zoom, ts: Date.now() });
   }, []);
 
-  const handleExecutePrestige = useCallback(async () => {
-    const current = stateRef.current;
-    if (!current) return;
-    const mults = calculateMultipliers(current);
-    const gain = calculatePrestigeGain(current.totalLifetimeEarnings, mults.prestigeBonusMult);
-    if (gain <= 0) return;
+  const handleUnlockRegion = useCallback(
+    async (regionId: string) => {
+      if (unlockingRegionRef.current) return;
+      const current = stateRef.current;
+      if (!current) return;
+      const target = (current.provincialRegions || []).find((r) => r.regionId === regionId);
+      if (!target || target.unlocked) return;
 
-    const nextMultiplier = Number((current.prestigeMultiplier + gain).toFixed(2));
-    const nextCount = current.stats.prestigeCount + 1;
+      const cost = getRegionUnlockCost(current, target);
+      if (current.capital < cost) return;
 
-    let customNet;
-    if (current.startingCity.isCustom) {
-      customNet = await generateCustomCityNetwork(current.startingCity);
-    }
+      unlockingRegionRef.current = regionId;
+      setUnlockingRegionId(regionId);
+      try {
+        let regionData = await fetchOsmProvincialRegion(target.centerLat, target.centerLng);
+        if (regionData.osmNodes.length === 0) {
+          const fallbackChunk = await fetchOsmRoadChunk(target.centerLat, target.centerLng);
+          regionData = {
+            ...regionData,
+            chunkKey: fallbackChunk.chunkKey,
+            osmNodes: fallbackChunk.osmNodes,
+            osmEdges: fallbackChunk.osmEdges,
+            totalNodeCount: Math.max(regionData.totalNodeCount || 0, fallbackChunk.osmNodes.length),
+          };
+        }
 
-    const prestigedState = createInitialGameState(current.startingCity, customNet, {
-      prestigeCount: nextCount,
-      prestigeMultiplier: nextMultiplier,
+        let unlockSuccess = false;
+        let wasIsolated = target.isIsolated;
+
+        setGameState((prev) => {
+          if (!prev) return prev;
+          const res = unlockProvincialRegion(prev, regionId, {
+            chunkKey: regionData.chunkKey,
+            osmNodes: regionData.osmNodes,
+            osmEdges: regionData.osmEdges,
+            bbox: regionData.bbox || target.bbox,
+            boundaryGeoJson: regionData.boundaryGeoJson,
+            totalNodeCount: regionData.totalNodeCount ?? regionData.osmNodes.length,
+            regionName: target.regionName,
+          });
+          if (!res.success) return prev;
+          unlockSuccess = true;
+          wasIsolated = res.isIsolated;
+          return res.newState;
+        });
+
+        if (unlockSuccess) {
+          soundManager.playUpgradeUnlocked();
+          discoverNearbyProvinces(target.centerLat, target.centerLng);
+          if (wasIsolated) {
+            setActiveModal(null);
+            setFlyToTarget({
+              lat: target.centerLat,
+              lng: target.centerLng,
+              zoom: 14,
+              ts: Date.now(),
+            });
+          }
+        }
+      } finally {
+        unlockingRegionRef.current = null;
+        setUnlockingRegionId(null);
+      }
+    },
+    [discoverNearbyProvinces]
+  );
+
+  const handleSelectIsolatedSeed = useCallback((nodeId: string) => {
+    setGameState((prev) => {
+      if (!prev) return prev;
+      const res = selectIsolatedRegionSeed(prev, nodeId);
+      if (!res.success) return prev;
+      soundManager.playRouteBuilt();
+      return res.newState;
     });
-    prestigedState.settings = { ...current.settings };
-    prestigedState.minigames = backfillMinigamesState(current.minigames);
-
-    checkedProvinceCellsRef.current.clear();
-    inFlightProvinceCellsRef.current.clear();
-    inFlightChunkKeysRef.current.clear();
-
-    setGameState(prestigedState);
-    localStorage.setItem(SAVE_KEY, JSON.stringify(prestigedState));
-    setSavedSnapshot(prestigedState);
-    setActiveModal(null);
-    soundManager.playRouteBuilt();
-
-    handleLoadOsmChunk(current.startingCity.lat, current.startingCity.lng, true);
-    handleAutoLoadProvince(current.startingCity.lat, current.startingCity.lng);
-
-    try {
-      confetti({ particleCount: 70, spread: 80, origin: { y: 0.6 } });
-    } catch {
-      // Ignore
-    }
-    pushToast(
-      'achievement',
-      `세계 확장 ${nextCount}회 달성!`,
-      `영구 수익 배수가 ×${nextMultiplier.toFixed(2)}로 상승하고 +2 SP를 추가로 받았습니다.`
-    );
-  }, [handleAutoLoadProvince, handleLoadOsmChunk, pushToast]);
+  }, []);
 
   return (
     <div className="w-full h-[100dvh] bg-[#090d16] text-slate-100 overflow-hidden select-none">
@@ -668,7 +856,7 @@ export default function App() {
           hasSavedGame={Boolean(savedSnapshot)}
           onResumeSavedGame={handleResumeSavedGame}
           savedCityName={savedSnapshot?.startingCity.name}
-          savedKm={savedSnapshot?.stats.totalNetworkKm}
+          savedKm={savedSnapshot?.stats.mapped1to1Km}
           savedCapital={savedSnapshot?.capital}
         />
       )}
@@ -678,7 +866,15 @@ export default function App() {
           <WorldMap
             gameState={gameState}
             flyToTarget={flyToTarget}
+            isLoadingOsm={isLoadingOsm}
+            onReloadOsm={() =>
+              loadFullStartingCityIntoState(gameState.startingCity.lat, gameState.startingCity.lng)
+            }
             onConnectOsmPath={handleConnectOsmPath}
+            onSelectIsolatedSeed={handleSelectIsolatedSeed}
+            onUnlockRegion={handleUnlockRegion}
+            unlockingRegionId={unlockingRegionId}
+            onOpenExpansionTab={() => setActiveModal('prestige')}
             onBottomCardChange={setHasMapBottomCard}
           />
 
@@ -700,19 +896,14 @@ export default function App() {
             />
           )}
 
-          {activeModal === 'upgrades' && (
-            <UpgradesPanel
-              gameState={gameState}
-              onClose={() => setActiveModal(null)}
-              onBuyUpgrade={handleBuyUpgrade}
-            />
-          )}
-
           {activeModal === 'skills' && (
             <SkillTreePanel
               gameState={gameState}
               onClose={() => setActiveModal(null)}
               onUnlockSkill={handleUnlockSkill}
+              onBuyMaxSkill={handleBuyMaxSkill}
+              onBuyAllSkills={handleBuyAllSkills}
+              onResetSkillTree={handleResetSkillTree}
             />
           )}
 
@@ -727,7 +918,9 @@ export default function App() {
             <PrestigePanel
               gameState={gameState}
               onClose={() => setActiveModal(null)}
-              onExecutePrestige={handleExecutePrestige}
+              onUnlockRegion={handleUnlockRegion}
+              unlockingRegionId={unlockingRegionId}
+              onFocusMap={handleFocusMap}
             />
           )}
 
@@ -735,20 +928,21 @@ export default function App() {
             <TownArcadePanel
               gameState={gameState}
               onClose={() => setActiveModal(null)}
+              onUnlockMinigame={(gameId: MinigameId) => {
+                setGameState((prev) => {
+                  if (!prev) return prev;
+                  const res = unlockMinigame(prev, gameId);
+                  if (!res.success) return prev;
+                  soundManager.playRouteBuilt();
+                  return res.newState;
+                });
+              }}
               onExchangeMoney={(gameId: MinigameId, moneyAmount: number) => {
                 setGameState((prev) => {
                   if (!prev) return prev;
                   const res = exchangeMoneyToMinigameCurrency(prev, gameId, moneyAmount);
                   if (!res.success) return prev;
                   soundManager.playCashRegister();
-                  const meta = MINIGAME_META[gameId];
-                  queueMicrotask(() =>
-                    pushToast(
-                      'info',
-                      `${meta.name} 단방향 환전 완료`,
-                      `$${Math.floor(moneyAmount).toLocaleString()} → +${res.gained.toLocaleString()} ${meta.currencySymbol}`
-                    )
-                  );
                   return res.newState;
                 });
               }}
@@ -764,10 +958,23 @@ export default function App() {
                   if (evaluated.newlyUnlocked.length > 0) {
                     queueMicrotask(() => announceMilestones(evaluated.newlyUnlocked));
                   }
-                  return {
-                    ...prev,
-                    minigames: evaluated.minigames,
-                  };
+                  return { ...prev, minigames: evaluated.minigames };
+                });
+              }}
+              onTriggerMineSeismic={() => {
+                setGameState((prev) => {
+                  if (!prev) return prev;
+                  const nextMine = triggerMineSeismicBlast(prev.minigames.mine);
+                  if (nextMine === prev.minigames.mine) return prev;
+                  soundManager.playRouteBuilt();
+                  const evaluated = evaluateMinigameMilestones({
+                    ...prev.minigames,
+                    mine: nextMine,
+                  });
+                  if (evaluated.newlyUnlocked.length > 0) {
+                    queueMicrotask(() => announceMilestones(evaluated.newlyUnlocked));
+                  }
+                  return { ...prev, minigames: evaluated.minigames };
                 });
               }}
               onBuyMineUpgrade={(kind: MineUpgradeKind) => {
@@ -776,10 +983,7 @@ export default function App() {
                   const res = buyMineUpgrade(prev.minigames.mine, kind);
                   if (!res.success) return prev;
                   soundManager.playUpgradeUnlocked();
-                  return {
-                    ...prev,
-                    minigames: { ...prev.minigames, mine: res.mine },
-                  };
+                  return { ...prev, minigames: { ...prev.minigames, mine: res.mine } };
                 });
               }}
               onPlaceReactorCell={(cellIndex: number, cellType: ReactorCellType) => {
@@ -788,10 +992,7 @@ export default function App() {
                   const res = placeReactorCell(prev.minigames.reactor, cellIndex, cellType);
                   if (!res.success) return prev;
                   soundManager.playBlip();
-                  return {
-                    ...prev,
-                    minigames: { ...prev.minigames, reactor: res.reactor },
-                  };
+                  return { ...prev, minigames: { ...prev.minigames, reactor: res.reactor } };
                 });
               }}
               onVentReactor={() => {
@@ -813,28 +1014,21 @@ export default function App() {
                   const res = buyReactorUpgrade(prev.minigames.reactor, kind);
                   if (!res.success) return prev;
                   soundManager.playUpgradeUnlocked();
-                  return {
-                    ...prev,
-                    minigames: { ...prev.minigames, reactor: res.reactor },
-                  };
+                  return { ...prev, minigames: { ...prev.minigames, reactor: res.reactor } };
                 });
               }}
               onBoostShipyard={() => {
                 setGameState((prev) => {
                   if (!prev) return prev;
                   soundManager.playBlip();
-                  const nextMg: MinigamesState = {
+                  const evaluated = evaluateMinigameMilestones({
                     ...prev.minigames,
                     shipyard: boostShipyardChain(prev.minigames.shipyard),
-                  };
-                  const evaluated = evaluateMinigameMilestones(nextMg);
+                  });
                   if (evaluated.newlyUnlocked.length > 0) {
                     queueMicrotask(() => announceMilestones(evaluated.newlyUnlocked));
                   }
-                  return {
-                    ...prev,
-                    minigames: evaluated.minigames,
-                  };
+                  return { ...prev, minigames: evaluated.minigames };
                 });
               }}
               onBuyShipyardUnit={(kind: ShipyardUnitKind) => {
@@ -843,10 +1037,7 @@ export default function App() {
                   const res = buyShipyardUnit(prev.minigames.shipyard, kind);
                   if (!res.success) return prev;
                   soundManager.playUpgradeUnlocked();
-                  return {
-                    ...prev,
-                    minigames: { ...prev.minigames, shipyard: res.shipyard },
-                  };
+                  return { ...prev, minigames: { ...prev.minigames, shipyard: res.shipyard } };
                 });
               }}
               onPrestigeShipyard={() => {
@@ -855,10 +1046,7 @@ export default function App() {
                   const res = prestigeShipyardFleet(prev.minigames.shipyard);
                   if (!res.success) return prev;
                   soundManager.playRouteBuilt();
-                  return {
-                    ...prev,
-                    minigames: { ...prev.minigames, shipyard: res.shipyard },
-                  };
+                  return { ...prev, minigames: { ...prev.minigames, shipyard: res.shipyard } };
                 });
               }}
               onTuneQuantumWave={(channelIndex: 0 | 1 | 2, value: number) => {
@@ -878,18 +1066,23 @@ export default function App() {
                 setGameState((prev) => {
                   if (!prev) return prev;
                   soundManager.playBlip();
-                  const nextMg: MinigamesState = {
+                  const evaluated = evaluateMinigameMilestones({
                     ...prev.minigames,
                     quantum: pulseQuantumExperiment(prev.minigames.quantum),
-                  };
-                  const evaluated = evaluateMinigameMilestones(nextMg);
+                  });
                   if (evaluated.newlyUnlocked.length > 0) {
                     queueMicrotask(() => announceMilestones(evaluated.newlyUnlocked));
                   }
-                  return {
-                    ...prev,
-                    minigames: evaluated.minigames,
-                  };
+                  return { ...prev, minigames: evaluated.minigames };
+                });
+              }}
+              onLeapQuantum={() => {
+                setGameState((prev) => {
+                  if (!prev) return prev;
+                  const res = leapQuantumDimension(prev.minigames.quantum);
+                  if (!res.success) return prev;
+                  soundManager.playRouteBuilt();
+                  return { ...prev, minigames: { ...prev.minigames, quantum: res.quantum } };
                 });
               }}
               onBuyQuantumUpgrade={(kind: QuantumUpgradeKind) => {
@@ -898,39 +1091,145 @@ export default function App() {
                   const res = buyQuantumUpgrade(prev.minigames.quantum, kind);
                   if (!res.success) return prev;
                   soundManager.playUpgradeUnlocked();
+                  return { ...prev, minigames: { ...prev.minigames, quantum: res.quantum } };
+                });
+              }}
+              onSetSolarAngle={(angle: number) => {
+                setGameState((prev) => {
+                  if (!prev) return prev;
+                  soundManager.playBlip();
                   return {
                     ...prev,
-                    minigames: { ...prev.minigames, quantum: res.quantum },
+                    minigames: {
+                      ...prev.minigames,
+                      solar: setSolarOrbitalAngle(prev.minigames.solar, angle),
+                    },
                   };
+                });
+              }}
+              onPulseSolar={() => {
+                setGameState((prev) => {
+                  if (!prev) return prev;
+                  soundManager.playBlip();
+                  const evaluated = evaluateMinigameMilestones({
+                    ...prev.minigames,
+                    solar: pulseSolarArray(prev.minigames.solar),
+                  });
+                  if (evaluated.newlyUnlocked.length > 0) {
+                    queueMicrotask(() => announceMilestones(evaluated.newlyUnlocked));
+                  }
+                  return { ...prev, minigames: evaluated.minigames };
+                });
+              }}
+              onBuySolarUpgrade={(kind: SolarUpgradeKind) => {
+                setGameState((prev) => {
+                  if (!prev) return prev;
+                  const res = buySolarUpgrade(prev.minigames.solar, kind);
+                  if (!res.success) return prev;
+                  soundManager.playUpgradeUnlocked();
+                  return { ...prev, minigames: { ...prev.minigames, solar: res.solar } };
+                });
+              }}
+              onCultivateBio={() => {
+                setGameState((prev) => {
+                  if (!prev) return prev;
+                  soundManager.playBlip();
+                  const evaluated = evaluateMinigameMilestones({
+                    ...prev.minigames,
+                    bio: cultivateBioDome(prev.minigames.bio),
+                  });
+                  if (evaluated.newlyUnlocked.length > 0) {
+                    queueMicrotask(() => announceMilestones(evaluated.newlyUnlocked));
+                  }
+                  return { ...prev, minigames: evaluated.minigames };
+                });
+              }}
+              onMistBio={(delta: number) => {
+                setGameState((prev) => {
+                  if (!prev) return prev;
+                  soundManager.playBlip();
+                  return {
+                    ...prev,
+                    minigames: {
+                      ...prev.minigames,
+                      bio: mistBioHumidity(prev.minigames.bio, delta),
+                    },
+                  };
+                });
+              }}
+              onEvolveBio={() => {
+                setGameState((prev) => {
+                  if (!prev) return prev;
+                  const res = evolveBioDome(prev.minigames.bio);
+                  if (!res.success) return prev;
+                  soundManager.playRouteBuilt();
+                  return { ...prev, minigames: { ...prev.minigames, bio: res.bio } };
+                });
+              }}
+              onBuyBioUpgrade={(kind: BioUpgradeKind) => {
+                setGameState((prev) => {
+                  if (!prev) return prev;
+                  const res = buyBioUpgrade(prev.minigames.bio, kind);
+                  if (!res.success) return prev;
+                  soundManager.playUpgradeUnlocked();
+                  return { ...prev, minigames: { ...prev.minigames, bio: res.bio } };
+                });
+              }}
+              onCollideParticles={() => {
+                setGameState((prev) => {
+                  if (!prev) return prev;
+                  soundManager.playBlip();
+                  const evaluated = evaluateMinigameMilestones({
+                    ...prev.minigames,
+                    collider: collideParticles(prev.minigames.collider),
+                  });
+                  if (evaluated.newlyUnlocked.length > 0) {
+                    queueMicrotask(() => announceMilestones(evaluated.newlyUnlocked));
+                  }
+                  return { ...prev, minigames: evaluated.minigames };
+                });
+              }}
+              onBurstCollider={() => {
+                setGameState((prev) => {
+                  if (!prev) return prev;
+                  const nextCol = triggerColliderBurst(prev.minigames.collider);
+                  if (nextCol === prev.minigames.collider) return prev;
+                  soundManager.playRouteBuilt();
+                  const evaluated = evaluateMinigameMilestones({
+                    ...prev.minigames,
+                    collider: nextCol,
+                  });
+                  if (evaluated.newlyUnlocked.length > 0) {
+                    queueMicrotask(() => announceMilestones(evaluated.newlyUnlocked));
+                  }
+                  return { ...prev, minigames: evaluated.minigames };
+                });
+              }}
+              onBuyColliderUpgrade={(kind: ColliderUpgradeKind) => {
+                setGameState((prev) => {
+                  if (!prev) return prev;
+                  const res = buyColliderUpgrade(prev.minigames.collider, kind);
+                  if (!res.success) return prev;
+                  soundManager.playUpgradeUnlocked();
+                  return { ...prev, minigames: { ...prev.minigames, collider: res.collider } };
                 });
               }}
             />
           )}
 
-          {/* Toast Stack for Line Completions & Achievements */}
+          {/* Strictly Achievement-only Toast Notifications */}
           {toasts.length > 0 && (
             <div
+              data-testid="achievement-toast-stack"
               className="fixed top-[116px] sm:top-auto sm:bottom-20 left-2 right-2 sm:left-auto sm:right-3 z-50 flex flex-col gap-2 sm:w-80 pointer-events-none"
               aria-live="polite"
             >
               {toasts.map((toast) => (
                 <div
                   key={toast.id}
-                  className={`p-3.5 rounded-xl border shadow-2xl flex items-start gap-2.5 ${
-                    toast.kind === 'achievement'
-                      ? 'bg-slate-950/95 border-yellow-500/60'
-                      : toast.kind === 'line'
-                      ? 'bg-slate-950/95 border-emerald-500/60'
-                      : 'bg-slate-950/95 border-sky-500/50'
-                  }`}
+                  className="p-3.5 rounded-xl border shadow-2xl flex items-start gap-2.5 bg-slate-950/95 border-yellow-500/60"
                 >
-                  {toast.kind === 'achievement' ? (
-                    <Award className="w-5 h-5 text-yellow-400 shrink-0 mt-0.5" />
-                  ) : toast.kind === 'line' ? (
-                    <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
-                  ) : (
-                    <Sparkles className="w-5 h-5 text-sky-400 shrink-0 mt-0.5" />
-                  )}
+                  <Award className="w-5 h-5 text-yellow-400 shrink-0 mt-0.5" />
                   <div className="min-w-0">
                     <div className="text-xs font-bold text-white leading-snug">{toast.title}</div>
                     <div className="text-[11px] text-slate-300 mt-0.5 leading-snug">
@@ -946,4 +1245,3 @@ export default function App() {
     </div>
   );
 }
-

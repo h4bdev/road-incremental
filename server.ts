@@ -53,19 +53,28 @@ interface ChunkPayload {
   wayCount: number;
 }
 
+interface GeoJsonBoundaryDTO {
+  type: 'Polygon' | 'MultiPolygon';
+  coordinates: number[][][] | number[][][][];
+}
+
 interface ProvincePayload extends ChunkPayload {
   regionId: string;
   regionName: string;
   adminLevel: string;
   bbox: [number, number, number, number];
+  boundaryGeoJson?: GeoJsonBoundaryDTO;
+  totalNodeCount: number;
 }
 
 interface ResolvedAdminRegion {
   regionId: string;
+  relId?: number;
   regionName: string;
   adminLevel: string;
   bbox: [number, number, number, number];
   districtBbox?: [number, number, number, number];
+  boundaryGeoJson?: GeoJsonBoundaryDTO;
 }
 
 const DRIVABLE_HIGHWAYS = new Set([
@@ -92,6 +101,8 @@ const RAILWAYS = new Set(['rail', 'subway', 'light_rail', 'tram', 'narrow_gauge'
 
 const chunkCache = new Map<string, ChunkPayload>();
 const provinceCache = new Map<string, ProvincePayload>();
+const regionInfoCache = new Map<string, ResolvedAdminRegion>();
+const inFlightRegionInfo = new Map<string, Promise<ResolvedAdminRegion | null>>();
 
 function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371000;
@@ -127,6 +138,38 @@ function getWayPriority(way: OsmRawWay): number {
   return 9;
 }
 
+const OVERPASS_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.openstreetmap.fr/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+];
+
+const inFlightChunks = new Map<string, Promise<ChunkPayload>>();
+const inFlightProvinces = new Map<string, Promise<ProvincePayload>>();
+
+async function fetchOverpassFromUrl(
+  endpoint: string,
+  query: string,
+  signal: AbortSignal
+): Promise<OsmMapResponse> {
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    signal,
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': 'TerraLine-OSM-Builder/1.0',
+    },
+    body: `data=${encodeURIComponent(query)}`,
+  });
+  if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
+  const data = (await res.json()) as OsmMapResponse;
+  if (!Array.isArray(data.elements) || data.elements.length === 0) {
+    throw new Error('Overpass empty elements');
+  }
+  return data;
+}
+
 async function fetchOverpassQuery(
   query: string,
   timeoutMs = 8500
@@ -134,24 +177,12 @@ async function fetchOverpassQuery(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch('https://overpass.openstreetmap.fr/api/interpreter', {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'TerraLine-OSM-Builder/1.0',
-      },
-      body: `data=${encodeURIComponent(query)}`,
-    });
-    if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
-    const data = (await res.json()) as OsmMapResponse;
-    if (!Array.isArray(data.elements) || data.elements.length === 0) {
-      throw new Error('Overpass empty elements');
-    }
-    return data;
+    return await Promise.any(
+      OVERPASS_ENDPOINTS.map((ep) => fetchOverpassFromUrl(ep, query, controller.signal))
+    );
   } finally {
     clearTimeout(timer);
+    controller.abort();
   }
 }
 
@@ -215,10 +246,18 @@ async function fetchOsmBbox(
   maxLng: number
 ): Promise<OsmMapResponse | null> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 9000);
+  const timer = setTimeout(() => controller.abort(), 8500);
   try {
     return await Promise.any([
       fetchFromOsm06(minLat, minLng, maxLat, maxLng, controller.signal),
+      fetchFromOverpass(
+        'https://overpass-api.de/api/interpreter',
+        minLat,
+        minLng,
+        maxLat,
+        maxLng,
+        controller.signal
+      ),
       fetchFromOverpass(
         'https://overpass.openstreetmap.fr/api/interpreter',
         minLat,
@@ -236,12 +275,171 @@ async function fetchOsmBbox(
   }
 }
 
+function buildFallbackStarterGrid(
+  chunkKey: string,
+  centerLat: number,
+  centerLng: number
+): ChunkPayload {
+  const dLat = 0.00032; // ~35m N-S spacing
+  const dLng = 0.00040; // ~35m E-W spacing
+  const osmNodes: OsmNodeDTO[] = [];
+  const osmEdges: OsmEdgeDTO[] = [];
+
+  const rows = 5;
+  const cols = 5;
+  const halfR = Math.floor(rows / 2);
+  const halfC = Math.floor(cols / 2);
+
+  const nodeIdAt = (r: number, c: number) => `fb_${chunkKey}_r${r}_c${c}`;
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const lat = Number((centerLat + (r - halfR) * dLat).toFixed(6));
+      const lng = Number((centerLng + (c - halfC) * dLng).toFixed(6));
+      const isRailCol = c === halfC;
+      osmNodes.push({
+        id: nodeIdAt(r, c),
+        lat,
+        lng,
+        connected: false,
+        mode: isRailCol ? 'mixed' : 'road',
+        label: isRailCol ? '중앙 환승 교차점' : '도심 교차로',
+      });
+    }
+  }
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const a = osmNodes[r * cols + c];
+      if (c + 1 < cols) {
+        const b = osmNodes[r * cols + (c + 1)];
+        const distM = haversineMeters(a.lat, a.lng, b.lat, b.lng);
+        osmEdges.push({
+          id: `oe_fb_${a.id}_${b.id}`,
+          wayName: `중앙 가로 ${r + 1}로`,
+          highwayType: 'primary',
+          mode: 'road',
+          fromNodeId: a.id,
+          toNodeId: b.id,
+          coordinates: [
+            [a.lat, a.lng],
+            [b.lat, b.lng],
+          ],
+          distanceKm: Math.max(0.01, Math.round((distM / 1000) * 1000) / 1000),
+          buildCost: 35,
+          baseIncomePerSec: 2.4,
+          built: false,
+        });
+      }
+      if (r + 1 < rows) {
+        const b = osmNodes[(r + 1) * cols + c];
+        const distM = haversineMeters(a.lat, a.lng, b.lat, b.lng);
+        const isRailLine = c === halfC;
+        osmEdges.push({
+          id: `oe_fb_${a.id}_${b.id}`,
+          wayName: isRailLine ? '도심 순환선' : `중앙 세로 ${c + 1}로`,
+          highwayType: isRailLine ? 'subway' : 'secondary',
+          mode: isRailLine ? 'rail' : 'road',
+          fromNodeId: a.id,
+          toNodeId: b.id,
+          coordinates: [
+            [a.lat, a.lng],
+            [b.lat, b.lng],
+          ],
+          distanceKm: Math.max(0.01, Math.round((distM / 1000) * 1000) / 1000),
+          buildCost: isRailLine ? 45 : 32,
+          baseIncomePerSec: isRailLine ? 3.2 : 2.1,
+          built: false,
+        });
+      }
+    }
+  }
+
+  return {
+    chunkKey,
+    osmNodes,
+    osmEdges,
+    usedLiveOverpass: false,
+    source: 'osm-0.6-api',
+    wayCount: rows + cols,
+  };
+}
+
+function simplifyRing(ring: number[][], maxPts: number): number[][] {
+  if (!Array.isArray(ring) || ring.length < 4) return [];
+  const rounded = ring.map((pt) => [
+    Number(Number(pt[0]).toFixed(5)),
+    Number(Number(pt[1]).toFixed(5)),
+  ]);
+  if (rounded.length <= maxPts) {
+    const first = rounded[0];
+    const last = rounded[rounded.length - 1];
+    if (first[0] !== last[0] || first[1] !== last[1]) {
+      rounded.push([first[0], first[1]]);
+    }
+    return rounded;
+  }
+  const step = Math.max(1, Math.floor((rounded.length - 1) / (maxPts - 1)));
+  const out: number[][] = [];
+  for (let i = 0; i < rounded.length - 1; i += step) {
+    out.push(rounded[i]);
+  }
+  out.push([rounded[0][0], rounded[0][1]]);
+  return out.length >= 4 ? out : [];
+}
+
+function simplifyGeoJsonBoundary(raw: unknown): GeoJsonBoundaryDTO | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const g = raw as { type?: string; coordinates?: unknown };
+  if (g.type === 'Polygon' && Array.isArray(g.coordinates)) {
+    const rings = (g.coordinates as number[][][])
+      .slice(0, 1) // outer boundary ring keeps UI clean
+      .map((r) => simplifyRing(r, 120))
+      .filter((r) => r.length >= 4);
+    if (rings.length === 0) return undefined;
+    return { type: 'Polygon', coordinates: rings };
+  }
+  if (g.type === 'MultiPolygon' && Array.isArray(g.coordinates)) {
+    const polys = (g.coordinates as number[][][][])
+      .map((poly) => {
+        const outer = Array.isArray(poly?.[0]) ? simplifyRing(poly[0], 90) : [];
+        if (outer.length < 4) return null;
+        let minX = Infinity;
+        let maxX = -Infinity;
+        let minY = Infinity;
+        let maxY = -Infinity;
+        for (const [x, y] of outer) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+        return { outer, area: (maxX - minX) * (maxY - minY) };
+      })
+      .filter((p): p is { outer: number[][]; area: number } => p !== null)
+      .sort((a, b) => b.area - a.area)
+      .slice(0, 3);
+    if (polys.length === 0) return undefined;
+    if (polys.length === 1) {
+      return { type: 'Polygon', coordinates: [polys[0].outer] };
+    }
+    return { type: 'MultiPolygon', coordinates: polys.map((p) => [p.outer]) };
+  }
+  return undefined;
+}
+
+function isMetroOrIndependentCityName(name: string): boolean {
+  return /특별시|광역시|특별자치시|City of New York|New York|Tokyo|東京都|Greater London|London|Paris/i.test(
+    name
+  );
+}
+
 async function resolveOsmProvincialRegion(
   lat: number,
   lng: number
 ): Promise<ResolvedAdminRegion | null> {
   try {
-    const query = `[out:json][timeout:6];is_in(${lat.toFixed(6)},${lng.toFixed(6)})->.a;area.a["boundary"="administrative"]["admin_level"~"^(4|5|6)$"];out tags;`;
+    const query = `[out:json][timeout:6];is_in(${lat.toFixed(6)},${lng.toFixed(6)})->.a;area.a["boundary"="administrative"]["admin_level"~"^(4|5|6|8)$"];out tags;`;
     const areaRes = await fetchOverpassQuery(query, 6500);
     const areas = (areaRes.elements || []).filter(
       (el): el is { type: 'area'; id: number; tags?: Record<string, string> } =>
@@ -249,54 +447,53 @@ async function resolveOsmProvincialRegion(
     );
 
     const byLevel = (lvl: string) =>
-      areas.find((a) => a.tags?.admin_level === lvl);
-    const provinceArea = byLevel('4') || byLevel('5') || byLevel('6');
-    const districtArea = byLevel('6') || byLevel('5');
+      areas.filter((a) => a.tags?.admin_level === lvl);
+    const getAreaName = (a?: { id: number; tags?: Record<string, string> }) =>
+      a?.tags?.['name:ko'] || a?.tags?.name || a?.tags?.['name:en'] || '';
+
+    const a3 = byLevel('3')[0];
+    const a4 = byLevel('4')[0];
+    const a5 = byLevel('5')[0];
+    const a6 = byLevel('6')[0];
+
+    // Enforce minimum unit = Province / State (도/주, admin_level=4)
+    const provinceArea = a4 || a3 || a5 || a6;
+    const districtArea = byLevel('8')[0] || byLevel('6')[0] || byLevel('5')[0];
 
     if (provinceArea) {
-      const relId =
-        provinceArea.id > 3600000000 ? provinceArea.id - 3600000000 : provinceArea.id;
+      const relId = provinceArea.id > 3600000000 ? provinceArea.id - 3600000000 : provinceArea.id;
       const distRelId =
         districtArea && districtArea.id > 3600000000
           ? districtArea.id - 3600000000
           : districtArea?.id;
-      const provinceName =
-        provinceArea.tags?.['name:ko'] ||
-        provinceArea.tags?.name ||
-        provinceArea.tags?.['name:en'] ||
-        `Region #${relId}`;
-      const districtName =
-        districtArea?.tags?.['name:ko'] || districtArea?.tags?.name || '';
-      const displayName =
-        districtName && districtName !== provinceName
-          ? `${provinceName} · ${districtName}`
-          : provinceName;
+      const displayName = getAreaName(provinceArea) || `Province #${relId}`;
 
-      // Lookup exact bounding boxes via Nominatim
       let bbox: [number, number, number, number] = [
-        lat - 0.09,
-        lng - 0.11,
-        lat + 0.09,
-        lng + 0.11,
+        lat - 0.075,
+        lng - 0.095,
+        lat + 0.075,
+        lng + 0.095,
       ];
       let districtBbox: [number, number, number, number] | undefined;
+      let boundaryGeoJson: GeoJsonBoundaryDTO | undefined;
 
       try {
         const ids = distRelId && distRelId !== relId ? `R${relId},R${distRelId}` : `R${relId}`;
         const nomRes = await fetch(
-          `https://nominatim.openstreetmap.org/lookup?osm_ids=${ids}&format=json`,
+          `https://nominatim.openstreetmap.org/lookup?osm_ids=${ids}&format=json&polygon_geojson=1`,
           {
             headers: {
               Accept: 'application/json',
               'User-Agent': 'TerraLine-OSM-Builder/1.0',
             },
-            signal: AbortSignal.timeout(4500),
+            signal: AbortSignal.timeout(5500),
           }
         );
         if (nomRes.ok) {
           const items = (await nomRes.json()) as Array<{
             osm_id: number;
             boundingbox?: [string, string, string, string];
+            geojson?: unknown;
           }>;
           const pItem = items.find((i) => i.osm_id === relId);
           if (pItem?.boundingbox && pItem.boundingbox.length === 4) {
@@ -306,6 +503,9 @@ async function resolveOsmProvincialRegion(
               parseFloat(pItem.boundingbox[1]),
               parseFloat(pItem.boundingbox[3]),
             ];
+          }
+          if (pItem?.geojson) {
+            boundaryGeoJson = simplifyGeoJsonBoundary(pItem.geojson);
           }
           const dItem = distRelId ? items.find((i) => i.osm_id === distRelId) : undefined;
           if (dItem?.boundingbox && dItem.boundingbox.length === 4) {
@@ -318,30 +518,32 @@ async function resolveOsmProvincialRegion(
           }
         }
       } catch {
-        // Keep coordinate-centered province bbox fallback
+        // Keep fallback bbox
       }
 
       return {
         regionId: `osm_rel_${relId}`,
+        relId,
         regionName: displayName,
-        adminLevel: provinceArea.tags?.admin_level || '4',
+        adminLevel: '4',
         bbox,
         districtBbox,
+        boundaryGeoJson,
       };
     }
   } catch {
-    // Fallback to Nominatim reverse lookup below
+    // Fallback to Nominatim reverse lookup at zoom=10 (city) below
   }
 
   try {
     const revRes = await fetch(
-      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=6&addressdetails=1`,
+      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=5&addressdetails=1&polygon_geojson=1`,
       {
         headers: {
           Accept: 'application/json',
           'User-Agent': 'TerraLine-OSM-Builder/1.0',
         },
-        signal: AbortSignal.timeout(4500),
+        signal: AbortSignal.timeout(5000),
       }
     );
     if (revRes.ok) {
@@ -350,16 +552,18 @@ async function resolveOsmProvincialRegion(
         osm_id?: number;
         name?: string;
         display_name?: string;
-        address?: { province?: string; state?: string; city?: string };
+        address?: { state?: string; province?: string; region?: string; city?: string; county?: string };
         boundingbox?: [string, string, string, string];
+        geojson?: unknown;
       };
       const name =
-        rev.address?.province ||
         rev.address?.state ||
-        rev.address?.city ||
+        rev.address?.province ||
+        rev.address?.region ||
         rev.name ||
+        rev.address?.city ||
         rev.display_name?.split(',')[0] ||
-        'OSM 광역 행정구역';
+        '인접 도·주 광역 행정구역';
       const bbox: [number, number, number, number] =
         rev.boundingbox && rev.boundingbox.length === 4
           ? [
@@ -368,12 +572,15 @@ async function resolveOsmProvincialRegion(
               parseFloat(rev.boundingbox[1]),
               parseFloat(rev.boundingbox[3]),
             ]
-          : [lat - 0.09, lng - 0.11, lat + 0.09, lng + 0.11];
+          : [lat - 0.075, lng - 0.095, lat + 0.075, lng + 0.095];
+      const relId = rev.osm_type === 'relation' && rev.osm_id ? rev.osm_id : undefined;
       return {
-        regionId: rev.osm_id ? `osm_nom_${rev.osm_id}` : `osm_grid_${quantizeChunkKey(lat, lng)}`,
+        regionId: relId ? `osm_rel_${relId}` : rev.osm_id ? `osm_nom_${rev.osm_id}` : `osm_grid_${quantizeChunkKey(lat, lng)}`,
+        relId,
         regionName: name,
-        adminLevel: '4',
+        adminLevel: '6',
         bbox,
+        boundaryGeoJson: simplifyGeoJsonBoundary(rev.geojson),
       };
     }
   } catch {
@@ -673,37 +880,163 @@ async function startServer() {
       return;
     }
 
-    // 1. Neighborhood box (~620m x 620m) for ~20-28m roads & railways
-    const dLat1 = 0.0028;
-    const dLng1 = 0.0036;
-    let raw = await fetchOsmBbox(lat - dLat1, lng - dLng1, lat + dLat1, lng + dLng1);
-    let payload = raw ? buildDenseRealOsmGraph(raw, chunkKey, lat, lng) : null;
+    let pending = inFlightChunks.get(chunkKey);
+    if (!pending) {
+      pending = (async () => {
+        // 1. Neighborhood box (~620m x 620m) for ~20-28m roads & railways
+        const dLat1 = 0.0028;
+        const dLng1 = 0.0036;
+        let raw = await fetchOsmBbox(lat - dLat1, lng - dLng1, lat + dLat1, lng + dLng1);
+        let payload = raw ? buildDenseRealOsmGraph(raw, chunkKey, lat, lng) : null;
 
-    // 2. Widen once (~1.0km) if sparse suburban/highway area
-    if (!payload || payload.osmEdges.length < 12) {
-      const dLat2 = 0.0045;
-      const dLng2 = 0.0058;
-      raw = await fetchOsmBbox(lat - dLat2, lng - dLng2, lat + dLat2, lng + dLng2);
-      if (raw) {
-        payload = buildDenseRealOsmGraph(raw, chunkKey, lat, lng);
-      }
+        // 2. Widen once (~1.0km) if sparse suburban/highway area
+        if (!payload || payload.osmEdges.length < 12) {
+          const dLat2 = 0.0045;
+          const dLng2 = 0.0058;
+          raw = await fetchOsmBbox(lat - dLat2, lng - dLng2, lat + dLat2, lng + dLng2);
+          if (raw) {
+            payload = buildDenseRealOsmGraph(raw, chunkKey, lat, lng);
+          }
+        }
+
+        // 3. Widen again (~2.4km) if rural / park / coastal center
+        if (!payload || payload.osmEdges.length < 6) {
+          const dLat3 = 0.011;
+          const dLng3 = 0.014;
+          raw = await fetchOsmBbox(lat - dLat3, lng - dLng3, lat + dLat3, lng + dLng3);
+          if (raw) {
+            payload = buildDenseRealOsmGraph(raw, chunkKey, lat, lng, {
+              clipLat: 0.012,
+              clipLng: 0.015,
+              maxEdgeMeters: 50,
+              targetSubdivMeters: 40,
+            });
+          }
+        }
+
+        if (payload && payload.osmEdges.length > 0) {
+          chunkCache.set(chunkKey, payload);
+          return payload;
+        }
+
+        // 4. Guaranteed starter grid fallback if all live OSM sources are unreachable/empty
+        // (intentionally NOT cached so live OSM can still be fetched on retry)
+        return buildFallbackStarterGrid(chunkKey, lat, lng);
+      })();
+      inFlightChunks.set(chunkKey, pending);
+      pending.finally(() => inFlightChunks.delete(chunkKey));
     }
 
-    if (!payload) {
-      res.status(502).json({
-        error: 'OpenStreetMap 도로 데이터를 일시적으로 불러오지 못했습니다.',
-        chunkKey,
-        osmNodes: [],
-        osmEdges: [],
-        usedLiveOverpass: false,
+    const result = await pending;
+    res.json(result);
+  });
+
+  const resolveRegionCached = async (
+    lat: number,
+    lng: number
+  ): Promise<ResolvedAdminRegion | null> => {
+    const key = quantizeChunkKey(lat, lng);
+    const cachedInfo = regionInfoCache.get(key);
+    if (cachedInfo) return cachedInfo;
+
+    let pendingInfo = inFlightRegionInfo.get(key);
+    if (!pendingInfo) {
+      pendingInfo = resolveOsmProvincialRegion(lat, lng).then((resolved) => {
+        if (resolved) {
+          regionInfoCache.set(key, resolved);
+        }
+        return resolved;
+      });
+      inFlightRegionInfo.set(key, pendingInfo);
+      pendingInfo.finally(() => inFlightRegionInfo.delete(key));
+    }
+    return pendingInfo;
+  };
+
+  app.get('/api/osm-region-info', async (req, res) => {
+    const lat = Number(req.query.lat);
+    const lng = Number(req.query.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      res.status(400).json({ error: 'Invalid lat/lng coordinates' });
+      return;
+    }
+    const chunkKey = quantizeChunkKey(lat, lng);
+    const region = await resolveRegionCached(lat, lng);
+    if (!region) {
+      res.json({
+        regionId: `osm_prov_${chunkKey}`,
+        regionName: '인접 광역 행정구역',
+        adminLevel: '4',
+        bbox: [lat - 0.08, lng - 0.1, lat + 0.08, lng + 0.1],
+        centerLat: lat,
+        centerLng: lng,
       });
       return;
     }
+    res.json({
+      regionId: region.regionId,
+      regionName: region.regionName,
+      adminLevel: region.adminLevel,
+      bbox: region.bbox,
+      boundaryGeoJson: region.boundaryGeoJson,
+      centerLat: (region.bbox[0] + region.bbox[2]) / 2,
+      centerLng: (region.bbox[1] + region.bbox[3]) / 2,
+    });
+  });
 
-    if (payload.osmEdges.length > 0) {
-      chunkCache.set(chunkKey, payload);
+  app.get('/api/osm-nearby-provinces', async (req, res) => {
+    const lat = Number(req.query.lat);
+    const lng = Number(req.query.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      res.status(400).json({ error: 'Invalid lat/lng coordinates' });
+      return;
     }
-    res.json(payload);
+
+    // Probe enclosing point plus 8 city-scale offsets (~11-18km out) to discover neighboring cities (시)
+    const probes: Array<[number, number]> = [
+      [lat, lng],
+      [lat + 0.11, lng],
+      [lat - 0.11, lng],
+      [lat, lng + 0.14],
+      [lat, lng - 0.14],
+      [lat + 0.09, lng + 0.11],
+      [lat + 0.09, lng - 0.11],
+      [lat - 0.09, lng + 0.11],
+      [lat - 0.09, lng - 0.11],
+    ];
+    const settled = await Promise.allSettled(
+      probes.map(([pLat, pLng]) => resolveRegionCached(pLat, pLng))
+    );
+    const byId = new Map<
+      string,
+      {
+        regionId: string;
+        regionName: string;
+        adminLevel: string;
+        bbox: [number, number, number, number];
+        boundaryGeoJson?: GeoJsonBoundaryDTO;
+        centerLat: number;
+        centerLng: number;
+      }
+    >();
+
+    settled.forEach((entry, idx) => {
+      if (entry.status !== 'fulfilled' || !entry.value) return;
+      const r = entry.value;
+      if (!byId.has(r.regionId)) {
+        byId.set(r.regionId, {
+          regionId: r.regionId,
+          regionName: r.regionName,
+          adminLevel: r.adminLevel,
+          bbox: r.bbox,
+          boundaryGeoJson: r.boundaryGeoJson,
+          centerLat: (r.bbox[0] + r.bbox[2]) / 2 || probes[idx][0],
+          centerLng: (r.bbox[1] + r.bbox[3]) / 2 || probes[idx][1],
+        });
+      }
+    });
+
+    res.json({ regions: Array.from(byId.values()) });
   });
 
   app.get('/api/osm-province', async (req, res) => {
@@ -715,10 +1048,10 @@ async function startServer() {
     }
 
     const chunkKey = quantizeChunkKey(lat, lng);
-    const region = await resolveOsmProvincialRegion(lat, lng);
+    const region = await resolveRegionCached(lat, lng);
     const regionId = region?.regionId || `osm_prov_${chunkKey}`;
-    const regionName = region?.regionName || '인접 광역 행정구역';
-    const adminLevel = region?.adminLevel || '4';
+    const regionName = region?.regionName || '인접 도시 행정구역';
+    const adminLevel = region?.adminLevel || '6';
 
     const cached = provinceCache.get(regionId);
     if (cached && cached.osmEdges.length > 0) {
@@ -726,103 +1059,131 @@ async function startServer() {
       return;
     }
 
-    const distBounds = clampBbox(
-      region?.districtBbox || [lat - 0.011, lng - 0.014, lat + 0.011, lng + 0.014],
-      lat,
-      lng,
-      0.012,
-      0.015
-    );
-    const provBounds = clampBbox(
-      region?.bbox || [lat - 0.06, lng - 0.08, lat + 0.06, lng + 0.08],
-      lat,
-      lng,
-      0.06,
-      0.08
-    );
+    let pending = inFlightProvinces.get(regionId);
+    if (!pending) {
+      pending = (async () => {
+        const distBounds = clampBbox(
+          region?.districtBbox || [lat - 0.012, lng - 0.015, lat + 0.012, lng + 0.015],
+          lat,
+          lng,
+          0.014,
+          0.018
+        );
+        const cityCenterLat = region ? (region.bbox[0] + region.bbox[2]) / 2 : lat;
+        const cityCenterLng = region ? (region.bbox[1] + region.bbox[3]) / 2 : lng;
+        const fullCityBounds = clampBbox(
+          region?.bbox || [lat - 0.09, lng - 0.11, lat + 0.09, lng + 0.11],
+          cityCenterLat,
+          cityCenterLng,
+          0.18,
+          0.24
+        );
 
-    const distBoxStr = `${distBounds[0].toFixed(6)},${distBounds[1].toFixed(6)},${distBounds[2].toFixed(6)},${distBounds[3].toFixed(6)}`;
-    const provBoxStr = `${provBounds[0].toFixed(6)},${provBounds[1].toFixed(6)},${provBounds[2].toFixed(6)},${provBounds[3].toFixed(6)}`;
+        const distBoxStr = `${distBounds[0].toFixed(6)},${distBounds[1].toFixed(6)},${distBounds[2].toFixed(6)},${distBounds[3].toFixed(6)}`;
+        const cityBoxStr = `${fullCityBounds[0].toFixed(6)},${fullCityBounds[1].toFixed(6)},${fullCityBounds[2].toFixed(6)},${fullCityBounds[3].toFixed(6)}`;
 
-    const [districtRaw, arterialRaw] = await Promise.allSettled([
-      fetchOverpassQuery(
-        `[out:json][timeout:6];(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street).*$"](${distBoxStr});way["railway"](${distBoxStr}););out body;>;out skel qt;`,
-        7500
-      ),
-      fetchOverpassQuery(
-        `[out:json][timeout:6];(way["highway"~"^(motorway|trunk|primary|secondary|tertiary).*$"](${provBoxStr});way["railway"~"^(rail|subway|light_rail|tram)$"](${provBoxStr}););out body;>;out skel qt;`,
-        7500
-      ),
-    ]);
+        // Query entire city area via OSM area ID when available, else full city bounding box
+        const fullCityFilter = region?.relId
+          ? `area(${3600000000 + region.relId})->.city;(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified).*$"](area.city);way["railway"~"^(rail|subway|light_rail|tram)$"](area.city););`
+          : `(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified).*$"](${cityBoxStr});way["railway"~"^(rail|subway|light_rail|tram)$"](${cityBoxStr}););`;
 
-    const mergedNodes = new Map<string, OsmNodeDTO>();
-    const mergedEdges = new Map<string, OsmEdgeDTO>();
-    let totalWayCount = 0;
+        const [districtRaw, cityWideRaw] = await Promise.allSettled([
+          fetchOverpassQuery(
+            `[out:json][timeout:6];(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street).*$"](${distBoxStr});way["railway"](${distBoxStr}););out body;>;out skel qt;`,
+            7500
+          ),
+          fetchOverpassQuery(
+            `[out:json][timeout:9];${fullCityFilter}out body;>;out skel qt;`,
+            9500
+          ),
+        ]);
 
-    if (districtRaw.status === 'fulfilled') {
-      const g = buildDenseRealOsmGraph(districtRaw.value, chunkKey, lat, lng, {
-        clipLat: 0.013,
-        clipLng: 0.016,
-        maxEdgeMeters: 30,
-        targetSubdivMeters: 25,
-        roadBudget: 1800,
-        railBudget: 450,
-        maxPerWay: 75,
-      });
-      totalWayCount += g.wayCount;
-      g.osmNodes.forEach((n) => mergedNodes.set(n.id, n));
-      g.osmEdges.forEach((e) => mergedEdges.set(e.id, e));
+        const mergedNodes = new Map<string, OsmNodeDTO>();
+        const mergedEdges = new Map<string, OsmEdgeDTO>();
+        let totalWayCount = 0;
+
+        if (districtRaw.status === 'fulfilled') {
+          const g = buildDenseRealOsmGraph(districtRaw.value, chunkKey, lat, lng, {
+            clipLat: 0.015,
+            clipLng: 0.019,
+            maxEdgeMeters: 30,
+            targetSubdivMeters: 25,
+            roadBudget: 1800,
+            railBudget: 450,
+            maxPerWay: 75,
+          });
+          totalWayCount += g.wayCount;
+          g.osmNodes.forEach((n) => mergedNodes.set(n.id, n));
+          g.osmEdges.forEach((e) => mergedEdges.set(e.id, e));
+        }
+
+        if (cityWideRaw.status === 'fulfilled') {
+          const halfLat = Math.max(0.12, (fullCityBounds[2] - fullCityBounds[0]) / 2 + 0.02);
+          const halfLng = Math.max(0.15, (fullCityBounds[3] - fullCityBounds[1]) / 2 + 0.02);
+          const g = buildDenseRealOsmGraph(cityWideRaw.value, chunkKey, cityCenterLat, cityCenterLng, {
+            clipLat: halfLat,
+            clipLng: halfLng,
+            maxEdgeMeters: 110,
+            targetSubdivMeters: 95,
+            roadBudget: 4200,
+            railBudget: 1100,
+            maxPerWay: 95,
+          });
+          totalWayCount += g.wayCount;
+          g.osmNodes.forEach((n) => {
+            const prev = mergedNodes.get(n.id);
+            if (!prev) mergedNodes.set(n.id, n);
+            else if (n.mode && prev.mode !== n.mode) prev.mode = 'mixed';
+          });
+          g.osmEdges.forEach((e) => {
+            if (!mergedEdges.has(e.id)) mergedEdges.set(e.id, e);
+          });
+        }
+
+        // Fallback to standard local OSM chunk if regional Overpass queries were rate-limited
+        if (mergedEdges.size === 0) {
+          const fallbackRaw = await fetchOsmBbox(lat - 0.005, lng - 0.006, lat + 0.005, lng + 0.006);
+          if (fallbackRaw) {
+            const g = buildDenseRealOsmGraph(fallbackRaw, chunkKey, lat, lng);
+            totalWayCount += g.wayCount;
+            g.osmNodes.forEach((n) => mergedNodes.set(n.id, n));
+            g.osmEdges.forEach((e) => mergedEdges.set(e.id, e));
+          }
+        }
+
+        const usedLiveOverpass = mergedEdges.size > 0;
+        if (mergedEdges.size === 0) {
+          const fb = buildFallbackStarterGrid(chunkKey, lat, lng);
+          totalWayCount += fb.wayCount;
+          fb.osmNodes.forEach((n) => mergedNodes.set(n.id, n));
+          fb.osmEdges.forEach((e) => mergedEdges.set(e.id, e));
+        }
+
+        const payload: ProvincePayload = {
+          regionId,
+          regionName,
+          adminLevel,
+          bbox: region?.bbox || fullCityBounds,
+          boundaryGeoJson: region?.boundaryGeoJson,
+          totalNodeCount: mergedNodes.size,
+          chunkKey,
+          osmNodes: Array.from(mergedNodes.values()),
+          osmEdges: Array.from(mergedEdges.values()),
+          usedLiveOverpass,
+          source: 'osm-0.6-api',
+          wayCount: totalWayCount,
+        };
+
+        if (usedLiveOverpass && payload.osmEdges.length > 0) {
+          provinceCache.set(regionId, payload);
+        }
+        return payload;
+      })();
+      inFlightProvinces.set(regionId, pending);
+      pending.finally(() => inFlightProvinces.delete(regionId));
     }
 
-    if (arterialRaw.status === 'fulfilled') {
-      const g = buildDenseRealOsmGraph(arterialRaw.value, chunkKey, lat, lng, {
-        clipLat: 0.065,
-        clipLng: 0.085,
-        maxEdgeMeters: 140,
-        targetSubdivMeters: 120,
-        roadBudget: 1800,
-        railBudget: 650,
-        maxPerWay: 90,
-      });
-      totalWayCount += g.wayCount;
-      g.osmNodes.forEach((n) => {
-        const prev = mergedNodes.get(n.id);
-        if (!prev) mergedNodes.set(n.id, n);
-        else if (n.mode && prev.mode !== n.mode) prev.mode = 'mixed';
-      });
-      g.osmEdges.forEach((e) => {
-        if (!mergedEdges.has(e.id)) mergedEdges.set(e.id, e);
-      });
-    }
-
-    // Fallback to standard local OSM chunk if regional Overpass queries were rate-limited
-    if (mergedEdges.size === 0) {
-      const fallbackRaw = await fetchOsmBbox(lat - 0.004, lng - 0.005, lat + 0.004, lng + 0.005);
-      if (fallbackRaw) {
-        const g = buildDenseRealOsmGraph(fallbackRaw, chunkKey, lat, lng);
-        totalWayCount += g.wayCount;
-        g.osmNodes.forEach((n) => mergedNodes.set(n.id, n));
-        g.osmEdges.forEach((e) => mergedEdges.set(e.id, e));
-      }
-    }
-
-    const payload: ProvincePayload = {
-      regionId,
-      regionName,
-      adminLevel,
-      bbox: provBounds,
-      chunkKey,
-      osmNodes: Array.from(mergedNodes.values()),
-      osmEdges: Array.from(mergedEdges.values()),
-      usedLiveOverpass: mergedEdges.size > 0,
-      source: 'osm-0.6-api',
-      wayCount: totalWayCount,
-    };
-
-    if (payload.osmEdges.length > 0) {
-      provinceCache.set(regionId, payload);
-    }
-    res.json(payload);
+    res.json(await pending);
   });
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));

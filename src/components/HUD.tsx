@@ -6,18 +6,20 @@ import {
   MousePointerClick,
   RotateCcw,
   Route,
-  SlidersHorizontal,
   TreeDeciduous,
   Volume2,
   VolumeX,
 } from 'lucide-react';
 import { GameState } from '../game/types';
-import { calculateClickReward, calculateTotalIncomePerSec } from '../game/rules';
+import {
+  calculateClickReward,
+  calculateTotalIncomePerSec,
+  getNodeTierRank,
+} from '../game/rules';
 import { getMinigameIncomeBoost } from '../game/minigames';
 
 export type ModalTab =
   | 'lines'
-  | 'upgrades'
   | 'skills'
   | 'achievements'
   | 'arcade'
@@ -47,6 +49,7 @@ export const HUD: React.FC<HUDProps> = ({
   const clickReward = calculateClickReward(gameState);
   const unlockedAchCount = gameState.achievements.filter((a) => a.unlocked).length;
   const mgBoost = getMinigameIncomeBoost(gameState.minigames);
+  const rank = getNodeTierRank(gameState.stats.connectedOsmNodes);
 
   const toggleTab = (tab: Exclude<ModalTab, null>) => {
     onSelectModal(activeModal === tab ? null : tab);
@@ -75,13 +78,10 @@ export const HUD: React.FC<HUDProps> = ({
           <div className="hidden sm:block w-px h-7 bg-slate-800 shrink-0" />
 
           <div className="hidden sm:flex flex-col shrink-0">
-            <span className="text-[11px] text-slate-400 font-medium">네트워크</span>
+            <span className="text-[11px] text-slate-400 font-medium">1:1 네트워크</span>
             <div className="flex items-baseline gap-1.5 font-mono-numbers">
-              <span className="text-sm md:text-base font-bold text-sky-400">
-                {gameState.stats.totalNetworkKm.toLocaleString()} km
-              </span>
-              <span className="hidden lg:inline text-[11px] text-slate-400">
-                (실측 {gameState.stats.mapped1to1Km.toLocaleString()} km)
+              <span className="text-sm md:text-base font-bold text-sky-400 tabular-nums">
+                {gameState.stats.mapped1to1Km.toLocaleString()} km
               </span>
             </div>
           </div>
@@ -93,11 +93,11 @@ export const HUD: React.FC<HUDProps> = ({
               연결 노드
             </span>
             <div className="flex items-baseline gap-1 font-mono-numbers">
-              <span className="text-xs sm:text-sm md:text-base font-bold text-indigo-300">
-                {gameState.stats.totalScaledNodes.toLocaleString()}
-              </span>
-              <span className="hidden md:inline text-[11px] text-slate-400">
-                (실측 {gameState.stats.connectedOsmNodes} / 4.5억)
+              <span
+                data-testid="hud-connected-nodes"
+                className="text-xs sm:text-sm md:text-base font-bold text-indigo-300 tabular-nums"
+              >
+                {gameState.stats.connectedOsmNodes.toLocaleString()}
               </span>
             </div>
           </div>
@@ -106,10 +106,14 @@ export const HUD: React.FC<HUDProps> = ({
 
           <div className="flex flex-col shrink-0">
             <span className="text-[10px] sm:text-[11px] text-slate-400 font-medium leading-tight">
-              SP
+              티어 등급
             </span>
-            <span className="text-xs sm:text-sm md:text-base font-bold font-mono-numbers text-amber-400">
-              {gameState.skillPoints} SP
+            <span
+              data-testid="hud-tier-rank"
+              className="text-xs sm:text-sm md:text-base font-bold font-mono-numbers whitespace-nowrap"
+              style={{ color: rank.color }}
+            >
+              {rank.label}
             </span>
           </div>
 
@@ -147,7 +151,7 @@ export const HUD: React.FC<HUDProps> = ({
         </div>
       </header>
 
-      {/* Mobile Dispatch Click Floating Button (auto-hides when bottom card or modal is open to avoid overlap) */}
+      {/* Mobile Dispatch Click Floating Button */}
       {!activeModal && !hasMapBottomCard && (
         <button
           data-testid="mobile-dispatch-fab"
@@ -159,11 +163,11 @@ export const HUD: React.FC<HUDProps> = ({
         </button>
       )}
 
-      {/* BOTTOM ACTION DOCK */}
+      {/* BOTTOM ACTION DOCK (5 tabs — upgrades merged into Study Tree) */}
       <footer className="fixed bottom-0 left-0 right-0 z-50 pointer-events-none px-1.5 sm:px-4 pt-2 pb-[calc(env(safe-area-inset-bottom)+8px)] sm:pb-3 flex justify-center">
         <nav
           aria-label="주요 메뉴"
-          className="pointer-events-auto w-full sm:w-auto grid grid-cols-6 sm:flex items-center gap-0.5 sm:gap-1.5 p-1 sm:p-1.5 bg-slate-950/95 border border-slate-800 rounded-2xl shadow-2xl"
+          className="pointer-events-auto w-full sm:w-auto grid grid-cols-5 sm:flex items-center gap-0.5 sm:gap-1.5 p-1 sm:p-1.5 bg-slate-950/95 border border-slate-800 rounded-2xl shadow-2xl"
         >
           <button
             data-testid="dock-lines"
@@ -180,31 +184,17 @@ export const HUD: React.FC<HUDProps> = ({
           </button>
 
           <button
-            data-testid="dock-upgrades"
-            onClick={() => toggleTab('upgrades')}
-            className={`min-h-[48px] sm:min-h-[38px] flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-1.5 px-1 sm:px-3 py-1 sm:py-2 rounded-xl text-[10px] sm:text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
-              activeModal === 'upgrades'
-                ? 'bg-emerald-600 text-white'
-                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <SlidersHorizontal className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span className="sm:hidden">강화</span>
-            <span className="hidden sm:inline">업그레이드</span>
-          </button>
-
-          <button
             data-testid="dock-skills"
             onClick={() => toggleTab('skills')}
             className={`min-h-[48px] sm:min-h-[38px] flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-1.5 px-1 sm:px-3 py-1 sm:py-2 rounded-xl text-[10px] sm:text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
               activeModal === 'skills'
-                ? 'bg-sky-600 text-white'
+                ? 'bg-emerald-600 text-white'
                 : 'text-slate-300 hover:bg-slate-800 hover:text-white'
             }`}
           >
             <TreeDeciduous className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span className="sm:hidden">스킬</span>
-            <span className="hidden sm:inline">스킬 트리</span>
+            <span className="sm:hidden">연구</span>
+            <span className="hidden sm:inline">연구 트리</span>
           </button>
 
           <button

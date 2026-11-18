@@ -10,8 +10,6 @@ interface AchievementsPanelProps {
 const CATEGORY_LABELS: Record<'all' | AchievementCategory, string> = {
   all: '전체',
   osm: 'OSM 노드',
-  line: '노선 완공',
-  town: '도시 마스터',
   scale: '네트워크 규모',
 };
 
@@ -43,7 +41,7 @@ export const AchievementsPanel: React.FC<AchievementsPanelProps> = ({
               <Award className="w-5 h-5 text-yellow-400 shrink-0" />
               <div className="min-w-0">
                 <h2 className="text-sm sm:text-lg font-bold text-white truncate">
-                  노선·도시 완성 업적
+                  네트워크 개척 업적
                 </h2>
                 <p className="text-xs text-slate-400">
                   달성 {unlockedList.length}/{gameState.achievements.length} · 누적 보너스{' '}

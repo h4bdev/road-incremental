@@ -347,6 +347,177 @@ export function chunkKeyForCoords(lat: number, lng: number): string {
 }
 
 /**
+ * Deterministic 1:1 coordinate local street & railway starter grid around (lat, lng).
+ * Used ONLY when live OSM endpoints fail, rate-limit, or return zero nearby ways,
+ * guaranteeing that players always have starting nodes to play from.
+ */
+export function buildStarterOsmFallback(
+  lat: number,
+  lng: number,
+  cityLabel = '도심'
+): {
+  chunkKey: string;
+  osmNodes: OsmNode[];
+  osmEdges: OsmEdge[];
+  usedLiveOverpass: boolean;
+} {
+  const chunkKey = chunkKeyForCoords(lat, lng);
+  const cosLat = Math.max(0.25, Math.cos((lat * Math.PI) / 180));
+  const dLatStep = 0.00024; // ~26.7m N-S
+  const dLngStep = 0.00024 / cosLat; // ~26.7m E-W
+
+  const osmNodes: OsmNode[] = [];
+  const osmEdges: OsmEdge[] = [];
+  const nodeMap = new Map<string, OsmNode>();
+
+  const ensureNode = (id: string, nLat: number, nLng: number, mode: 'road' | 'rail', label: string) => {
+    const prev = nodeMap.get(id);
+    if (!prev) {
+      const node: OsmNode = {
+        id,
+        lat: Number(nLat.toFixed(6)),
+        lng: Number(nLng.toFixed(6)),
+        connected: false,
+        mode,
+        label,
+      };
+      nodeMap.set(id, node);
+      osmNodes.push(node);
+    } else if (prev.mode !== mode && prev.mode !== 'mixed') {
+      prev.mode = 'mixed';
+    }
+  };
+
+  const addChain = (
+    prefix: string,
+    wayName: string,
+    highwayType: string,
+    mode: 'road' | 'rail',
+    pts: Array<{ key: string; r: number; c: number; label: string }>
+  ) => {
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      const nLat = lat + p.r * dLatStep;
+      const nLng = lng + p.c * dLngStep;
+      ensureNode(p.key, nLat, nLng, mode, p.label);
+
+      if (i > 0) {
+        const a = nodeMap.get(pts[i - 1].key)!;
+        const b = nodeMap.get(p.key)!;
+        const distKm = Math.max(0.015, haversineKm(a.lat, a.lng, b.lat, b.lng));
+        const tierMult = mode === 'rail' ? 1.8 : 1.35;
+        osmEdges.push({
+          id: `oe_${prefix}_${i}`,
+          wayName,
+          highwayType,
+          mode,
+          fromNodeId: a.id,
+          toNodeId: b.id,
+          coordinates: [
+            [a.lat, a.lng],
+            [b.lat, b.lng],
+          ],
+          distanceKm: distKm,
+          buildCost: Math.max(20, Math.round(28 * tierMult * (1 + distKm * 20))),
+          baseIncomePerSec: Math.round(1.6 * tierMult * (1 + distKm * 20) * 10) / 10,
+          built: false,
+        });
+      }
+    }
+  };
+
+  // Main East-West Avenue (passes through center 0,0)
+  addChain(
+    `fb_ew_${chunkKey}`,
+    `${cityLabel} 중앙대로`,
+    'primary',
+    'road',
+    Array.from({ length: 13 }, (_, i) => {
+      const c = i - 6;
+      return {
+        key: `fb_r_${chunkKey}_0_${c}`,
+        r: 0,
+        c,
+        label: c === 0 ? `${cityLabel} 중앙 교차로` : `${cityLabel} 중앙대로`,
+      };
+    })
+  );
+
+  // Main North-South Avenue (intersects at 0,0)
+  addChain(
+    `fb_ns_${chunkKey}`,
+    `${cityLabel} 시청로`,
+    'primary',
+    'road',
+    Array.from({ length: 13 }, (_, i) => {
+      const r = i - 6;
+      return {
+        key: `fb_r_${chunkKey}_${r}_0`,
+        r,
+        c: 0,
+        label: r === 0 ? `${cityLabel} 중앙 교차로` : `${cityLabel} 시청로`,
+      };
+    })
+  );
+
+  // Parallel Ring Street (North +3, South -3) & Cross Connectors (+3, -3)
+  addChain(
+    `fb_n3_${chunkKey}`,
+    `${cityLabel} 북부 순환로`,
+    'secondary',
+    'road',
+    Array.from({ length: 7 }, (_, i) => {
+      const c = i - 3;
+      return {
+        key: `fb_r_${chunkKey}_3_${c}`,
+        r: 3,
+        c,
+        label: c === 0 ? `${cityLabel} 북부 교차점` : `${cityLabel} 북부 순환로`,
+      };
+    })
+  );
+  addChain(
+    `fb_s3_${chunkKey}`,
+    `${cityLabel} 남부 순환로`,
+    'secondary',
+    'road',
+    Array.from({ length: 7 }, (_, i) => {
+      const c = i - 3;
+      return {
+        key: `fb_r_${chunkKey}_-3_${c}`,
+        r: -3,
+        c,
+        label: c === 0 ? `${cityLabel} 남부 교차점` : `${cityLabel} 남부 순환로`,
+      };
+    })
+  );
+
+  // Local Metro / Rail Line slightly offset south-west to avoid overlapping road centerline
+  addChain(
+    `fb_rail_${chunkKey}`,
+    `${cityLabel} 도심 도시철도`,
+    'subway',
+    'rail',
+    Array.from({ length: 11 }, (_, i) => {
+      const idx = i - 5;
+      return {
+        key: `fb_rail_${chunkKey}_${idx}`,
+        r: idx * 0.8 + 0.5,
+        c: idx * 0.55 - 0.8,
+        label: idx === 0 ? `${cityLabel} 중앙역` : `${cityLabel} 도심 도시철도`,
+      };
+    })
+  );
+
+  return {
+    chunkKey,
+    osmNodes,
+    osmEdges,
+    usedLiveOverpass: false,
+  };
+}
+
+/**
  * Fetch 100% REAL OpenStreetMap road & railway geometry via /api/osm-roads
  * (backed by official api.openstreetmap.org/api/0.6/map.json, subdivided to ~24m per node).
  */
@@ -363,7 +534,7 @@ export async function fetchOsmRoadChunk(
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 11000);
+    const timer = setTimeout(() => controller.abort(), 9500);
     const res = await fetch(
       `/api/osm-roads?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`,
       { signal: controller.signal }
@@ -387,7 +558,7 @@ export async function fetchOsmRoadChunk(
       }
     }
   } catch {
-    // Return empty chunk on network interruption rather than inventing fake roads
+    // Fall through to deterministic starter fallback below
   }
 
   return {
@@ -398,9 +569,69 @@ export async function fetchOsmRoadChunk(
   };
 }
 
+export interface ProvincialRegionMeta {
+  regionId: string;
+  regionName: string;
+  adminLevel: string;
+  bbox: [number, number, number, number];
+  boundaryGeoJson?: import('./types').GeoJsonBoundary;
+  centerLat: number;
+  centerLng: number;
+}
+
+export async function fetchProvincialRegionInfo(
+  lat: number,
+  lng: number
+): Promise<ProvincialRegionMeta | null> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    const res = await fetch(
+      `/api/osm-region-info?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const json = (await res.json()) as Partial<ProvincialRegionMeta>;
+    if (!json.regionId || !Array.isArray(json.bbox) || json.bbox.length !== 4) {
+      return null;
+    }
+    return {
+      regionId: json.regionId,
+      regionName: json.regionName || '도시 행정구역',
+      adminLevel: json.adminLevel || '6',
+      bbox: json.bbox as [number, number, number, number],
+      boundaryGeoJson: json.boundaryGeoJson,
+      centerLat: Number.isFinite(json.centerLat) ? Number(json.centerLat) : lat,
+      centerLng: Number.isFinite(json.centerLng) ? Number(json.centerLng) : lng,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchNearbyProvincialRegions(
+  lat: number,
+  lng: number
+): Promise<ProvincialRegionMeta[]> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 9000);
+    const res = await fetch(
+      `/api/osm-nearby-provinces?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timer);
+    if (!res.ok) return [];
+    const json = (await res.json()) as { regions?: ProvincialRegionMeta[] };
+    return Array.isArray(json.regions) ? json.regions : [];
+  } catch {
+    return [];
+  }
+}
+
 /**
- * Automatically fetch the enclosing OSM administrative provincial region's road & rail nodes
- * whenever the player owns >= 1 connected node inside that provincial region.
+ * Fetch an entire city's OSM road & rail nodes (when starting or unlocking a city).
  */
 export async function fetchOsmProvincialRegion(
   lat: number,
@@ -409,16 +640,25 @@ export async function fetchOsmProvincialRegion(
   regionId: string;
   regionName: string;
   adminLevel: string;
+  bbox: [number, number, number, number];
+  boundaryGeoJson?: import('./types').GeoJsonBoundary;
+  totalNodeCount: number;
   chunkKey: string;
   osmNodes: OsmNode[];
   osmEdges: OsmEdge[];
   usedLiveOverpass: boolean;
 }> {
   const chunkKey = chunkKeyForCoords(lat, lng);
+  const defaultBbox: [number, number, number, number] = [
+    lat - 0.075,
+    lng - 0.095,
+    lat + 0.075,
+    lng + 0.095,
+  ];
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
+    const timer = setTimeout(() => controller.abort(), 16000);
     const res = await fetch(
       `/api/osm-province?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`,
       { signal: controller.signal }
@@ -430,6 +670,9 @@ export async function fetchOsmProvincialRegion(
         regionId?: string;
         regionName?: string;
         adminLevel?: string;
+        bbox?: [number, number, number, number];
+        boundaryGeoJson?: import('./types').GeoJsonBoundary;
+        totalNodeCount?: number;
         chunkKey?: string;
         osmNodes?: OsmNode[];
         osmEdges?: OsmEdge[];
@@ -438,8 +681,14 @@ export async function fetchOsmProvincialRegion(
       if (Array.isArray(json.osmNodes) && Array.isArray(json.osmEdges)) {
         return {
           regionId: json.regionId || `osm_prov_${chunkKey}`,
-          regionName: json.regionName || '광역 행정구역',
-          adminLevel: json.adminLevel || '4',
+          regionName: json.regionName || '도시 행정구역',
+          adminLevel: json.adminLevel || '6',
+          bbox: Array.isArray(json.bbox) && json.bbox.length === 4 ? json.bbox : defaultBbox,
+          boundaryGeoJson: json.boundaryGeoJson,
+          totalNodeCount:
+            typeof json.totalNodeCount === 'number'
+              ? json.totalNodeCount
+              : json.osmNodes.length,
           chunkKey: json.chunkKey || chunkKey,
           osmNodes: json.osmNodes,
           osmEdges: json.osmEdges,
@@ -453,8 +702,10 @@ export async function fetchOsmProvincialRegion(
 
   return {
     regionId: `osm_prov_${chunkKey}`,
-    regionName: '광역 행정구역',
-    adminLevel: '4',
+    regionName: '도시 행정구역',
+    adminLevel: '6',
+    bbox: defaultBbox,
+    totalNodeCount: 0,
     chunkKey,
     osmNodes: [],
     osmEdges: [],

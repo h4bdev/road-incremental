@@ -67,6 +67,7 @@ export interface OsmNode {
   connected: boolean;
   mode?: TransportMode | 'mixed';
   label?: string;
+  regionId?: string;
 }
 
 export interface OsmEdge {
@@ -81,6 +82,27 @@ export interface OsmEdge {
   buildCost: number;
   baseIncomePerSec: number;
   built: boolean;
+  regionId?: string;
+}
+
+export interface GeoJsonBoundary {
+  type: 'Polygon' | 'MultiPolygon';
+  coordinates: number[][][] | number[][][][];
+}
+
+export interface ProvincialRegion {
+  regionId: string;
+  regionName: string;
+  adminLevel: string;
+  bbox: [number, number, number, number]; // [minLat, minLng, maxLat, maxLng]
+  boundaryGeoJson?: GeoJsonBoundary;
+  centerLat: number;
+  centerLng: number;
+  unlocked: boolean;
+  isStartingRegion?: boolean;
+  isIsolated: boolean; // true = island or non-adjacent region requiring manual seed pick
+  isKnownIsland?: boolean;
+  totalNodeCount?: number;
 }
 
 export type UpgradeCategory = 'road_node' | 'rail_speed' | 'editor_click' | 'automation' | 'megascale';
@@ -106,29 +128,32 @@ export type TreeRole = 'root' | 'trunk' | 'branch' | 'canopy';
 
 export interface SkillNode {
   id: string;
+  code?: string; // Antimatter Dimensions style study code e.g. '11', '61', '111'
   branch: SkillBranch;
   role: TreeRole;
   name: string;
   description: string;
   effectText: string;
-  costSP: number;
+  costSP: number; // Legacy field kept as 0; studies unlock with Money ($) only
   costMoney: number;
+  costGrowth?: number;
   level: number;
   maxLevel: number;
   requires: string[];
+  exclusiveGroup?: string; // Mutually exclusive path split until multi-path study is unlocked
   tier: number;
   x: number; // Canvas coordinate (0..1600)
-  y: number; // Canvas coordinate (0..1100)
+  y: number; // Canvas coordinate (0..2200)
 }
 
-export type AchievementCategory = 'line' | 'town' | 'scale' | 'osm';
+export type AchievementCategory = 'scale' | 'osm';
 
 export interface Achievement {
   id: string;
   title: string;
   description: string;
   category: AchievementCategory;
-  targetType: 'line_complete' | 'town_complete' | 'total_km' | 'osm_nodes';
+  targetType: 'total_km' | 'osm_nodes';
   targetId?: string;
   targetValue?: number;
   unlocked: boolean;
@@ -151,7 +176,7 @@ export interface GameStats {
   totalSegmentsBuilt: number;
   totalOsmEdgesBuilt: number;
   connectedOsmNodes: number;
-  totalScaledNodes: number; // Global scale toward 450,000,000+ OSM nodes
+  totalScaledNodes: number;
   totalLinesCompleted: number;
   totalTownsCompleted: number;
   totalClicks: number;
@@ -165,9 +190,16 @@ export interface GameSettings {
   mapTileLayer: 'dark' | 'osm' | 'satellite';
 }
 
-export type MinigameId = 'mine' | 'reactor' | 'shipyard' | 'quantum';
+export type MinigameId =
+  | 'mine'
+  | 'reactor'
+  | 'shipyard'
+  | 'quantum'
+  | 'solar'
+  | 'bio'
+  | 'collider';
 
-export type ReactorCellType = 'empty' | 'fuel' | 'generator' | 'coolant';
+export type ReactorCellType = 'empty' | 'fuel' | 'generator' | 'coolant' | 'turbine';
 
 export interface MineGameState {
   ore: number;
@@ -181,6 +213,9 @@ export interface MineGameState {
   autoDrillerLevel: number;
   laserLevel: number;
   blastLevel: number;
+  excavatorLevel: number;
+  seismicLevel: number;
+  seismicCharge: number; // 0..100 active mega-blast meter
 }
 
 export interface ReactorGameState {
@@ -189,10 +224,12 @@ export interface ReactorGameState {
   totalEnergyMWh: number;
   heat: number;
   overheated: boolean;
-  grid: ReactorCellType[]; // 9 cells (3x3)
+  grid: ReactorCellType[]; // 16 cells (4x4)
   coreEfficiencyLevel: number;
   coolantTechLevel: number;
   autoVentUnlocked: boolean;
+  turbineTechLevel: number;
+  overclockShieldLevel: number;
 }
 
 export interface ShipyardGameState {
@@ -204,6 +241,8 @@ export interface ShipyardGameState {
   droneCount: number;
   refineryCount: number;
   freighterCount: number;
+  orbitalHubCount: number;
+  warpDriveLevel: number;
   fleetPrestigeLevel: number;
   fleetMultiplier: number;
 }
@@ -219,6 +258,53 @@ export interface QuantumGameState {
   acceleratorLevel: number;
   amplifierLevel: number;
   entanglementLevel: number;
+  cryoLevel: number;
+  autoTunerUnlocked: boolean;
+  leapCount: number;
+  leapMultiplier: number;
+}
+
+export interface SolarGameState {
+  photons: number;
+  totalPhotonsEarned: number;
+  totalPowerGW: number;
+  orbitalAngle: number; // 1..10
+  optimalAngle: number; // 1..10
+  pulseCharge: number; // 0..100
+  mirrorCount: number;
+  collectorCount: number;
+  trackerLevel: number;
+  solarFlareLevel: number;
+  concentratorLevel: number;
+  autoTrackerUnlocked: boolean;
+}
+
+export interface BioGameState {
+  spores: number;
+  totalSporesEarned: number;
+  totalBiomass: number;
+  humidity: number; // 0..100 (optimal 45..75)
+  algaeCount: number;
+  forestCount: number;
+  biosphereCount: number;
+  enzymeLevel: number;
+  climateRegLevel: number;
+  evolutionLevel: number;
+  evolutionMultiplier: number;
+}
+
+export interface ColliderGameState {
+  beamCurrency: number;
+  totalBeamEarned: number;
+  totalCollisions: number;
+  luminosity: number; // 0..100 charge
+  exoticParticles: number;
+  magnetLevel: number;
+  vacuumLevel: number;
+  detectorLevel: number;
+  superCoilLevel: number;
+  injectorLevel: number;
+  resonanceBurstLevel: number;
 }
 
 export interface MinigameMilestoneDef {
@@ -235,10 +321,14 @@ export interface MinigameMilestoneDef {
 export interface MinigamesState {
   totalMoneyInvested: number;
   unlockedMilestoneIds: string[];
+  unlockedGameIds: MinigameId[];
   mine: MineGameState;
   reactor: ReactorGameState;
   shipyard: ShipyardGameState;
   quantum: QuantumGameState;
+  solar: SolarGameState;
+  bio: BioGameState;
+  collider: ColliderGameState;
 }
 
 export interface GameState {
@@ -254,6 +344,8 @@ export interface GameState {
   osmEdges: OsmEdge[];
   loadedOsmChunks: string[];
   loadedOsmRegions?: string[];
+  provincialRegions: ProvincialRegion[];
+  pendingSeedRegionIds: string[];
   completedOsmWays?: string[];
   upgrades: UpgradeItem[];
   skills: SkillNode[];
@@ -265,4 +357,3 @@ export interface GameState {
   lastTickTimestamp: number;
   minigames: MinigamesState;
 }
-

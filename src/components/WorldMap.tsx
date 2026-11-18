@@ -10,25 +10,40 @@ import {
   GitCommitHorizontal,
   Globe,
   Layers,
+  Loader2,
+  Lock,
+  MapPin,
+  RefreshCw,
+  Unlock,
   X,
 } from 'lucide-react';
-import { GameState } from '../game/types';
+import { GameState, ProvincialRegion } from '../game/types';
 import {
   calculateMultipliers,
   computeOsmFrontierDistancesForState,
   findOsmRoadPath,
+  getExpandableProvincialRegions,
   getFrontierEdgeOpacity,
   getFrontierVisualStyle,
   getOsmEdgeBuildCost,
   getReachableOsmNodeSet,
+  getRegionUnlockCost,
+  isNodeInUnlockedRegion,
   resolveCompatibleOsmMode,
+  resolveProximityBridgeInfo,
 } from '../game/rules';
 import { haversineKm } from '../game/osmService';
 
 interface WorldMapProps {
   gameState: GameState;
   flyToTarget: { lat: number; lng: number; zoom: number; ts: number } | null;
+  isLoadingOsm?: boolean;
+  onReloadOsm?: () => void;
   onConnectOsmPath: (fromId: string, toId: string) => void;
+  onSelectIsolatedSeed?: (nodeId: string) => void;
+  onUnlockRegion?: (regionId: string) => void;
+  unlockingRegionId?: string | null;
+  onOpenExpansionTab?: () => void;
   onBottomCardChange?: (open: boolean) => void;
 }
 
@@ -56,21 +71,69 @@ function escapeHtml(value: string): string {
     .replace(/"/g, '&quot;');
 }
 
+function buildRegionPolygonGeometry(
+  region: ProvincialRegion
+): { type: 'Polygon' | 'MultiPolygon'; coordinates: number[][][] | number[][][][] } {
+  if (region.boundaryGeoJson && region.boundaryGeoJson.coordinates.length > 0) {
+    return region.boundaryGeoJson;
+  }
+  const [minLat, minLng, maxLat, maxLng] = region.bbox;
+  return {
+    type: 'Polygon',
+    coordinates: [
+      [
+        [minLng, minLat],
+        [maxLng, minLat],
+        [maxLng, maxLat],
+        [minLng, maxLat],
+        [minLng, minLat],
+      ],
+    ],
+  };
+}
+
+function getSafeRegionLabelAnchor(
+  region: ProvincialRegion,
+  unlockedRegions: ProvincialRegion[]
+): [number, number] {
+  let lat = region.centerLat;
+  let lng = region.centerLng;
+  const insideUnlocked = unlockedRegions.find(
+    (u) => lat >= u.bbox[0] && lat <= u.bbox[2] && lng >= u.bbox[1] && lng <= u.bbox[3]
+  );
+  if (insideUnlocked) {
+    // Nudge south or north into the expandable rim of region.bbox
+    if (insideUnlocked.bbox[0] - region.bbox[0] > 0.05) {
+      lat = (region.bbox[0] + insideUnlocked.bbox[0]) / 2;
+    } else if (region.bbox[2] - insideUnlocked.bbox[2] > 0.05) {
+      lat = (insideUnlocked.bbox[2] + region.bbox[2]) / 2;
+    }
+  }
+  return [lng, lat];
+}
+
 export const WorldMap: React.FC<WorldMapProps> = ({
   gameState,
   flyToTarget,
+  isLoadingOsm = false,
+  onReloadOsm,
   onConnectOsmPath,
+  onSelectIsolatedSeed,
+  onUnlockRegion,
+  unlockingRegionId = null,
+  onOpenExpansionTab,
   onBottomCardChange,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<maplibregl.Map | null>(null);
   const styleReadyRef = useRef(false);
   const popupRef = useRef<maplibregl.Popup | null>(null);
+  const regionMarkersRef = useRef<maplibregl.Marker[]>([]);
 
+  const regionsGeoJsonRef = useRef<GeoJsonData>(EMPTY_FC);
   const edgesGeoJsonRef = useRef<GeoJsonData>(EMPTY_FC);
   const previewGeoJsonRef = useRef<GeoJsonData>(EMPTY_FC);
   const nodesGeoJsonRef = useRef<GeoJsonData>(EMPTY_FC);
-  const unitsGeoJsonRef = useRef<GeoJsonData>(EMPTY_FC);
 
   const [tileType, setTileType] = useState<'dark' | 'osm' | 'satellite'>('dark');
   const tileTypeRef = useRef<'dark' | 'osm' | 'satellite'>('dark');
@@ -79,6 +142,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
   const [mobileRegionsOpen, setMobileRegionsOpen] = useState(false);
   const [selectedOsmNodeId, setSelectedOsmNodeId] = useState<string | null>(null);
   const [hoverOsmNodeId, setHoverOsmNodeId] = useState<string | null>(null);
+  const [selectedExpandableRegionId, setSelectedExpandableRegionId] = useState<string | null>(null);
 
   const selectedOsmNodeIdRef = useRef<string | null>(null);
   selectedOsmNodeIdRef.current = selectedOsmNodeId;
@@ -96,14 +160,29 @@ export const WorldMap: React.FC<WorldMapProps> = ({
 
   const callbacksRef = useRef({
     onConnectOsmPath,
+    onSelectIsolatedSeed,
+    onUnlockRegion,
   });
   callbacksRef.current = {
     onConnectOsmPath,
+    onSelectIsolatedSeed,
+    onUnlockRegion,
   };
 
+  const pendingSeedCount = (gameState.pendingSeedRegionIds || []).length;
+  const prevPendingCountRef = useRef(pendingSeedCount);
   useEffect(() => {
-    onBottomCardChange?.(Boolean(selectedOsmNodeId));
-  }, [selectedOsmNodeId, onBottomCardChange]);
+    if (pendingSeedCount > prevPendingCountRef.current) {
+      setSelectedOsmNodeId(null);
+      setHoverOsmNodeId(null);
+      popupRef.current?.remove();
+    }
+    prevPendingCountRef.current = pendingSeedCount;
+  }, [pendingSeedCount]);
+
+  useEffect(() => {
+    onBottomCardChange?.(Boolean(selectedOsmNodeId) || pendingSeedCount > 0);
+  }, [selectedOsmNodeId, pendingSeedCount, onBottomCardChange]);
 
   const applyTileVisibility = (map: maplibregl.Map, active: 'dark' | 'osm' | 'satellite') => {
     const layers: Array<{ id: string; key: 'dark' | 'osm' | 'satellite' }> = [
@@ -120,7 +199,8 @@ export const WorldMap: React.FC<WorldMapProps> = ({
 
   const syncSourceData = (sourceId: string, data: GeoJsonData) => {
     const map = mapInstanceRef.current;
-    if (!map || !styleReadyRef.current) return;
+    if (!map) return;
+    if (!styleReadyRef.current && !map.isStyleLoaded()) return;
     const src = map.getSource(sourceId) as maplibregl.GeoJSONSource | undefined;
     if (src) {
       src.setData(data);
@@ -145,7 +225,6 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       attributionControl: { compact: true },
       canvasContextAttributes: {
         antialias: true,
-        contextType: 'webgl2',
       },
       style: {
         version: 8,
@@ -182,6 +261,10 @@ export const WorldMap: React.FC<WorldMapProps> = ({
             maxzoom: 18,
             attribution: 'Tiles &copy; Esri World Imagery',
           },
+          'regions-overlay': {
+            type: 'geojson',
+            data: EMPTY_FC,
+          },
           'osm-edges': {
             type: 'geojson',
             data: EMPTY_FC,
@@ -191,10 +274,6 @@ export const WorldMap: React.FC<WorldMapProps> = ({
             data: EMPTY_FC,
           },
           'osm-nodes': {
-            type: 'geojson',
-            data: EMPTY_FC,
-          },
-          'osm-units': {
             type: 'geojson',
             data: EMPTY_FC,
           },
@@ -220,6 +299,35 @@ export const WorldMap: React.FC<WorldMapProps> = ({
             source: 'tile-satellite',
             layout: { visibility: 'none' },
             paint: { 'raster-fade-duration': 150 },
+          },
+          {
+            id: 'regions-expandable-fill',
+            type: 'fill',
+            source: 'regions-overlay',
+            filter: ['==', ['get', 'kind'], 'expandable'],
+            paint: {
+              'fill-color': ['case', ['get', 'canAfford'], '#38bdf8', '#f59e0b'],
+              'fill-opacity': [
+                'case',
+                ['get', 'selected'],
+                0.18,
+                ['get', 'canAfford'],
+                0.11,
+                0.06,
+              ],
+            },
+          },
+          {
+            id: 'regions-expandable-line',
+            type: 'line',
+            source: 'regions-overlay',
+            filter: ['==', ['get', 'kind'], 'expandable'],
+            paint: {
+              'line-color': ['case', ['get', 'canAfford'], '#38bdf8', '#f59e0b'],
+              'line-width': ['case', ['get', 'selected'], 2.8, 2.0],
+              'line-opacity': 0.85,
+              'line-dasharray': [4, 3],
+            },
           },
           {
             id: 'osm-edges-unbuilt-road',
@@ -325,18 +433,6 @@ export const WorldMap: React.FC<WorldMapProps> = ({
               'circle-pitch-alignment': 'viewport',
             },
           },
-          {
-            id: 'osm-units-circle',
-            type: 'circle',
-            source: 'osm-units',
-            paint: {
-              'circle-radius': ['get', 'radius'],
-              'circle-color': ['get', 'color'],
-              'circle-stroke-color': '#ffffff',
-              'circle-stroke-width': 1.5,
-              'circle-pitch-alignment': 'viewport',
-            },
-          },
         ],
       },
     });
@@ -387,24 +483,28 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       const label = escapeHtml(String(props.label || 'OSM 노드'));
       const connected = Boolean(props.connected);
       const frontierDist = Number(props.frontierDist || 0);
+      const isPendingSeed = Boolean(props.isPendingSeed);
       const isSelected = Boolean(props.isSelected);
       const isCompatible = Boolean(props.isCompatible);
       const isReachable = Boolean(props.isReachable);
       const activeAnchor = selectedOsmNodeIdRef.current;
 
-      const modeBadge =
-        mode === 'mixed'
-          ? '<span style="color:#c084fc;font-weight:700;">[도로·철도 환승]</span>'
-          : mode === 'rail'
-          ? '<span style="color:#22d3ee;font-weight:700;">[철도 노드]</span>'
-          : '<span style="color:#fbbf24;font-weight:700;">[도로 노드]</span>';
+      const modeBadge = isPendingSeed
+        ? '<span style="color:#f59e0b;font-weight:700;">[새 지역 출발 교차점]</span>'
+        : mode === 'mixed'
+        ? '<span style="color:#c084fc;font-weight:700;">[도로·철도 환승]</span>'
+        : mode === 'rail'
+        ? '<span style="color:#22d3ee;font-weight:700;">[철도 노드]</span>'
+        : '<span style="color:#fbbf24;font-weight:700;">[도로 노드]</span>';
 
       const distTag =
-        !connected && frontierDist > 0
+        !connected && !isPendingSeed && frontierDist > 0
           ? ` <span style="color:#94a3b8;">(개척 거리 d=${frontierDist})</span>`
           : '';
 
-      const hint = isSelected
+      const hint = isPendingSeed
+        ? '클릭하여 이 고립 지역의 시작 교차점으로 지정하세요'
+        : isSelected
         ? '시점 노드 선택됨 · 목표 노드를 클릭해 연속 연결'
         : activeAnchor && !isCompatible
         ? '<span style="color:#fb7185;font-weight:700;">도로 ↔ 철도 연결 불가</span> (같은 유형 노드를 선택하세요)'
@@ -425,11 +525,14 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       }
     };
 
-    map.on('style.load', () => {
+    const syncAllSources = () => {
       styleReadyRef.current = true;
       map.setProjection({ type: 'globe' });
       applyTileVisibility(map, tileTypeRef.current);
       syncGlobeOverviewAttr();
+
+      const regionsSrc = map.getSource('regions-overlay') as maplibregl.GeoJSONSource | undefined;
+      regionsSrc?.setData(regionsGeoJsonRef.current);
 
       const edgesSrc = map.getSource('osm-edges') as maplibregl.GeoJSONSource | undefined;
       edgesSrc?.setData(edgesGeoJsonRef.current);
@@ -439,10 +542,12 @@ export const WorldMap: React.FC<WorldMapProps> = ({
 
       const nodesSrc = map.getSource('osm-nodes') as maplibregl.GeoJSONSource | undefined;
       nodesSrc?.setData(nodesGeoJsonRef.current);
+    };
 
-      const unitsSrc = map.getSource('osm-units') as maplibregl.GeoJSONSource | undefined;
-      unitsSrc?.setData(unitsGeoJsonRef.current);
-    });
+    map.on('style.load', syncAllSources);
+    if (map.isStyleLoaded()) {
+      syncAllSources();
+    }
 
     map.on('zoom', syncGlobeOverviewAttr);
 
@@ -479,9 +584,30 @@ export const WorldMap: React.FC<WorldMapProps> = ({
 
     map.on('click', (ev) => {
       const hit = queryNearestOsmNode(ev.point);
-      if (!hit || !hit.properties) return;
-      const nodeId = String((hit.properties as Record<string, unknown>).id || '');
+      if (!hit || !hit.properties) {
+        // Allow clicking an expandable region polygon on the map to focus/select it
+        if (!selectedOsmNodeIdRef.current && map.getLayer('regions-expandable-fill')) {
+          const regFeats = map.queryRenderedFeatures(ev.point, {
+            layers: ['regions-expandable-fill'],
+          });
+          if (regFeats.length > 0) {
+            const rid = String(regFeats[0].properties?.regionId || '');
+            if (rid) {
+              setSelectedExpandableRegionId(rid);
+            }
+          }
+        }
+        return;
+      }
+      const hitProps = hit.properties as Record<string, unknown>;
+      const nodeId = String(hitProps.id || '');
       if (!nodeId) return;
+
+      if (Boolean(hitProps.isPendingSeed)) {
+        callbacksRef.current.onSelectIsolatedSeed?.(nodeId);
+        setSelectedOsmNodeId(nodeId);
+        return;
+      }
 
       const currentStart = selectedOsmNodeIdRef.current;
       if (!currentStart) {
@@ -515,6 +641,8 @@ export const WorldMap: React.FC<WorldMapProps> = ({
 
     return () => {
       styleReadyRef.current = false;
+      regionMarkersRef.current.forEach((m) => m.remove());
+      regionMarkersRef.current = [];
       popup.remove();
       map.remove();
       mapInstanceRef.current = null;
@@ -555,37 +683,66 @@ export const WorldMap: React.FC<WorldMapProps> = ({
 
   const multsForKey = calculateMultipliers(gameState);
 
-  const affordableOsmKey = (gameState.osmEdges || [])
-    .map(
-      (e) =>
-        `${e.id}:${
-          e.built
-            ? 'b'
-            : gameState.capital >= getOsmEdgeBuildCost(e, multsForKey)
-            ? '1'
-            : '0'
-        }`
-    )
-    .join('|');
+  const affordableOsmKey = `${(gameState.osmEdges || []).length}:${gameState.stats.totalOsmEdgesBuilt}:${Math.floor(
+    gameState.capital
+  )}:${multsForKey.buildCostMult.toFixed(4)}`;
 
-  const connectedOsmNodeKey = (gameState.osmNodes || [])
-    .map((n) => `${n.id}:${n.connected ? '1' : '0'}`)
-    .join('|');
+  const connectedOsmNodeKey = useMemo(
+    () =>
+      (gameState.osmNodes || [])
+        .filter((n) => n.connected)
+        .map((n) => n.id)
+        .join('|'),
+    [gameState.osmNodes]
+  );
 
-  const unbuiltEdgeSignature = (gameState.osmEdges || [])
-    .filter((e) => !e.built)
-    .map((e) => e.id)
-    .join('|');
+  const edgeTopologyKey = `${(gameState.osmEdges || []).length}:${gameState.stats.totalOsmEdgesBuilt}`;
 
   const frontierDistances = useMemo(
     () => computeOsmFrontierDistancesForState(gameState),
-    [connectedOsmNodeKey, unbuiltEdgeSignature, gameState.skills]
+    [
+      connectedOsmNodeKey,
+      edgeTopologyKey,
+      gameState.skills,
+      gameState.provincialRegions,
+      gameState.pendingSeedRegionIds,
+    ]
   );
+
+  // Auto-center on primary starting seed node if it is > 0.25km away from city center
+  const centeredSeedCityRef = useRef<string | null>(null);
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map || gameState.stats.totalOsmEdgesBuilt > 0) return;
+    if (centeredSeedCityRef.current === gameState.startingCity.id) return;
+    const seedNode = (gameState.osmNodes || []).find((n) => n.connected);
+    if (!seedNode) return;
+    centeredSeedCityRef.current = gameState.startingCity.id;
+    const distKm = haversineKm(
+      gameState.startingCity.lat,
+      gameState.startingCity.lng,
+      seedNode.lat,
+      seedNode.lng
+    );
+    if (distKm > 0.25) {
+      map.easeTo({
+        center: [seedNode.lng, seedNode.lat],
+        zoom: toGlobeZoom(Math.max(gameState.startingCity.zoom || 12, 16)),
+        duration: 700,
+      });
+    }
+  }, [gameState.startingCity.id, gameState.osmNodes.length, gameState.stats.totalOsmEdgesBuilt]);
 
   const reachableOsmNodeSet = useMemo(() => {
     if (!selectedOsmNodeId) return null;
     return getReachableOsmNodeSet(gameState, selectedOsmNodeId);
-  }, [selectedOsmNodeId, gameState.osmEdges, gameState.osmNodes, gameState.skills]);
+  }, [
+    selectedOsmNodeId,
+    gameState.osmEdges,
+    gameState.osmNodes,
+    gameState.skills,
+    gameState.provincialRegions,
+  ]);
 
   const reachableOsmNodeSetRef = useRef<Set<string> | null>(null);
   reachableOsmNodeSetRef.current = reachableOsmNodeSet;
@@ -609,6 +766,24 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     const compat = resolveCompatibleOsmMode(gameState, selectedOsmNodeId, hoverOsmNodeId);
     if (!compat) return null;
 
+    const nA = (gameState.osmNodes || []).find((n) => n.id === selectedOsmNodeId);
+    const nB = (gameState.osmNodes || []).find((n) => n.id === hoverOsmNodeId);
+    if (!nA || !nB) return null;
+
+    const bridgeInfo = resolveProximityBridgeInfo(gameState, selectedOsmNodeId, hoverOsmNodeId);
+    if (bridgeInfo) {
+      const m = calculateMultipliers(gameState);
+      const rawCost = Math.max(20, Math.round(35 * (1 + bridgeInfo.distKm * 6) * m.buildCostMult));
+      return {
+        kind: bridgeInfo.kind,
+        fromCoords: [nA.lat, nA.lng] as [number, number],
+        toCoords: [nB.lat, nB.lng] as [number, number],
+        unbuiltCount: 1,
+        meters: Math.max(1, Math.round(bridgeInfo.distKm * 1000)),
+        cost: rawCost,
+      };
+    }
+
     // Never preview a fake bridge across two separate 2-lane road/rail ways
     if (compat !== 'transfer') {
       const edges = gameState.osmEdges || [];
@@ -623,9 +798,6 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       }
     }
 
-    const nA = (gameState.osmNodes || []).find((n) => n.id === selectedOsmNodeId);
-    const nB = (gameState.osmNodes || []).find((n) => n.id === hoverOsmNodeId);
-    if (!nA || !nB) return null;
     const distKm = haversineKm(nA.lat, nA.lng, nB.lat, nB.lng);
     const maxDist = compat === 'transfer' ? 0.035 : 0.15;
     if (distKm <= maxDist) {
@@ -673,6 +845,8 @@ export const WorldMap: React.FC<WorldMapProps> = ({
           ? '#f43f5e'
           : previewResult.kind === 'transfer'
           ? '#c084fc'
+          : previewResult.kind === 'isolated_route'
+          ? '#34d399'
           : '#38bdf8';
         features.push({
           type: 'Feature',
@@ -693,15 +867,32 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     syncSourceData('osm-preview', fc);
   }, [previewResult, gameState.capital, gameState.osmEdges]);
 
-  // Update Atomic OpenStreetMap Street/Rail Edges GeoJSON (fog-of-war: hide unbuilt edges beyond d=5)
+  // Update Atomic OpenStreetMap Street/Rail Edges GeoJSON (fog-of-war: hide unbuilt edges beyond d=5 & locked regions)
   useEffect(() => {
     const mults = calculateMultipliers(gameState);
     const hasAnyConnected = (gameState.osmNodes || []).some((n) => n.connected);
+    const nodeMap = new Map((gameState.osmNodes || []).map((n) => [n.id, n]));
+    const pendingSeedSet = new Set(gameState.pendingSeedRegionIds || []);
     const features: Array<Record<string, unknown>> = [];
 
     (gameState.osmEdges || []).forEach((edge) => {
       if (edge.coordinates.length < 2) return;
-      if (!edge.built && hasAnyConnected) {
+      const nFrom = nodeMap.get(edge.fromNodeId);
+      const nTo = nodeMap.get(edge.toNodeId);
+      if (
+        !nFrom ||
+        !nTo ||
+        !isNodeInUnlockedRegion(gameState, nFrom) ||
+        !isNodeInUnlockedRegion(gameState, nTo)
+      ) {
+        return;
+      }
+
+      const inPendingRegion =
+        (nFrom.regionId && pendingSeedSet.has(nFrom.regionId)) ||
+        (nTo.regionId && pendingSeedSet.has(nTo.regionId));
+
+      if (!edge.built && hasAnyConnected && !inPendingRegion) {
         const dFrom = frontierDistances.get(edge.fromNodeId);
         const dTo = frontierDistances.get(edge.toNodeId);
         if (dFrom === undefined || dTo === undefined) {
@@ -735,7 +926,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
           built: edge.built,
           mode: edge.mode,
           canAfford: gameState.capital >= cost,
-          edgeOpacity: 0.92,
+          edgeOpacity: inPendingRegion ? 0.55 : 0.92,
         },
         geometry: {
           type: 'LineString',
@@ -754,23 +945,43 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     gameState.skills,
     gameState.upgrades,
     gameState.achievements,
+    gameState.provincialRegions,
+    gameState.pendingSeedRegionIds,
   ]);
 
-  // Update Atomic OpenStreetMap Nodes GeoJSON (only render frontier 1 <= d <= 5 with decreasing brightness)
+  // Update Atomic OpenStreetMap Nodes GeoJSON (only render frontier 1 <= d <= 5 + pending isolated seed candidates)
   useEffect(() => {
     const derivedModeMap = new Map<string, 'road' | 'rail' | 'mixed'>();
     const nodesWithFrontierUnbuiltEdge = new Set<string>();
+    const nodesWithBuiltEdge = new Set<string>();
     const hasAnyConnected = (gameState.osmNodes || []).some((n) => n.connected);
+    const pendingSeedSet = new Set(gameState.pendingSeedRegionIds || []);
+    const pendingRegionList = (gameState.provincialRegions || []).filter((r) =>
+      pendingSeedSet.has(r.regionId)
+    );
+
+    const isPendingSeedNode = (n: { regionId?: string; lat: number; lng: number; connected: boolean }) => {
+      if (n.connected || pendingSeedSet.size === 0) return false;
+      if (n.regionId && pendingSeedSet.has(n.regionId)) return true;
+      return pendingRegionList.some(
+        (r) =>
+          n.lat >= r.bbox[0] &&
+          n.lat <= r.bbox[2] &&
+          n.lng >= r.bbox[1] &&
+          n.lng <= r.bbox[3]
+      );
+    };
 
     (gameState.osmEdges || []).forEach((e) => {
       for (const nid of [e.fromNodeId, e.toNodeId]) {
         const prev = derivedModeMap.get(nid);
         if (!prev) derivedModeMap.set(nid, e.mode);
         else if (prev !== e.mode) derivedModeMap.set(nid, 'mixed');
-        if (
-          !e.built &&
-          (!hasAnyConnected ||
-            (frontierDistances.has(e.fromNodeId) && frontierDistances.has(e.toNodeId)))
+        if (e.built) {
+          nodesWithBuiltEdge.add(nid);
+        } else if (
+          !hasAnyConnected ||
+          (frontierDistances.has(e.fromNodeId) && frontierDistances.has(e.toNodeId))
         ) {
           nodesWithFrontierUnbuiltEdge.add(nid);
         }
@@ -781,9 +992,12 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     const features: Array<Record<string, unknown>> = [];
 
     (gameState.osmNodes || []).forEach((node) => {
+      if (!isNodeInUnlockedRegion(gameState, node)) return;
+
+      const isPendingSeed = isPendingSeedNode(node);
       const fDist = frontierDistances.get(node.id);
-      // Hide unexplored nodes beyond d=5 (or unreachable) so they cannot be seen or explored
-      if (!node.connected && hasAnyConnected && fDist === undefined) {
+      // Hide unexplored nodes beyond d=5 unless they belong to a newly unlocked isolated region waiting for start-node choice
+      if (!node.connected && hasAnyConnected && fDist === undefined && !isPendingSeed) {
         return;
       }
 
@@ -792,10 +1006,9 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       const isSelected = node.id === selectedOsmNodeId;
       const isHovered = node.id === hoverOsmNodeId;
       const hasUnbuiltEdge = nodesWithFrontierUnbuiltEdge.has(node.id);
+      const hasBuiltEdge = nodesWithBuiltEdge.has(node.id);
 
-      // Explored (connected) nodes hide their dot marker so roads & rails look smooth and seamless.
-      // Connected nodes at branch ends retain an invisible clickable hit-target.
-      const hideDot = node.connected && !isSelected && !isHovered;
+      const hideDot = node.connected && hasBuiltEdge && !isSelected && !isHovered;
       if (hideDot && !hasUnbuiltEdge) {
         return;
       }
@@ -809,9 +1022,10 @@ export const WorldMap: React.FC<WorldMapProps> = ({
         selectedOsmNodeId === node.id ||
         Boolean(reachableOsmNodeSet?.has(node.id));
       const canTarget = isCompatible && isReachable;
-      const dimForSelection = Boolean(selectedOsmNodeId) && !isSelected && !canTarget;
+      const dimForSelection =
+        !isPendingSeed && Boolean(selectedOsmNodeId) && !isSelected && !canTarget;
 
-      const resolvedDist = node.connected ? 0 : fDist ?? 1;
+      const resolvedDist = node.connected ? 0 : isPendingSeed ? 1 : fDist ?? 1;
       const visual = getFrontierVisualStyle(resolvedDist, mode, {
         isSelected,
         isHovered,
@@ -819,25 +1033,40 @@ export const WorldMap: React.FC<WorldMapProps> = ({
         hideDot,
       });
 
+      const isStartHub = node.connected && !hasBuiltEdge && !isSelected && !isHovered;
       const baseRadius = isSelected
         ? 6.5
         : isHovered
         ? 5.5
+        : isPendingSeed
+        ? 5.3
+        : isStartHub
+        ? 5.4
         : hideDot
         ? 5.2
         : (isRail ? 3.2 : 3.8) * visual.radiusScale;
 
-      const haloRadius = (isSelected ? 9 : isHovered ? 8 : 5.6 * visual.radiusScale) + touchBoost;
-      const haloWidth = isSelected || isHovered ? 2.2 : 1.5;
-      const strokeWidth = hideDot ? 0 : isSelected || isHovered ? 2.2 : 1.5;
+      const haloRadius =
+        (isSelected
+          ? 9
+          : isHovered
+          ? 8
+          : isPendingSeed
+          ? 8.0
+          : isStartHub
+          ? 8.2
+          : 5.6 * visual.radiusScale) + touchBoost;
+      const haloWidth = isSelected || isHovered || isStartHub || isPendingSeed ? 2.2 : 1.5;
+      const strokeWidth = hideDot ? 0 : isSelected || isHovered || isStartHub || isPendingSeed ? 2.2 : 1.5;
 
       features.push({
         type: 'Feature',
         properties: {
           id: node.id,
-          label: node.label || 'OSM 노드',
+          label: node.label || (isPendingSeed ? '출발 후보 교차점' : isStartHub ? '출발 거점 노드' : 'OSM 노드'),
           mode,
           connected: node.connected,
+          isPendingSeed,
           frontierDist: resolvedDist,
           brightness: visual.brightness,
           hideDot,
@@ -846,15 +1075,15 @@ export const WorldMap: React.FC<WorldMapProps> = ({
           isCompatible,
           isReachable,
           haloRadius,
-          haloColor: visual.haloColor,
+          haloColor: isPendingSeed ? '#34d399' : isStartHub ? '#34d399' : visual.haloColor,
           haloWidth,
-          haloOpacity: visual.haloOpacity,
+          haloOpacity: isPendingSeed ? 0.92 : isStartHub ? 0.95 : visual.haloOpacity,
           radius: Number((baseRadius + touchBoost).toFixed(2)),
-          strokeColor: visual.strokeColor,
+          strokeColor: isPendingSeed ? '#fef08a' : isStartHub ? '#34d399' : visual.strokeColor,
           strokeWidth,
-          strokeOpacity: visual.strokeOpacity,
-          fillColor: visual.fillColor,
-          fillOpacity: visual.fillOpacity,
+          strokeOpacity: isPendingSeed ? 0.96 : visual.strokeOpacity,
+          fillColor: isPendingSeed ? '#f59e0b' : isStartHub ? '#059669' : visual.fillColor,
+          fillOpacity: isPendingSeed ? 0.95 : visual.fillOpacity,
         },
         geometry: {
           type: 'Point',
@@ -866,48 +1095,142 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     const fc = { type: 'FeatureCollection', features } as unknown as GeoJsonData;
     nodesGeoJsonRef.current = fc;
     syncSourceData('osm-nodes', fc);
-  }, [connectedOsmNodeKey, unbuiltEdgeSignature, frontierDistances, selectedOsmNodeId, hoverOsmNodeId]);
+  }, [
+    connectedOsmNodeKey,
+    edgeTopologyKey,
+    frontierDistances,
+    reachableOsmNodeSet,
+    selectedOsmNodeId,
+    hoverOsmNodeId,
+    gameState.provincialRegions,
+    gameState.pendingSeedRegionIds,
+  ]);
 
-  // Update Moving Vehicles / Trains GeoJSON along Built Segments & OSM Edges
+  // Visualize Unlocked Region Borders + Expandable Neighboring Regions (Polygons & Interactive Map Labels)
+  const expandableEntries = useMemo(() => {
+    const expandable = getExpandableProvincialRegions(gameState);
+    return expandable
+      .map((r) => ({ region: r, cost: getRegionUnlockCost(gameState, r) }))
+      .sort((a, b) => {
+        if (a.region.isIsolated !== b.region.isIsolated) {
+          return a.region.isIsolated ? 1 : -1;
+        }
+        return a.cost - b.cost;
+      });
+  }, [gameState.provincialRegions, gameState.capital]);
+
+  const expandableSig = expandableEntries
+    .map(
+      (e) =>
+        `${e.region.regionId}:${e.cost}:${gameState.capital >= e.cost ? '1' : '0'}:${
+          selectedExpandableRegionId === e.region.regionId ? '1' : '0'
+        }`
+    )
+    .join('|');
+
   useEffect(() => {
-    const segMap = new Map(gameState.segments.map((s) => [s.id, s]));
-    const osmEdgeMap = new Map((gameState.osmEdges || []).map((e) => [e.id, e]));
+    const regions = gameState.provincialRegions || [];
+    const unlockedRegions = regions.filter((r) => r.unlocked);
+
     const features: Array<Record<string, unknown>> = [];
 
-    gameState.units.forEach((unit) => {
-      const seg = segMap.get(unit.segmentId);
-      const osmEdge = !seg ? osmEdgeMap.get(unit.segmentId) : undefined;
-      const coords = seg?.coordinates || osmEdge?.coordinates;
-      if (!coords || coords.length < 2) return;
-
-      const totalSegs = coords.length - 1;
-      const scaled = unit.progress * totalSegs;
-      const idx = Math.min(Math.floor(scaled), totalSegs - 1);
-      const subT = scaled - idx;
-      const p1 = coords[idx];
-      const p2 = coords[idx + 1];
-
-      const lat = p1[0] + (p2[0] - p1[0]) * subT;
-      const lng = p1[1] + (p2[1] - p1[1]) * subT;
-
+    for (const entry of expandableEntries) {
+      const { region, cost } = entry;
+      const canAfford = gameState.capital >= cost;
       features.push({
         type: 'Feature',
         properties: {
-          id: unit.id,
-          radius: osmEdge ? 3.2 : 4.5,
-          color: unit.color,
+          kind: 'expandable',
+          regionId: region.regionId,
+          regionName: region.regionName,
+          cost,
+          canAfford,
+          selected: selectedExpandableRegionId === region.regionId,
         },
-        geometry: {
-          type: 'Point',
-          coordinates: [lng, lat],
-        },
+        geometry: buildRegionPolygonGeometry(region),
       });
-    });
+    }
 
     const fc = { type: 'FeatureCollection', features } as unknown as GeoJsonData;
-    unitsGeoJsonRef.current = fc;
-    syncSourceData('osm-units', fc);
-  }, [gameState.units, gameState.segments, gameState.osmEdges]);
+    regionsGeoJsonRef.current = fc;
+    syncSourceData('regions-overlay', fc);
+
+    const map = mapInstanceRef.current;
+    if (!map) return;
+
+    regionMarkersRef.current.forEach((m) => m.remove());
+    regionMarkersRef.current = [];
+
+    for (const entry of expandableEntries) {
+      const { region, cost } = entry;
+      const canAfford = gameState.capital >= cost;
+      const isBusy = unlockingRegionId === region.regionId;
+      const isSelected = selectedExpandableRegionId === region.regionId;
+
+      const wrapper = document.createElement('div');
+      wrapper.dataset.testid = `map-expandable-region-${region.regionId}`;
+      wrapper.style.display = 'flex';
+      wrapper.style.alignItems = 'center';
+      wrapper.style.gap = '6px';
+      wrapper.style.padding = '4px 8px';
+      wrapper.style.borderRadius = '8px';
+      wrapper.style.background = 'rgba(2, 6, 23, 0.92)';
+      wrapper.style.border = isSelected
+        ? '1.5px solid #38bdf8'
+        : canAfford
+        ? '1px solid rgba(56, 189, 248, 0.7)'
+        : '1px solid rgba(245, 158, 11, 0.55)';
+      wrapper.style.boxShadow = '0 4px 14px rgba(0, 0, 0, 0.5)';
+      wrapper.style.cursor = 'pointer';
+      wrapper.style.userSelect = 'none';
+      wrapper.style.whiteSpace = 'nowrap';
+
+      const textSpan = document.createElement('span');
+      textSpan.style.fontSize = '11px';
+      textSpan.style.fontWeight = '700';
+      textSpan.style.fontVariantNumeric = 'tabular-nums';
+      textSpan.style.color = canAfford ? '#e0f2fe' : '#fde68a';
+      textSpan.textContent = `${region.regionName} · $${cost.toLocaleString()}`;
+      wrapper.appendChild(textSpan);
+
+      if (callbacksRef.current.onUnlockRegion) {
+        const unlockBtn = document.createElement('button');
+        unlockBtn.type = 'button';
+        unlockBtn.disabled = !canAfford || Boolean(unlockingRegionId);
+        unlockBtn.textContent = isBusy ? '로드 중' : '개척';
+        unlockBtn.style.padding = '2px 7px';
+        unlockBtn.style.borderRadius = '5px';
+        unlockBtn.style.fontSize = '10px';
+        unlockBtn.style.fontWeight = '700';
+        unlockBtn.style.border = 'none';
+        unlockBtn.style.cursor = canAfford && !unlockingRegionId ? 'pointer' : 'not-allowed';
+        unlockBtn.style.background = canAfford && !unlockingRegionId ? '#059669' : '#1e293b';
+        unlockBtn.style.color = canAfford && !unlockingRegionId ? '#ffffff' : '#64748b';
+        unlockBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (canAfford && !unlockingRegionId) {
+            callbacksRef.current.onUnlockRegion?.(region.regionId);
+          }
+        });
+        wrapper.appendChild(unlockBtn);
+      }
+
+      wrapper.addEventListener('click', () => {
+        setSelectedExpandableRegionId(region.regionId);
+        map.flyTo({
+          center: [region.centerLng, region.centerLat],
+          zoom: toGlobeZoom(10.5),
+          duration: 900,
+        });
+      });
+
+      const anchor = getSafeRegionLabelAnchor(region, unlockedRegions);
+      const marker = new maplibregl.Marker({ element: wrapper, anchor: 'center' })
+        .setLngLat(anchor)
+        .addTo(map);
+      regionMarkersRef.current.push(marker);
+    }
+  }, [expandableSig, gameState.provincialRegions, unlockingRegionId]);
 
   const flyTo = (lat: number, lng: number, zoom: number) => {
     const map = mapInstanceRef.current;
@@ -935,6 +1258,24 @@ export const WorldMap: React.FC<WorldMapProps> = ({
   };
 
   const tileLabel = tileType === 'dark' ? '다크 지도' : tileType === 'osm' ? 'OSM 도로' : '위성 지도';
+
+  const regions = gameState.provincialRegions || [];
+  const pendingSeedIds = gameState.pendingSeedRegionIds || [];
+  const pendingRegion =
+    pendingSeedIds.length > 0
+      ? regions.find((r) => r.regionId === pendingSeedIds[0])
+      : undefined;
+
+  const nextLockedEntry = useMemo(() => {
+    if (expandableEntries.length === 0) return null;
+    if (selectedExpandableRegionId) {
+      const picked = expandableEntries.find(
+        (e) => e.region.regionId === selectedExpandableRegionId
+      );
+      if (picked) return picked;
+    }
+    return expandableEntries[0];
+  }, [expandableEntries, selectedExpandableRegionId]);
 
   return (
     <div className="relative w-full h-full overflow-hidden bg-[#02040a]">
@@ -984,6 +1325,16 @@ export const WorldMap: React.FC<WorldMapProps> = ({
             </button>
             <button
               onClick={() => {
+                flyTo(gameState.startingCity.lat, gameState.startingCity.lng, 8.2);
+                setMobileRegionsOpen(false);
+              }}
+              className="min-h-[36px] px-3 py-1 text-xs rounded-lg font-semibold text-emerald-300 bg-emerald-500/15 whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1"
+            >
+              <MapPin className="w-3.5 h-3.5" />
+              개척 가능 지역
+            </button>
+            <button
+              onClick={() => {
                 flyTo(gameState.startingCity.lat, gameState.startingCity.lng, 2.5);
                 setMobileRegionsOpen(false);
               }}
@@ -992,6 +1343,18 @@ export const WorldMap: React.FC<WorldMapProps> = ({
               <Globe className="w-3.5 h-3.5" />
               3D 지구본
             </button>
+            {onOpenExpansionTab && (
+              <button
+                onClick={() => {
+                  onOpenExpansionTab();
+                  setMobileRegionsOpen(false);
+                }}
+                className="min-h-[36px] px-3 py-1 text-xs rounded-lg font-semibold text-indigo-300 bg-indigo-500/15 whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1"
+              >
+                <Lock className="w-3.5 h-3.5" />
+                지역 해금 ({regions.filter((r) => r.unlocked).length}/{regions.length})
+              </button>
+            )}
           </div>
         )}
 
@@ -1026,6 +1389,13 @@ export const WorldMap: React.FC<WorldMapProps> = ({
           className="px-2.5 py-1 text-xs rounded-lg font-semibold text-sky-300 bg-sky-500/15 hover:bg-sky-500/25 transition-colors cursor-pointer whitespace-nowrap"
         >
           내 도시 ({gameState.startingCity.name})
+        </button>
+        <button
+          onClick={() => flyTo(gameState.startingCity.lat, gameState.startingCity.lng, 8.2)}
+          className="px-2.5 py-1 text-xs rounded-lg font-semibold text-emerald-300 bg-emerald-500/15 hover:bg-emerald-500/25 transition-colors cursor-pointer whitespace-nowrap flex items-center gap-1"
+        >
+          <MapPin className="w-3.5 h-3.5" />
+          개척 가능 지역
         </button>
         <button
           onClick={() => flyTo(gameState.startingCity.lat, gameState.startingCity.lng, 2.5)}
@@ -1120,6 +1490,10 @@ export const WorldMap: React.FC<WorldMapProps> = ({
               <span className="text-slate-300">
                 {previewResult.kind === 'transfer'
                   ? '특수 환승 직결'
+                  : previewResult.kind === 'cross_border'
+                  ? '광역 경계 직결'
+                  : previewResult.kind === 'isolated_route'
+                  ? '인접 노선 연결'
                   : previewResult.kind === 'bridge'
                   ? '교차로 직결'
                   : '실측 노선 경로'}
@@ -1143,6 +1517,118 @@ export const WorldMap: React.FC<WorldMapProps> = ({
                 ? '도로·철도 위 다음 노드를 터치하면 최단 노선을 따라 연속 연결됩니다.'
                 : '다른 노드에 마우스를 올리면 시공 길이·비용이 미리 표시됩니다. (Esc / 우클릭 종료)'}
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Isolated Region Manual Start-Node Selection Banner (Rule 2.2) */}
+      {pendingRegion && !selectedOsmNode && (
+        <div
+          data-testid="isolated-seed-banner"
+          className="fixed bottom-[74px] sm:bottom-20 left-2 right-2 sm:left-3 sm:right-auto sm:w-96 z-30 p-3.5 rounded-2xl bg-slate-950/95 border border-amber-500/70 shadow-2xl space-y-2"
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex items-start gap-2 min-w-0">
+              <MapPin className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <h4 className="text-xs font-bold text-white">
+                  고립 지역 개척 시작: {pendingRegion.regionName}
+                </h4>
+                <p className="text-[11px] text-slate-300 mt-0.5 leading-snug">
+                  새 지역에서 첫 출발 노드를 {isTouchRef.current ? '터치' : '클릭'}해 선택하면 게임을 진척시킬 수 있습니다.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => flyTo(pendingRegion.centerLat, pendingRegion.centerLng, 15)}
+              className="min-h-[36px] px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-bold cursor-pointer whitespace-nowrap shrink-0"
+            >
+              지역 이동
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* DESKTOP Map Adjacent Locked Region Quick-Unlock Banner */}
+      {nextLockedEntry && onUnlockRegion && !pendingRegion && (
+        <div
+          data-testid="adjacent-region-banner"
+          className="hidden md:flex fixed bottom-20 right-3 z-20 w-80 p-3 rounded-2xl bg-slate-950/95 border border-slate-700/80 shadow-2xl flex-col gap-2"
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="text-[11px] text-slate-400 font-medium">
+                {nextLockedEntry.region.isIsolated
+                  ? '고립 도·주 · 새 출발 노드 선택'
+                  : '인접 도·주 · 경계 교차점 연결'}
+              </div>
+              <div className="text-xs font-bold text-white truncate mt-0.5 flex items-center gap-1.5">
+                <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span className="truncate">{nextLockedEntry.region.regionName}</span>
+              </div>
+            </div>
+            {onOpenExpansionTab && (
+              <button
+                onClick={onOpenExpansionTab}
+                className="text-[11px] text-indigo-300 hover:text-white font-semibold cursor-pointer whitespace-nowrap shrink-0"
+              >
+                전체 보기
+              </button>
+            )}
+          </div>
+
+          <button
+            disabled={gameState.capital < nextLockedEntry.cost || Boolean(unlockingRegionId)}
+            onClick={() => onUnlockRegion(nextLockedEntry.region.regionId)}
+            className={`w-full min-h-[40px] px-3 py-1.5 rounded-xl text-xs font-bold font-mono-numbers tabular-nums flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors ${
+              gameState.capital >= nextLockedEntry.cost && !unlockingRegionId
+                ? 'bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer'
+                : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+            }`}
+          >
+            {unlockingRegionId === nextLockedEntry.region.regionId ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span>지역 도로 로드 중...</span>
+              </>
+            ) : (
+              <>
+                <Unlock className="w-3.5 h-3.5" />
+                <span>잠금 해제 (${nextLockedEntry.cost.toLocaleString()})</span>
+              </>
+            )}
+          </button>
+        </div>
+      )}
+
+      {/* Fallback / Loading Banner when OSM nodes are not yet loaded */}
+      {(gameState.osmNodes || []).length === 0 && (
+        <div
+          data-testid="osm-empty-banner"
+          className="fixed bottom-[82px] left-1/2 -translate-x-1/2 z-30 px-4 py-2.5 rounded-2xl bg-slate-950/95 border border-sky-500/50 shadow-2xl flex items-center gap-3 max-w-[92vw]"
+        >
+          {isLoadingOsm ? (
+            <>
+              <Loader2 className="w-4 h-4 text-sky-400 animate-spin shrink-0" />
+              <span className="text-xs font-medium text-slate-200 whitespace-nowrap">
+                주변 도로·철도 노드를 불러오는 중...
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="text-xs font-medium text-slate-200">
+                주변 노드를 아직 불러오지 못했습니다.
+              </span>
+              {onReloadOsm && (
+                <button
+                  onClick={onReloadOsm}
+                  className="min-h-[34px] px-3 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  노드 불러오기
+                </button>
+              )}
+            </>
           )}
         </div>
       )}

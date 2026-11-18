@@ -44,7 +44,8 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
       if (hasSavedGame) {
         onResumeSavedGame();
       } else {
-        onStartWithCity(PRESET_CITIES[0]);
+        setIsStarting(true);
+        onStartWithCity(PRESET_CITIES[0]).finally(() => setIsStarting(false));
       }
       return;
     }
@@ -107,7 +108,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
           Terra<span className="text-sky-400">Line</span>
         </h1>
         <p className="text-slate-300 text-xs sm:text-sm md:text-base text-center max-w-xl mt-1.5 sm:mt-2 mb-3.5 sm:mb-6 leading-relaxed">
-          1:1 실제 세계 지도 위에서 정해진 도로와 철도 노선을 연결하고, 스킬 트리로 수천만 킬로미터의 글로벌 네트워크를 완성하는 인크리멘탈 방치형 게임.
+          1:1 실제 세계 지도 위에서 도로와 철도 노드를 연결하고, 자금을 모아 새로운 도·주(State/Province) 광역 행정구역을 잠금 해제하며 교통망을 넓혀가는 인크리멘탈 게임.
         </p>
 
         {/* Resume Saved Game Banner if exists */}
@@ -230,7 +231,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
               <span>·</span>
               <span className="flex items-center gap-1">
                 <TrainTrack className="w-3.5 h-3.5 text-amber-400" />
-                노선 완성 업적 & 광역 네트워크
+                1:1 실측 도로·철도 & 연구 트리
               </span>
             </div>
 

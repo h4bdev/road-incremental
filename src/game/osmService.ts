@@ -1,4 +1,53 @@
 import { MapNode, OsmEdge, OsmNode, PredefinedSegment, StartingCity, TransportLine } from './types';
+import {
+  buildFallbackStarterGrid,
+  fetchOverpassQuery,
+  loadNearbyProvincialRegionsDirect,
+  loadOsmProvinceDirect,
+  loadOsmRegionInfoDirect,
+  loadOsmRoadChunkDirect,
+  OsmRawWay,
+  ProvincialRegionMeta,
+  quantizeChunkKey,
+} from './osmCore';
+
+export type { ProvincialRegionMeta };
+
+let backendApiSupported: boolean | null = null;
+
+export function resetBackendApiProbeForTests(): void {
+  backendApiSupported = null;
+}
+
+async function tryFetchBackendJson<T>(url: string, timeoutMs: number): Promise<T | null> {
+  if (backendApiSupported === false) return null;
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: { Accept: 'application/json' },
+    });
+    clearTimeout(timer);
+
+    const contentType = res.headers.get('content-type') || '';
+    if (res.status === 404 || (res.ok && !contentType.includes('application/json'))) {
+      backendApiSupported = false;
+      return null;
+    }
+
+    if (!res.ok) {
+      return null;
+    }
+
+    const json = (await res.json()) as T;
+    backendApiSupported = true;
+    return json;
+  } catch {
+    return null;
+  }
+}
 
 export interface NominatimPlace {
   place_id: number;
@@ -94,8 +143,6 @@ export async function generateCustomCityNetwork(city: StartingCity): Promise<{
   let usedLiveOsm = false;
 
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 4000);
     const delta = 0.055; // ~6km bounding box around town center
     const bbox = `${lat - delta},${lng - delta},${lat + delta},${lng + delta}`;
 
@@ -105,22 +152,14 @@ export async function generateCustomCityNetwork(city: StartingCity): Promise<{
       out geom 14;
     `;
 
-    const res = await fetch('https://overpass.openstreetmap.fr/api/interpreter', {
-      method: 'POST',
-      body: `data=${encodeURIComponent(query)}`,
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-
-    if (res.ok) {
-      const json = await res.json();
-      if (Array.isArray(json.elements) && json.elements.length > 0) {
-        usedLiveOsm = true;
-        for (const el of json.elements) {
-          if (el.type === 'way' && Array.isArray(el.geometry) && el.geometry.length >= 2 && osmRoads.length < 4) {
-            const pts: [number, number][] = el.geometry.map((g: { lat: number; lon: number }) => [g.lat, g.lon]);
-            osmRoads.push(pts);
-          }
+    const json = await fetchOverpassQuery(query, 4500);
+    if (Array.isArray(json.elements) && json.elements.length > 0) {
+      usedLiveOsm = true;
+      for (const el of json.elements) {
+        const wayEl = el as OsmRawWay & { geometry?: Array<{ lat: number; lon: number }> };
+        if (wayEl.type === 'way' && Array.isArray(wayEl.geometry) && wayEl.geometry.length >= 2 && osmRoads.length < 4) {
+          const pts: [number, number][] = wayEl.geometry.map((g) => [g.lat, g.lon]);
+          osmRoads.push(pts);
         }
       }
     }
@@ -518,8 +557,9 @@ export function buildStarterOsmFallback(
 }
 
 /**
- * Fetch 100% REAL OpenStreetMap road & railway geometry via /api/osm-roads
- * (backed by official api.openstreetmap.org/api/0.6/map.json, subdivided to ~24m per node).
+ * Fetch 100% REAL OpenStreetMap road & railway geometry via /api/osm-roads,
+ * falling back directly to browser OSM 0.6 / Overpass API + starter grid when
+ * deployed statically without an Express backend (e.g. Vercel).
  */
 export async function fetchOsmRoadChunk(
   lat: number,
@@ -530,72 +570,51 @@ export async function fetchOsmRoadChunk(
   osmEdges: OsmEdge[];
   usedLiveOverpass: boolean;
 }> {
-  const chunkKey = chunkKeyForCoords(lat, lng);
+  const chunkKey = quantizeChunkKey(lat, lng);
 
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 9500);
-    const res = await fetch(
-      `/api/osm-roads?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`,
-      { signal: controller.signal }
-    );
-    clearTimeout(timer);
+  const json = await tryFetchBackendJson<{
+    chunkKey?: string;
+    osmNodes?: OsmNode[];
+    osmEdges?: OsmEdge[];
+    usedLiveOverpass?: boolean;
+  }>(`/api/osm-roads?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`, 9500);
 
-    if (res.ok) {
-      const json = (await res.json()) as {
-        chunkKey?: string;
-        osmNodes?: OsmNode[];
-        osmEdges?: OsmEdge[];
-        usedLiveOverpass?: boolean;
-      };
-      if (Array.isArray(json.osmNodes) && Array.isArray(json.osmEdges)) {
-        return {
-          chunkKey: json.chunkKey || chunkKey,
-          osmNodes: json.osmNodes,
-          osmEdges: json.osmEdges,
-          usedLiveOverpass: Boolean(json.usedLiveOverpass),
-        };
-      }
-    }
-  } catch {
-    // Fall through to deterministic starter fallback below
+  if (json && Array.isArray(json.osmNodes) && Array.isArray(json.osmEdges) && json.osmNodes.length > 0) {
+    return {
+      chunkKey: json.chunkKey || chunkKey,
+      osmNodes: json.osmNodes,
+      osmEdges: json.osmEdges,
+      usedLiveOverpass: Boolean(json.usedLiveOverpass),
+    };
   }
 
-  return {
-    chunkKey,
-    osmNodes: [],
-    osmEdges: [],
-    usedLiveOverpass: false,
-  };
-}
+  try {
+    const direct = await loadOsmRoadChunkDirect(lat, lng);
+    if (direct.osmNodes.length > 0) {
+      return {
+        chunkKey: direct.chunkKey,
+        osmNodes: direct.osmNodes,
+        osmEdges: direct.osmEdges,
+        usedLiveOverpass: direct.usedLiveOverpass,
+      };
+    }
+  } catch {
+    // Fall through to deterministic starter grid below
+  }
 
-export interface ProvincialRegionMeta {
-  regionId: string;
-  regionName: string;
-  adminLevel: string;
-  bbox: [number, number, number, number];
-  boundaryGeoJson?: import('./types').GeoJsonBoundary;
-  centerLat: number;
-  centerLng: number;
+  return buildFallbackStarterGrid(chunkKey, lat, lng);
 }
 
 export async function fetchProvincialRegionInfo(
   lat: number,
   lng: number
 ): Promise<ProvincialRegionMeta | null> {
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
-    const res = await fetch(
-      `/api/osm-region-info?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`,
-      { signal: controller.signal }
-    );
-    clearTimeout(timer);
-    if (!res.ok) return null;
-    const json = (await res.json()) as Partial<ProvincialRegionMeta>;
-    if (!json.regionId || !Array.isArray(json.bbox) || json.bbox.length !== 4) {
-      return null;
-    }
+  const json = await tryFetchBackendJson<Partial<ProvincialRegionMeta>>(
+    `/api/osm-region-info?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`,
+    8000
+  );
+
+  if (json && json.regionId && Array.isArray(json.bbox) && json.bbox.length === 4) {
     return {
       regionId: json.regionId,
       regionName: json.regionName || '도시 행정구역',
@@ -605,6 +624,10 @@ export async function fetchProvincialRegionInfo(
       centerLat: Number.isFinite(json.centerLat) ? Number(json.centerLat) : lat,
       centerLng: Number.isFinite(json.centerLng) ? Number(json.centerLng) : lng,
     };
+  }
+
+  try {
+    return await loadOsmRegionInfoDirect(lat, lng);
   } catch {
     return null;
   }
@@ -614,17 +637,17 @@ export async function fetchNearbyProvincialRegions(
   lat: number,
   lng: number
 ): Promise<ProvincialRegionMeta[]> {
+  const json = await tryFetchBackendJson<{ regions?: ProvincialRegionMeta[] }>(
+    `/api/osm-nearby-provinces?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`,
+    9000
+  );
+
+  if (json && Array.isArray(json.regions) && json.regions.length > 0) {
+    return json.regions;
+  }
+
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 9000);
-    const res = await fetch(
-      `/api/osm-nearby-provinces?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`,
-      { signal: controller.signal }
-    );
-    clearTimeout(timer);
-    if (!res.ok) return [];
-    const json = (await res.json()) as { regions?: ProvincialRegionMeta[] };
-    return Array.isArray(json.regions) ? json.regions : [];
+    return await loadNearbyProvincialRegionsDirect(lat, lng);
   } catch {
     return [];
   }
@@ -648,7 +671,7 @@ export async function fetchOsmProvincialRegion(
   osmEdges: OsmEdge[];
   usedLiveOverpass: boolean;
 }> {
-  const chunkKey = chunkKeyForCoords(lat, lng);
+  const chunkKey = quantizeChunkKey(lat, lng);
   const defaultBbox: [number, number, number, number] = [
     lat - 0.075,
     lng - 0.095,
@@ -656,60 +679,69 @@ export async function fetchOsmProvincialRegion(
     lng + 0.095,
   ];
 
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 16000);
-    const res = await fetch(
-      `/api/osm-province?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`,
-      { signal: controller.signal }
-    );
-    clearTimeout(timer);
+  const json = await tryFetchBackendJson<{
+    regionId?: string;
+    regionName?: string;
+    adminLevel?: string;
+    bbox?: [number, number, number, number];
+    boundaryGeoJson?: import('./types').GeoJsonBoundary;
+    totalNodeCount?: number;
+    chunkKey?: string;
+    osmNodes?: OsmNode[];
+    osmEdges?: OsmEdge[];
+    usedLiveOverpass?: boolean;
+  }>(`/api/osm-province?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`, 16000);
 
-    if (res.ok) {
-      const json = (await res.json()) as {
-        regionId?: string;
-        regionName?: string;
-        adminLevel?: string;
-        bbox?: [number, number, number, number];
-        boundaryGeoJson?: import('./types').GeoJsonBoundary;
-        totalNodeCount?: number;
-        chunkKey?: string;
-        osmNodes?: OsmNode[];
-        osmEdges?: OsmEdge[];
-        usedLiveOverpass?: boolean;
-      };
-      if (Array.isArray(json.osmNodes) && Array.isArray(json.osmEdges)) {
-        return {
-          regionId: json.regionId || `osm_prov_${chunkKey}`,
-          regionName: json.regionName || '도시 행정구역',
-          adminLevel: json.adminLevel || '6',
-          bbox: Array.isArray(json.bbox) && json.bbox.length === 4 ? json.bbox : defaultBbox,
-          boundaryGeoJson: json.boundaryGeoJson,
-          totalNodeCount:
-            typeof json.totalNodeCount === 'number'
-              ? json.totalNodeCount
-              : json.osmNodes.length,
-          chunkKey: json.chunkKey || chunkKey,
-          osmNodes: json.osmNodes,
-          osmEdges: json.osmEdges,
-          usedLiveOverpass: Boolean(json.usedLiveOverpass),
-        };
-      }
-    }
-  } catch {
-    // Graceful empty fallback if provincial Overpass lookup times out
+  if (json && Array.isArray(json.osmNodes) && Array.isArray(json.osmEdges) && json.osmNodes.length > 0) {
+    return {
+      regionId: json.regionId || `osm_prov_${chunkKey}`,
+      regionName: json.regionName || '도시 행정구역',
+      adminLevel: json.adminLevel || '6',
+      bbox: Array.isArray(json.bbox) && json.bbox.length === 4 ? json.bbox : defaultBbox,
+      boundaryGeoJson: json.boundaryGeoJson,
+      totalNodeCount:
+        typeof json.totalNodeCount === 'number'
+          ? json.totalNodeCount
+          : json.osmNodes.length,
+      chunkKey: json.chunkKey || chunkKey,
+      osmNodes: json.osmNodes,
+      osmEdges: json.osmEdges,
+      usedLiveOverpass: Boolean(json.usedLiveOverpass),
+    };
   }
 
+  try {
+    const direct = await loadOsmProvinceDirect(lat, lng);
+    if (direct.osmNodes.length > 0) {
+      return {
+        regionId: direct.regionId,
+        regionName: direct.regionName,
+        adminLevel: direct.adminLevel,
+        bbox: direct.bbox,
+        boundaryGeoJson: direct.boundaryGeoJson,
+        totalNodeCount: direct.totalNodeCount,
+        chunkKey: direct.chunkKey,
+        osmNodes: direct.osmNodes,
+        osmEdges: direct.osmEdges,
+        usedLiveOverpass: direct.usedLiveOverpass,
+      };
+    }
+  } catch {
+    // Fall through to deterministic starter grid below
+  }
+
+  const fb = buildFallbackStarterGrid(chunkKey, lat, lng);
   return {
     regionId: `osm_prov_${chunkKey}`,
     regionName: '도시 행정구역',
     adminLevel: '6',
     bbox: defaultBbox,
-    totalNodeCount: 0,
-    chunkKey,
-    osmNodes: [],
-    osmEdges: [],
+    totalNodeCount: fb.osmNodes.length,
+    chunkKey: fb.chunkKey,
+    osmNodes: fb.osmNodes,
+    osmEdges: fb.osmEdges,
     usedLiveOverpass: false,
   };
 }
+
 

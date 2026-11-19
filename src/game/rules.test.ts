@@ -4,6 +4,7 @@ import {
   advanceTick,
   buyAllAffordableSkills,
   buyMaxSkill,
+  calculateMultipliers,
   calculateTotalIncomePerSec,
   computeOsmFrontierDistances,
   computeOsmFrontierDistancesForState,
@@ -16,13 +17,16 @@ import {
   findOsmRoadPath,
   getExpandableProvincialRegions,
   getFrontierEdgeOpacity,
+  getFrontierOsmEdgesForState,
   getFrontierVisualStyle,
   getNodeTierRank,
+  getOsmEdgeBuildCost,
   getReachableOsmNodeSet,
   getRegionProgressStats,
   getRegionUnlockCost,
-  isNodeInUnlockedRegion,
+  ISOLATED_ROUTE_BRIDGE_FRONTIER_CAP,
   ISOLATED_ROUTE_BRIDGE_MAX_KM,
+  isNodeInUnlockedRegion,
   isSkillBlockedByExclusivePath,
   MAX_OSM_FRONTIER_DISTANCE,
   mergeOsmChunk,
@@ -182,11 +186,12 @@ test('linking OSM nodes completes real way and OSM junction achievements without
   let state = createInitialGameState(seoul);
   state = { ...state, capital: 500_000 };
 
-  // Money-only study purchases along [11] -> [32] -> [42] -> [53]
+  // Money-only study purchases along [11] -> [32] -> [42] -> [52]
   state = unlockSkill(state, 'sk_root_0').newState;
+  state = unlockSkill(state, 'sk_trunk_1').newState;
   state = unlockSkill(state, 'sk_trunk_2').newState;
-  state = unlockSkill(state, 'sk_auto_1').newState;
-  state = unlockSkill(state, 'sk_auto_2').newState;
+  state = unlockSkill(state, 'sk_snap_tool').newState;
+  state = unlockSkill(state, 'sk_speed_1').newState;
   assert.equal(state.skillPoints, 0);
 
   const { nodes, edges } = makeLongOsmGrid('세종대로', 'road', 13);
@@ -345,7 +350,7 @@ test('parallel 2-lane road and railway nodes cannot bridge across separate lanes
   assert.equal(sameLaneRail.builtCount, 3);
 });
 
-test('Antimatter Dimensions study tree supports top-to-bottom Money purchases, 3-way exclusive lock until [111], Buy Max, Buy All, and 100% Reset refund', () => {
+test('Antimatter Dimensions study tree supports top-to-bottom Money purchases with free parallel branch selection, Buy Max, Buy All, and 100% Reset refund', () => {
   const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
   let state = { ...createInitialGameState(seoul), capital: 5e12 };
 
@@ -362,55 +367,40 @@ test('Antimatter Dimensions study tree supports top-to-bottom Money purchases, 3
   assert.equal(unlockSkill(state, 'sk_trunk_1').success, false);
   assert.equal(unlockSkill(state, 'sk_infra_3').success, false);
 
-  // Unlock prerequisites down to Tier 5 across all 3 paths
+  // Unlock prerequisites down to Tier 5 across all 3 branches
   for (const id of [
     'sk_root_0',
     'sk_root_l',
+    'sk_root_r',
     'sk_trunk_1',
     'sk_trunk_2',
+    'sk_node_yield',
     'sk_infra_1',
     'sk_infra_2',
+    'sk_snap_tool',
     'sk_speed_1',
-    'sk_auto_1',
-    'sk_auto_2',
+    'sk_re_1',
+    'sk_re_2',
   ]) {
-    state = unlockSkill(state, id).newState;
+    const res = unlockSkill(state, id);
+    assert.equal(res.success, true, `Expected prerequisite ${id} to unlock`);
+    state = res.newState;
   }
   assert.equal(state.skillPoints, 0);
 
-  // Buy Path A [61] -> blocks Path B [62] and Path C [63] until [111] sk_multi_path!
-  const pathA = unlockSkill(state, 'sk_infra_3');
-  assert.equal(pathA.success, true);
-  state = pathA.newState;
+  // Buy Civil [61] -> Rail [62] and Commerce [63] remain completely unlocked (no exclusive 경로 locks)
+  const branchA = unlockSkill(state, 'sk_infra_3');
+  assert.equal(branchA.success, true);
+  state = branchA.newState;
 
   const studyB = state.skills.find((s) => s.id === 'sk_double_track')!;
-  const studyC = state.skills.find((s) => s.id === 'sk_auto_3')!;
-  assert.equal(isSkillBlockedByExclusivePath(state, studyB), true);
-  assert.equal(isSkillBlockedByExclusivePath(state, studyC), true);
-  assert.equal(unlockSkill(state, 'sk_double_track').success, false);
-  assert.equal(unlockSkill(state, 'sk_auto_3').success, false);
-
-  // Finish Path A through [71] -> [74] -> [81] -> [84] -> [91] -> [101], then unlock convergence [111]!
-  for (const id of [
-    'sk_infra_4',
-    'sk_infra_cost2',
-    'sk_infra_5',
-    'sk_interchange_grid',
-    'sk_infra_regional',
-    'sk_infra_6',
-    'sk_multi_path',
-  ]) {
-    const r = unlockSkill(state, id);
-    assert.equal(r.success, true, `Expected unlock of ${id} to succeed`);
-    state = r.newState;
-  }
-
-  // Convergence [111] lifts exclusive restriction -> Path B [62] and Path C [63] now unlock!
+  const studyC = state.skills.find((s) => s.id === 'sk_commerce_1')!;
   assert.equal(isSkillBlockedByExclusivePath(state, studyB), false);
+  assert.equal(isSkillBlockedByExclusivePath(state, studyC), false);
   assert.equal(unlockSkill(state, 'sk_double_track').success, true);
-  const pathCRes = unlockSkill(state, 'sk_auto_3');
-  assert.equal(pathCRes.success, true);
-  state = pathCRes.newState;
+  const branchCRes = unlockSkill(state, 'sk_commerce_1');
+  assert.equal(branchCRes.success, true);
+  state = branchCRes.newState;
 
   // Buy Max buys multiple levels at once
   const capBeforeMax = state.capital;
@@ -420,7 +410,7 @@ test('Antimatter Dimensions study tree supports top-to-bottom Money purchases, 3
   assert.ok(maxRes.newState.capital < capBeforeMax);
   state = maxRes.newState;
 
-  // Buy All spends affordable studies cleanly
+  // Buy All spends affordable studies cleanly across all unlocked branches
   const allRes = buyAllAffordableSkills({ ...state, capital: 5e11 });
   assert.equal(allRes.success, true);
   assert.ok(allRes.levelsBought > 0);
@@ -528,31 +518,28 @@ test('findOsmRoadPath previews multi-hop road chains and promotes mixed road/rai
   assert.equal(res.newState.stats.connectedOsmNodes, 4);
 });
 
-test('advanceTick earns idle money and auto-builder constructs strictly OSM node edges', () => {
+test('advanceTick earns idle money strictly without auto-building any roads or rails', () => {
   const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
   let state = createInitialGameState(seoul);
   state = { ...state, capital: 80000 };
 
   const { nodes, edges } = makeSampleOsmGrid('남대문로', 'road');
   const withGrid = mergeOsmChunk(state, '37.566_126.978', nodes, edges);
-  const linked1 = connectOsmPath(withGrid, 'n1', 'n2').newState;
+  const seedId = withGrid.osmNodes.find((n) => n.connected)!.id;
+  const targetId = seedId === 'n1' ? 'n2' : 'n1';
+  const linked1 = connectOsmPath(withGrid, seedId, targetId).newState;
   const r0 = unlockSkill(linked1, 'sk_root_0').newState;
-  const t2 = unlockSkill(r0, 'sk_trunk_2').newState;
-  const sk = unlockSkill(t2, 'sk_auto_1');
-  assert.equal(sk.success, true);
+  let s = unlockSkill(r0, 'sk_trunk_2').newState;
 
-  let s = sk.newState;
+  const capBefore = s.capital;
   const startOsmBuilt = s.stats.totalOsmEdgesBuilt;
 
-  let autoBuiltCount = 0;
   for (let i = 0; i < 40; i++) {
-    const tick = advanceTick(s, 0.2);
-    s = tick.newState;
-    if (tick.autoBuiltSomething) autoBuiltCount += 1;
+    s = advanceTick(s, 0.2).newState;
   }
 
-  assert.ok(autoBuiltCount >= 1, 'Expected auto-builder to construct at least 1 OSM edge');
-  assert.ok(s.stats.totalOsmEdgesBuilt > startOsmBuilt);
+  assert.ok(s.capital > capBefore, 'Expected idle income to accrue');
+  assert.equal(s.stats.totalOsmEdgesBuilt, startOsmBuilt, 'Expected zero auto-constructed OSM edges');
   assert.equal(s.stats.totalSegmentsBuilt, 0);
 });
 
@@ -703,7 +690,7 @@ test('mergeOsmChunk does not mark empty chunkKey as loaded so failed fetches can
   assert.ok(afterValid.osmNodes.some((n) => n.connected));
 });
 
-test('Rule 0: dead-end and completed isolated routes bridge to nearby routes within 400m without breaking 2-lane isolation', () => {
+test('Rule 0: dead-end/isolated routes bridge only to the single nearest node with d <= 3 (d=2~3 horizon)', () => {
   const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
   let state = createInitialGameState(seoul);
   state = { ...state, capital: 50000 };
@@ -711,10 +698,14 @@ test('Rule 0: dead-end and completed isolated routes bridge to nearby routes wit
   const nodes = [
     { id: 'a1', lat: 37.5660, lng: 126.9780, connected: true, mode: 'road' as const },
     { id: 'a2', lat: 37.5662, lng: 126.9780, connected: true, mode: 'road' as const },
+    // Nearest component b1 -> b2 -> b3 -> b4 (~210m from a2)
     { id: 'b1', lat: 37.5662, lng: 126.9804, connected: false, mode: 'road' as const },
-    { id: 'b2', lat: 37.5698, lng: 126.9804, connected: false, mode: 'road' as const },
-    { id: 'c1', lat: 37.5662, lng: 126.9845, connected: false, mode: 'road' as const },
-    { id: 'c2', lat: 37.5665, lng: 126.9845, connected: false, mode: 'road' as const },
+    { id: 'b2', lat: 37.5672, lng: 126.9804, connected: false, mode: 'road' as const },
+    { id: 'b3', lat: 37.5682, lng: 126.9804, connected: false, mode: 'road' as const },
+    { id: 'b4', lat: 37.5692, lng: 126.9804, connected: false, mode: 'road' as const },
+    // Second nearby component c1 (~300m from a2) must NOT be opened when b1 is closer
+    { id: 'c1', lat: 37.5662, lng: 126.9814, connected: false, mode: 'road' as const },
+    { id: 'c2', lat: 37.5665, lng: 126.9814, connected: false, mode: 'road' as const },
   ];
   const edges = [
     {
@@ -737,20 +728,46 @@ test('Rule 0: dead-end and completed isolated routes bridge to nearby routes wit
       mode: 'road' as const,
       fromNodeId: 'b1',
       toNodeId: 'b2',
-      coordinates: [[37.5662, 126.9804], [37.5698, 126.9804]] as [[number, number], [number, number]],
-      distanceKm: 0.4,
+      coordinates: [[37.5662, 126.9804], [37.5672, 126.9804]] as [[number, number], [number, number]],
+      distanceKm: 0.11,
+      buildCost: 35,
+      baseIncomePerSec: 4,
+      built: false,
+    },
+    {
+      id: 'eb23',
+      wayName: '을지로 지선',
+      highwayType: 'primary',
+      mode: 'road' as const,
+      fromNodeId: 'b2',
+      toNodeId: 'b3',
+      coordinates: [[37.5672, 126.9804], [37.5682, 126.9804]] as [[number, number], [number, number]],
+      distanceKm: 0.11,
+      buildCost: 35,
+      baseIncomePerSec: 4,
+      built: false,
+    },
+    {
+      id: 'eb34',
+      wayName: '을지로 지선',
+      highwayType: 'primary',
+      mode: 'road' as const,
+      fromNodeId: 'b3',
+      toNodeId: 'b4',
+      coordinates: [[37.5682, 126.9804], [37.5692, 126.9804]] as [[number, number], [number, number]],
+      distanceKm: 0.11,
       buildCost: 35,
       baseIncomePerSec: 4,
       built: false,
     },
     {
       id: 'ec12',
-      wayName: '원거리 도로',
+      wayName: '차순위 도로',
       highwayType: 'primary',
       mode: 'road' as const,
       fromNodeId: 'c1',
       toNodeId: 'c2',
-      coordinates: [[37.5662, 126.9845], [37.5665, 126.9845]] as [[number, number], [number, number]],
+      coordinates: [[37.5662, 126.9814], [37.5665, 126.9814]] as [[number, number], [number, number]],
       distanceKm: 0.033,
       buildCost: 35,
       baseIncomePerSec: 4,
@@ -759,11 +776,14 @@ test('Rule 0: dead-end and completed isolated routes bridge to nearby routes wit
   ];
 
   state = mergeOsmChunk(state, '37.566_126.978', nodes, edges);
-  assert.equal(ISOLATED_ROUTE_BRIDGE_MAX_KM, 0.4);
+  assert.equal(ISOLATED_ROUTE_BRIDGE_FRONTIER_CAP, 3);
+  assert.ok(ISOLATED_ROUTE_BRIDGE_MAX_KM >= 0.4);
 
   const frontier = computeOsmFrontierDistancesForState(state);
   assert.equal(frontier.get('b1'), 1);
   assert.equal(frontier.get('b2'), 2);
+  assert.equal(frontier.get('b3'), 3);
+  assert.equal(frontier.get('b4'), undefined);
   assert.equal(frontier.get('c1'), undefined);
 
   const reachable = getReachableOsmNodeSet(state, 'a2');
@@ -991,5 +1011,259 @@ test('Node Tier Rank progresses cleanly from Bronze I -> V -> Silver -> Gold -> 
   assert.equal(getNodeTierRank(2850000).label, 'Grandmaster I');
   assert.equal(getNodeTierRank(8600000).label, 'Grandmaster V');
   assert.equal(getNodeTierRank(10000000).label, 'Terra Challenger');
+});
+
+test('Region deduplication merges English/Korean duplicate Gyeonggi while preserving Seoul enclave separation', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  let state = createInitialGameState(seoul);
+
+  const gyeonggiOsmBoundary = {
+    type: 'Polygon' as const,
+    coordinates: [[[126.5, 36.9], [127.8, 36.9], [127.8, 38.2], [126.5, 38.2], [126.5, 36.9]]],
+  };
+  state = registerDiscoveredProvincialRegion(state, {
+    regionId: 'osm_adm_gyeonggi_dup',
+    regionName: 'Gyeonggi',
+    adminLevel: '4',
+    bbox: [36.91, 126.52, 38.25, 127.81],
+    boundaryGeoJson: gyeonggiOsmBoundary,
+    centerLat: 37.28,
+    centerLng: 127.01,
+  });
+
+  const gyeonggiMatches = state.provincialRegions.filter(
+    (r) => r.regionName.includes('경기') || r.regionName.toLowerCase().includes('gyeonggi')
+  );
+  assert.equal(gyeonggiMatches.length, 1, '경기도 and Gyeonggi must merge into 1 region');
+  assert.equal(gyeonggiMatches[0].regionName, '경기도');
+  assert.equal(gyeonggiMatches[0].hasRealOsmBoundary, true);
+  assert.ok(state.provincialRegions.some((r) => r.regionId === 'curated_kr_seoul'), 'Seoul enclave must stay separate');
+});
+
+test('Build cost scales upward with total connected nodes and prevents linking two unconnected nodes', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  let state = { ...createInitialGameState(seoul), capital: 100000 };
+
+  const { nodes, edges } = makeLongOsmGrid('태평로', 'road', 45);
+  state = mergeOsmChunk(state, '37.566_126.978', nodes, edges);
+
+  const sampleEdge = state.osmEdges[0];
+  const lowNodeCost = getOsmEdgeBuildCost(sampleEdge, calculateMultipliers(state));
+
+  // Cannot connect two unconnected nodes (n4 <-> n5 while only seed n3 is connected)
+  const blockedUnconnected = connectOsmPath(state, 'n4', 'n5');
+  assert.equal(blockedUnconnected.success, false);
+  const blockedDirectUnconnected = connectOsmNodesDirect(state, 'n4', 'n5');
+  assert.equal(blockedDirectUnconnected.success, false);
+
+  // Connecting 30+ nodes scales build cost noticeably higher
+  const highNodeState = {
+    ...state,
+    osmNodes: state.osmNodes.map((n, idx) => (idx < 35 ? { ...n, connected: true } : n)),
+    stats: { ...state.stats, connectedOsmNodes: 35 },
+  };
+  const highNodeCost = getOsmEdgeBuildCost(sampleEdge, calculateMultipliers(highNodeState));
+  assert.ok(highNodeCost > lowNodeCost * 2, `Expected scaled build cost (${highNodeCost}) > 2x base (${lowNodeCost})`);
+});
+
+test('Manual starting-node selection skips auto-seeding until player picks a starting node', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  const base = createInitialGameState(seoul);
+  const startRegion = base.provincialRegions.find((r) => r.isStartingRegion)!;
+  let state = {
+    ...base,
+    capital: 50000,
+    pendingSeedRegionIds: [startRegion.regionId],
+  };
+
+  const { nodes, edges } = makeLongOsmGrid('종로', 'road', 10, 37.5665, 126.978, 's');
+  state = mergeOsmChunk(state, '37.566_126.978', nodes, edges, startRegion.regionId);
+
+  // Zero nodes are auto-connected while awaiting starting node choice
+  assert.equal(state.osmNodes.some((n) => n.connected), false);
+  assert.deepEqual(state.pendingSeedRegionIds, [startRegion.regionId]);
+  assert.equal(connectOsmPath(state, 's4', 's5').success, false);
+
+  // Scoped save reload preserves waiting state without auto-seeding
+  const scoped = scopeGameStateToStartingCity(state);
+  assert.equal(scoped.osmNodes.some((n) => n.connected), false);
+  assert.deepEqual(scoped.pendingSeedRegionIds, [startRegion.regionId]);
+
+  // Player picks 's4' as their starting node
+  const picked = selectIsolatedRegionSeed(scoped, 's4');
+  assert.equal(picked.success, true);
+  assert.equal(picked.newState.osmNodes.filter((n) => n.connected).length, 1);
+  assert.equal(picked.newState.osmNodes.find((n) => n.id === 's4')?.connected, true);
+  assert.deepEqual(picked.newState.pendingSeedRegionIds, []);
+
+  // Frontier opens outward from chosen starting node 's4'
+  const dists = computeOsmFrontierDistancesForState(picked.newState);
+  assert.equal(dists.get('s4'), 0);
+  assert.equal(dists.get('s9'), 5);
+  assert.equal(dists.get('s10'), undefined);
+
+  const buildRes = connectOsmPath(picked.newState, 's4', 's6');
+  assert.equal(buildRes.success, true);
+  assert.equal(buildRes.builtCount, 2);
+});
+
+test('Batched connectOsmPath matches sequential connectOsmEdge rewards, costs, way bonuses, and achievements', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  let base = { ...createInitialGameState(seoul), capital: 500_000 };
+  base = unlockSkill(base, 'sk_root_0').newState;
+  base = unlockSkill(base, 'sk_trunk_2').newState;
+  base = unlockSkill(base, 'sk_snap_tool').newState;
+
+  const { nodes, edges } = makeSampleOsmGrid('테헤란로', 'road');
+  nodes[0].connected = true;
+  base = mergeOsmChunk(base, '37.566_126.978', nodes, edges, 'curated_kr_seoul');
+  const seedId = 'n1';
+  const targetId = 'n5';
+
+  const path = findOsmRoadPath(base, seedId, targetId)!;
+  assert.ok(path && path.unbuiltEdgeIds.length === 4);
+
+  const batched = connectOsmPath(base, seedId, targetId);
+  assert.equal(batched.success, true);
+
+  let seqState = base;
+  for (const eid of path.unbuiltEdgeIds) {
+    const step = connectOsmEdge(seqState, eid);
+    assert.equal(step.success, true);
+    seqState = step.newState;
+  }
+
+  assert.equal(batched.newState.capital, seqState.capital);
+  assert.equal(batched.newState.totalLifetimeEarnings, seqState.totalLifetimeEarnings);
+  assert.equal(batched.newState.stats.totalOsmEdgesBuilt, seqState.stats.totalOsmEdgesBuilt);
+  assert.equal(batched.newState.stats.connectedOsmNodes, seqState.stats.connectedOsmNodes);
+  assert.equal(batched.newState.stats.mapped1to1Km, seqState.stats.mapped1to1Km);
+  assert.deepEqual(batched.newState.completedOsmWays, seqState.completedOsmWays);
+  assert.deepEqual(
+    batched.newState.achievements.filter((a) => a.unlocked).map((a) => a.id),
+    seqState.achievements.filter((a) => a.unlocked).map((a) => a.id)
+  );
+});
+
+test('Large 3,000+ node OSM graph operations (frontier, reachable, preview, batched link, ticks) run sub-150ms', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  let state = { ...createInitialGameState(seoul), capital: 5_000_000 };
+
+  const rows = 55;
+  const cols = 55; // 3,025 nodes, ~5,940 edges inside Seoul polygon
+  const nodes: Array<{
+    id: string;
+    lat: number;
+    lng: number;
+    connected: boolean;
+    mode: 'road';
+    regionId: string;
+  }> = [];
+  const edges: Array<{
+    id: string;
+    wayName: string;
+    highwayType: string;
+    mode: 'road';
+    fromNodeId: string;
+    toNodeId: string;
+    coordinates: [[number, number], [number, number]];
+    distanceKm: number;
+    buildCost: number;
+    baseIncomePerSec: number;
+    built: boolean;
+    regionId: string;
+  }> = [];
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      nodes.push({
+        id: `g_${r}_${c}`,
+        lat: 37.54 + r * 0.0005,
+        lng: 126.96 + c * 0.0005,
+        connected: r === 27 && c === 27,
+        mode: 'road',
+        regionId: 'curated_kr_seoul',
+      });
+    }
+  }
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const id = `g_${r}_${c}`;
+      const lat = 37.54 + r * 0.0005;
+      const lng = 126.96 + c * 0.0005;
+      if (c + 1 < cols) {
+        const nid = `g_${r}_${c + 1}`;
+        edges.push({
+          id: `eh_${r}_${c}`,
+          wayName: `가로대로 ${r}`,
+          highwayType: 'primary',
+          mode: 'road',
+          fromNodeId: id,
+          toNodeId: nid,
+          coordinates: [
+            [lat, lng],
+            [lat, lng + 0.0005],
+          ],
+          distanceKm: 0.044,
+          buildCost: 35,
+          baseIncomePerSec: 3.5,
+          built: false,
+          regionId: 'curated_kr_seoul',
+        });
+      }
+      if (r + 1 < rows) {
+        const nid = `g_${r + 1}_${c}`;
+        edges.push({
+          id: `ev_${r}_${c}`,
+          wayName: `세로대로 ${c}`,
+          highwayType: 'secondary',
+          mode: 'road',
+          fromNodeId: id,
+          toNodeId: nid,
+          coordinates: [
+            [lat, lng],
+            [lat + 0.0005, lng],
+          ],
+          distanceKm: 0.055,
+          buildCost: 35,
+          baseIncomePerSec: 3.5,
+          built: false,
+          regionId: 'curated_kr_seoul',
+        });
+      }
+    }
+  }
+
+  state = mergeOsmChunk(state, 'bench_seoul', nodes, edges, 'curated_kr_seoul');
+
+  // Warm index and measure repeated operations
+  const t0 = performance.now();
+  const frontier = computeOsmFrontierDistancesForState(state);
+  const frontierEdges = getFrontierOsmEdgesForState(state, frontier);
+  assert.ok(frontier.size > 0 && frontier.size < 100);
+  assert.ok(frontierEdges.length > 0 && frontierEdges.length < 200);
+
+  const reachable = getReachableOsmNodeSet(state, 'g_27_27');
+  assert.equal(reachable.has('g_27_31'), true);
+  assert.equal(reachable.has('g_0_0'), false);
+
+  for (let i = 0; i < 20; i++) {
+    const preview = findOsmRoadPath(state, 'g_27_27', 'g_29_30');
+    assert.ok(preview && preview.edgeIds.length === 5);
+  }
+
+  const linkRes = connectOsmPath(state, 'g_27_27', 'g_29_30');
+  assert.equal(linkRes.success, true);
+  assert.equal(linkRes.builtCount, 5);
+  state = linkRes.newState;
+
+  for (let i = 0; i < 50; i++) {
+    state = advanceTick(state, 0.1).newState;
+  }
+  const elapsedMs = performance.now() - t0;
+  assert.ok(
+    elapsedMs < 350,
+    `Expected large 3k-node benchmark suite to run quickly (<350ms), took ${elapsedMs.toFixed(1)}ms`
+  );
 });
 

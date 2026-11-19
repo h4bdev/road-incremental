@@ -1,11 +1,13 @@
 import React from 'react';
 import {
   Award,
+  Cloud,
   Gamepad2,
   Globe,
   MousePointerClick,
   RotateCcw,
   Route,
+  Save,
   TreeDeciduous,
   Volume2,
   VolumeX,
@@ -24,12 +26,16 @@ export type ModalTab =
   | 'achievements'
   | 'arcade'
   | 'prestige'
+  | 'saves'
   | null;
 
 interface HUDProps {
   gameState: GameState;
   activeModal: ModalTab;
   hasMapBottomCard?: boolean;
+  activeSlotIndex: number;
+  isSignedIn: boolean;
+  isSyncing?: boolean;
   onSelectModal: (tab: ModalTab) => void;
   onDispatchClick: () => void;
   onToggleSound: () => void;
@@ -40,6 +46,9 @@ export const HUD: React.FC<HUDProps> = ({
   gameState,
   activeModal,
   hasMapBottomCard = false,
+  activeSlotIndex,
+  isSignedIn,
+  isSyncing = false,
   onSelectModal,
   onDispatchClick,
   onToggleSound,
@@ -129,13 +138,31 @@ export const HUD: React.FC<HUDProps> = ({
         {/* Right Utilities */}
         <div className="pointer-events-auto flex items-center gap-0.5 sm:gap-1 bg-slate-950/95 border border-slate-800 rounded-xl p-1 shadow-xl shrink-0">
           <button
+            data-testid="hud-save-slots-button"
+            onClick={() => toggleTab('saves')}
+            aria-label="저장 슬롯 및 계정"
+            title="저장 슬롯 (1~5) 및 클라우드 동기화"
+            className={`min-w-[38px] min-h-[38px] sm:min-w-0 sm:min-h-0 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
+              activeModal === 'saves'
+                ? 'bg-sky-600 text-white'
+                : 'text-slate-200 hover:text-white hover:bg-slate-800'
+            }`}
+          >
+            {isSignedIn ? (
+              <Cloud className={`w-4 h-4 sm:w-3.5 sm:h-3.5 ${isSyncing ? 'animate-pulse text-sky-300' : 'text-emerald-400'}`} />
+            ) : (
+              <Save className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-sky-400" />
+            )}
+            <span className="hidden md:inline">슬롯 {activeSlotIndex}</span>
+          </button>
+          <button
             onClick={onOpenCityReset}
-            aria-label="시작 도시 변경"
-            title="시작 도시 다시 선택"
+            aria-label="메인 메뉴 · 시작 도시 변경"
+            title="메인 메뉴 및 시작 도시 변경"
             className="min-w-[38px] min-h-[38px] sm:min-w-0 sm:min-h-0 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-300 hover:text-white hover:bg-slate-800 flex items-center justify-center gap-1 transition-colors cursor-pointer whitespace-nowrap"
           >
             <RotateCcw className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-sky-400" />
-            <span className="hidden md:inline">시작 도시 변경</span>
+            <span className="hidden lg:inline">메인 메뉴</span>
           </button>
           <button
             onClick={onToggleSound}

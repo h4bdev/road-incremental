@@ -96,6 +96,7 @@ export interface ProvincialRegion {
   adminLevel: string;
   bbox: [number, number, number, number]; // [minLat, minLng, maxLat, maxLng]
   boundaryGeoJson?: GeoJsonBoundary;
+  hasRealOsmBoundary?: boolean;
   centerLat: number;
   centerLng: number;
   unlocked: boolean;
@@ -105,7 +106,7 @@ export interface ProvincialRegion {
   totalNodeCount?: number;
 }
 
-export type UpgradeCategory = 'road_node' | 'rail_speed' | 'editor_click' | 'automation' | 'megascale';
+export type UpgradeCategory = 'road_node' | 'rail_speed' | 'editor_click' | 'megascale';
 
 export interface UpgradeItem {
   id: string;
@@ -123,7 +124,7 @@ export interface UpgradeItem {
   };
 }
 
-export type SkillBranch = 'core' | 'infra' | 'speed' | 'realestate' | 'automation';
+export type SkillBranch = 'core' | 'infra' | 'speed' | 'realestate';
 export type TreeRole = 'root' | 'trunk' | 'branch' | 'canopy';
 
 export interface SkillNode {
@@ -353,7 +354,6 @@ export interface GameState {
   units: MovingUnit[];
   stats: GameStats;
   settings: GameSettings;
-  autoBuilderProgress: number;
   lastTickTimestamp: number;
   minigames: MinigamesState;
 }

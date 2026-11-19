@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Bot,
   Building2,
   Check,
   Compass,
@@ -12,20 +11,16 @@ import {
   Train,
   TreeDeciduous,
   X,
-  Zap,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
 import { GameState, SkillBranch, SkillNode } from '../game/types';
 import {
   areSkillRequirementsMet,
-  calculateMultipliers,
   canUnlockSkill,
-  getExclusivePathTag,
   getSkillMaxAffordable,
   getSkillMoneyCost,
   getSkillTotalInvestedCost,
-  isSkillBlockedByExclusivePath,
 } from '../game/rules';
 
 interface SkillTreePanelProps {
@@ -81,15 +76,8 @@ const BRANCH_META: Record<
     stroke: '#10b981',
     fillBg: 'rgba(5, 150, 105, 0.25)',
     glow: 'rgba(16, 185, 129, 0.45)',
-    label: '상권·노드',
+    label: '상권·물류',
     badgeText: 'text-emerald-300',
-  },
-  automation: {
-    stroke: '#818cf8',
-    fillBg: 'rgba(79, 70, 229, 0.25)',
-    glow: 'rgba(129, 140, 248, 0.45)',
-    label: '자율 시공',
-    badgeText: 'text-indigo-300',
   },
 };
 
@@ -101,8 +89,6 @@ function getNodeIcon(branch: SkillBranch) {
       return Train;
     case 'realestate':
       return Building2;
-    case 'automation':
-      return Bot;
     default:
       return Sparkles;
   }
@@ -139,11 +125,6 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
   const pinchStartDistRef = useRef<number | null>(null);
   const movedDistRef = useRef(0);
 
-  const mults = calculateMultipliers(gameState);
-  const autoSkill = gameState.skills.find((s) => s.id === 'sk_auto_1');
-  const autoActive = (autoSkill?.level || 0) > 0;
-  const multiPathUnlocked = (gameState.skills.find((s) => s.id === 'sk_multi_path')?.level || 0) > 0;
-
   const skillMap = useMemo(
     () => new Map(gameState.skills.map((s) => [s.id, s])),
     [gameState.skills]
@@ -161,16 +142,6 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
     () => gameState.skills.some((s) => canUnlockSkill(gameState, s)),
     [gameState]
   );
-
-  // Determine which exclusive specialization path (A, B, C) is currently chosen (if any)
-  const activeExclusivePath = useMemo(() => {
-    for (const s of gameState.skills) {
-      if (s.exclusiveGroup === 'spec_path' && s.level > 0) {
-        return getExclusivePathTag(s);
-      }
-    }
-    return null;
-  }, [gameState.skills]);
 
   const fitTopToViewport = useCallback(() => {
     const el = viewportRef.current;
@@ -256,9 +227,6 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
 
   // Selected study details
   const selReqMet = selectedSkill ? areSkillRequirementsMet(gameState, selectedSkill) : false;
-  const selBlockedByPath = selectedSkill
-    ? isSkillBlockedByExclusivePath(gameState, selectedSkill)
-    : false;
   const selMoneyCost = selectedSkill ? getSkillMoneyCost(selectedSkill) : 0;
   const selMaxInfo = selectedSkill
     ? getSkillMaxAffordable(gameState, selectedSkill)
@@ -295,7 +263,7 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
                   통합 연구 트리 ({gameState.skills.length}종 · {totalTreeLevels}/{maxTreeLevels} Lv)
                 </h2>
                 <p className="hidden sm:block text-xs text-slate-400">
-                  자금($)만으로 [11]부터 [161] 특이점까지 연구하세요 · 6~10티어는 3대 전문 경로 중 1개를 선택합니다.
+                  자금($)만으로 [11]부터 [161] 특이점까지 모든 전문 분야를 자유롭게 연구하세요.
                 </p>
               </div>
             </div>
@@ -336,7 +304,7 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
               data-testid="study-reset-btn"
               disabled={totalInvested <= 0}
               onClick={onResetSkillTree}
-              title="투자한 모든 자금을 100% 환불받고 경로 A/B/C를 재선택합니다."
+              title="투자한 모든 자금을 100% 환불받고 연구 트리를 초기화합니다."
               className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 whitespace-nowrap cursor-pointer transition-colors ${
                 totalInvested > 0
                   ? 'bg-rose-950/80 hover:bg-rose-900 text-rose-200 border border-rose-500/50'
@@ -356,27 +324,6 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
             </button>
           </div>
         </div>
-
-        {/* Auto-Builder Status Strip */}
-        {autoActive && (
-          <div className="px-4 sm:px-5 py-1.5 bg-indigo-950/35 border-b border-indigo-500/30 flex items-center justify-between gap-3 shrink-0">
-            <div className="flex items-center gap-2 text-[11px] sm:text-xs text-indigo-200 font-medium min-w-0">
-              <Zap className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-              <span className="truncate">
-                자율 시공 드론 (Lv.{autoSkill?.level}) ·{' '}
-                {(1 / mults.autoBuilderRatePerSec).toFixed(2)}초당 {mults.parallelBuildCount}구간
-              </span>
-            </div>
-            <div className="w-20 sm:w-32 h-1.5 bg-slate-800 rounded-full overflow-hidden shrink-0">
-              <div
-                className="h-full bg-indigo-400 transition-all duration-150"
-                style={{
-                  width: `${Math.min(100, Math.round(gameState.autoBuilderProgress * 100))}%`,
-                }}
-              />
-            </div>
-          </div>
-        )}
 
         {/* Main Split: Top-to-Bottom AD Study Viewport + Inspector Drawer */}
         <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
@@ -416,20 +363,9 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
               </button>
             </div>
 
-            {/* Path Choice Indicator */}
+            {/* Tree Navigation Hint */}
             <div className="hidden sm:flex absolute top-2.5 right-2.5 z-20 items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-800 text-[11px] text-slate-300 shadow">
-              {multiPathUnlocked ? (
-                <span className="text-emerald-400 font-bold">
-                  [111] 멀티-패스 해금: 3대 경로 동시 선택 가능
-                </span>
-              ) : activeExclusivePath ? (
-                <span>
-                  6~10티어 선택 경로:{' '}
-                  <strong className="text-amber-300">경로 {activeExclusivePath}</strong> (초기화로 변경 가능)
-                </span>
-              ) : (
-                <span>휠·드래그로 아래 티어로 탐색 (1~16티어)</span>
-              )}
+              <span>휠·드래그로 1~16티어 자유 탐색</span>
             </div>
 
             {/* Transformed AD Study World */}
@@ -442,19 +378,19 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
               }}
               className="relative"
             >
-              {/* Era & Path Split Visual Guides */}
+              {/* Era & Branch Visual Guides */}
               <div
                 style={{ left: 60, top: 645, width: 1480 }}
                 className="absolute border-t border-dashed border-slate-700/80 pt-1.5 flex items-center justify-between text-xs font-bold tracking-wider uppercase pointer-events-none"
               >
                 <span className="text-amber-400 bg-[#050811] pr-3">
-                  경로 A · 토목/도로 {activeExclusivePath && activeExclusivePath !== 'A' && !multiPathUnlocked ? '(잠김)' : ''}
+                  토목 · 도로 분야
                 </span>
                 <span className="text-cyan-400 bg-[#050811] px-3">
-                  경로 B · 철도/고속배차 {activeExclusivePath && activeExclusivePath !== 'B' && !multiPathUnlocked ? '(잠김)' : ''}
+                  철도 · 고속배차 분야
                 </span>
-                <span className="text-indigo-400 bg-[#050811] pl-3">
-                  경로 C · 자율시공/상권 {activeExclusivePath && activeExclusivePath !== 'C' && !multiPathUnlocked ? '(잠김)' : ''}
+                <span className="text-emerald-400 bg-[#050811] pl-3">
+                  상권 · 물류 분야
                 </span>
               </div>
 
@@ -478,8 +414,7 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
                     if (!parent) return null;
 
                     const bothUnlocked = parent.level > 0 && skill.level > 0;
-                    const blocked = isSkillBlockedByExclusivePath(gameState, skill);
-                    const ready = !blocked && parent.level > 0 && skill.level === 0;
+                    const ready = parent.level > 0 && skill.level === 0;
                     const branchMeta = BRANCH_META[skill.branch];
                     const pathD = buildAdConnectorPath(parent, skill);
 
@@ -497,9 +432,7 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
                           d={pathD}
                           fill="none"
                           stroke={
-                            blocked
-                              ? '#1e293b'
-                              : bothUnlocked
+                            bothUnlocked
                               ? branchMeta.stroke
                               : ready
                               ? '#64748b'
@@ -509,7 +442,7 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
                           strokeLinecap="round"
                           strokeLinejoin="round"
                           strokeDasharray={ready ? '7 5' : undefined}
-                          opacity={blocked ? 0.35 : bothUnlocked ? 0.95 : ready ? 0.85 : 0.65}
+                          opacity={bothUnlocked ? 0.95 : ready ? 0.85 : 0.65}
                         />
                       </g>
                     );
@@ -522,7 +455,6 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
                 const Icon = getNodeIcon(skill.branch);
                 const branchMeta = BRANCH_META[skill.branch];
                 const reqMet = areSkillRequirementsMet(gameState, skill);
-                const blocked = isSkillBlockedByExclusivePath(gameState, skill);
                 const unlocked = skill.level > 0;
                 const isMaxed = skill.level >= skill.maxLevel;
                 const affordable = canUnlockSkill(gameState, skill);
@@ -550,8 +482,6 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
                       width: skill.id === 'sk_multi_path' || skill.id === 'sk_crown_3' ? 236 : 196,
                       borderColor: isSelected
                         ? '#ffffff'
-                        : blocked
-                        ? '#1e293b'
                         : isMaxed
                         ? '#10b981'
                         : unlocked
@@ -561,9 +491,7 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
                         : reqMet
                         ? '#475569'
                         : '#1e293b',
-                      backgroundColor: blocked
-                        ? 'rgba(15, 23, 42, 0.45)'
-                        : unlocked
+                      backgroundColor: unlocked
                         ? branchMeta.fillBg
                         : reqMet
                         ? 'rgba(15, 23, 42, 0.92)'
@@ -574,13 +502,11 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
                         ? '0 0 12px rgba(251, 191, 36, 0.3)'
                         : undefined,
                     }}
-                    className={`absolute rounded-xl border-2 px-2.5 py-2 text-left transition-transform hover:scale-[1.03] cursor-pointer focus:outline-none ${
-                      blocked ? 'opacity-45' : ''
-                    }`}
+                    className="absolute rounded-xl border-2 px-2.5 py-2 text-left transition-transform hover:scale-[1.03] cursor-pointer focus:outline-none"
                   >
                     <div className="flex items-center justify-between gap-1.5">
                       <span className="inline-flex items-center gap-1 text-[11px] font-mono-numbers font-bold">
-                        {!reqMet || blocked ? (
+                        {!reqMet ? (
                           <Lock className="w-3 h-3 text-slate-500" />
                         ) : (
                           <Icon className={`w-3.5 h-3.5 ${branchMeta.badgeText}`} />
@@ -609,14 +535,10 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
                       {!isMaxed && (
                         <span
                           className={`font-bold shrink-0 ${
-                            blocked
-                              ? 'text-slate-500'
-                              : affordable
-                              ? 'text-emerald-400'
-                              : 'text-rose-400'
+                            affordable ? 'text-emerald-400' : 'text-rose-400'
                           }`}
                         >
-                          {blocked ? '경로 잠김' : formatMoneyCompact(nextCost)}
+                          {formatMoneyCompact(nextCost)}
                         </span>
                       )}
                     </div>
@@ -664,15 +586,6 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
                   <div className="flex items-start gap-2 text-xs text-slate-400 p-2 rounded-lg bg-slate-900/50 border border-slate-800">
                     <Lock className="w-4 h-4 shrink-0 mt-0.5 text-slate-500" />
                     <span>선행 연구 필요: {selReqNames}</span>
-                  </div>
-                )}
-
-                {selBlockedByPath && (
-                  <div className="flex items-start gap-2 text-xs text-amber-300 p-2 rounded-lg bg-amber-950/30 border border-amber-500/40">
-                    <Lock className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
-                    <span>
-                      현재 <strong>경로 {activeExclusivePath}</strong>를 선택 중입니다. 다른 경로로 바꾸려면 상단 <strong>트리 초기화 (100% 환불)</strong>를 누르거나 [111]을 해금하세요.
-                    </span>
                   </div>
                 )}
 

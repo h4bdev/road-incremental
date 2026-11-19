@@ -1,0 +1,298 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 4.1: Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitive Helpers ---
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidSlotId(slotId) {
+      return slotId is string && slotId.size() == 6 && slotId.matches('^slot_[1-5]$');
+    }
+
+    function isValidChunkId(chunkId) {
+      return chunkId is string && chunkId.size() >= 7 && chunkId.size() <= 8 && chunkId.matches('^graph_[0-9]{1,2}$');
+    }
+
+    function isStringArrayBounded(arr, maxLen) {
+      return arr is list &&
+        arr.size() <= maxLen &&
+        (arr.size() == 0 || (arr[0] is string && arr[0].size() <= 200));
+    }
+
+    function isMapArrayBounded(arr, maxLen) {
+      return arr is list &&
+        arr.size() <= maxLen &&
+        (arr.size() == 0 || arr[0] is map);
+    }
+
+    // --- Validation Blueprints (Anti-Update-Gap) ---
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'email', 'photoURL', 'activeSlotId', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'displayName', 'email', 'photoURL', 'activeSlotId', 'createdAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        data.uid == userId &&
+        data.uid == request.auth.uid &&
+        data.displayName is string && data.displayName.size() <= 120 &&
+        data.email is string && data.email.size() >= 1 && data.email.size() <= 254 &&
+        data.photoURL is string && data.photoURL.size() <= 1024 &&
+        isValidSlotId(data.activeSlotId) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSaveSlotMeta(data, userId, slotId) {
+      return data.keys().hasAll([
+        'slotId', 'slotIndex', 'ownerUid', 'slotName',
+        'cityId', 'cityName', 'cityCountry', 'cityLat', 'cityLng', 'cityZoom', 'cityDescription', 'cityIsCustom',
+        'capital', 'mapped1to1Km', 'connectedOsmNodes', 'totalOsmEdgesBuilt', 'tierLabel',
+        'graphChunkCount', 'clientSavedAt', 'createdAt', 'updatedAt'
+      ]) &&
+        data.keys().hasOnly([
+          'slotId', 'slotIndex', 'ownerUid', 'slotName',
+          'cityId', 'cityName', 'cityCountry', 'cityLat', 'cityLng', 'cityZoom', 'cityDescription', 'cityIsCustom',
+          'capital', 'mapped1to1Km', 'connectedOsmNodes', 'totalOsmEdgesBuilt', 'tierLabel',
+          'graphChunkCount', 'clientSavedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidSlotId(data.slotId) &&
+        data.slotId == slotId &&
+        data.slotIndex is number && data.slotIndex >= 1 && data.slotIndex <= 5 &&
+        isValidId(data.ownerUid) &&
+        data.ownerUid == userId &&
+        data.ownerUid == request.auth.uid &&
+        data.slotName is string && data.slotName.size() >= 1 && data.slotName.size() <= 60 &&
+        data.cityId is string && data.cityId.size() >= 1 && data.cityId.size() <= 100 &&
+        data.cityName is string && data.cityName.size() >= 1 && data.cityName.size() <= 120 &&
+        data.cityCountry is string && data.cityCountry.size() <= 80 &&
+        data.cityLat is number && data.cityLat >= -90 && data.cityLat <= 90 &&
+        data.cityLng is number && data.cityLng >= -180 && data.cityLng <= 180 &&
+        data.cityZoom is number && data.cityZoom >= 1 && data.cityZoom <= 22 &&
+        data.cityDescription is string && data.cityDescription.size() <= 300 &&
+        data.cityIsCustom is bool &&
+        data.capital is number && data.capital >= 0 &&
+        data.mapped1to1Km is number && data.mapped1to1Km >= 0 &&
+        data.connectedOsmNodes is number && data.connectedOsmNodes >= 0 &&
+        data.totalOsmEdgesBuilt is number && data.totalOsmEdgesBuilt >= 0 &&
+        data.tierLabel is string && data.tierLabel.size() >= 1 && data.tierLabel.size() <= 40 &&
+        data.graphChunkCount is number && data.graphChunkCount >= 0 && data.graphChunkCount <= 100 &&
+        data.clientSavedAt is number && data.clientSavedAt >= 0 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSaveSlotCore(data, userId, slotId) {
+      return data.keys().hasAll([
+        'ownerUid', 'slotId', 'version', 'capital', 'totalLifetimeEarnings', 'lastTickTimestamp',
+        'startingCity', 'stats', 'settings', 'skillsMap',
+        'unlockedAchievementIds', 'loadedOsmChunks', 'loadedOsmRegions', 'pendingSeedRegionIds', 'completedOsmWays',
+        'regions', 'customBridgeEdges', 'minigames', 'createdAt', 'updatedAt'
+      ]) &&
+        data.keys().hasOnly([
+          'ownerUid', 'slotId', 'version', 'capital', 'totalLifetimeEarnings', 'lastTickTimestamp',
+          'startingCity', 'stats', 'settings', 'skillsMap',
+          'unlockedAchievementIds', 'loadedOsmChunks', 'loadedOsmRegions', 'pendingSeedRegionIds', 'completedOsmWays',
+          'regions', 'customBridgeEdges', 'minigames', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.ownerUid) &&
+        data.ownerUid == userId &&
+        data.ownerUid == request.auth.uid &&
+        isValidSlotId(data.slotId) &&
+        data.slotId == slotId &&
+        data.version is number && data.version == 1 &&
+        data.capital is number && data.capital >= 0 &&
+        data.totalLifetimeEarnings is number && data.totalLifetimeEarnings >= 0 &&
+        data.lastTickTimestamp is number && data.lastTickTimestamp >= 0 &&
+        data.startingCity is map && data.startingCity.keys().size() <= 12 &&
+        data.stats is map && data.stats.keys().size() <= 20 &&
+        data.settings is map && data.settings.keys().size() <= 10 &&
+        data.skillsMap is map && data.skillsMap.keys().size() <= 200 &&
+        data.minigames is map && data.minigames.keys().size() <= 15 &&
+        isStringArrayBounded(data.unlockedAchievementIds, 100) &&
+        isStringArrayBounded(data.loadedOsmChunks, 500) &&
+        isStringArrayBounded(data.loadedOsmRegions, 200) &&
+        isStringArrayBounded(data.pendingSeedRegionIds, 200) &&
+        isStringArrayBounded(data.completedOsmWays, 2000) &&
+        isMapArrayBounded(data.regions, 200) &&
+        isMapArrayBounded(data.customBridgeEdges, 500) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSaveSlotGraphChunk(data, userId, slotId) {
+      return data.keys().hasAll(['ownerUid', 'slotId', 'chunkIndex', 'nodeIds', 'edgeIds', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'slotId', 'chunkIndex', 'nodeIds', 'edgeIds', 'createdAt', 'updatedAt']) &&
+        isValidId(data.ownerUid) &&
+        data.ownerUid == userId &&
+        data.ownerUid == request.auth.uid &&
+        isValidSlotId(data.slotId) &&
+        data.slotId == slotId &&
+        data.chunkIndex is number && data.chunkIndex >= 0 && data.chunkIndex <= 99 &&
+        isStringArrayBounded(data.nodeIds, 2000) &&
+        isStringArrayBounded(data.edgeIds, 2000) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // --- Relational Master Gate Helpers ---
+    function userDocExists(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId)) ||
+        existsAfter(/databases/$(database)/documents/users/$(userId));
+    }
+
+    function parentSlotExists(userId, slotId) {
+      return exists(/databases/$(database)/documents/users/$(userId)/slots/$(slotId)) ||
+        existsAfter(/databases/$(database)/documents/users/$(userId)/slots/$(slotId));
+    }
+
+    // --- /users/{userId} (PII Isolated strictly to owner) ---
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId) && isVerifiedUser();
+      allow list: if false;
+      allow create: if isVerifiedUser() &&
+        isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming(), userId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser() &&
+        isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming(), userId) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          // Action: Refresh Google profile & active slot
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'photoURL', 'activeSlotId', 'updatedAt']) ||
+          // Action: Switch active save slot
+          incoming().diff(existing()).affectedKeys().hasOnly(['activeSlotId', 'updatedAt'])
+        );
+      allow delete: if false;
+
+      // --- /users/{userId}/slots/{slotId} (5 Save Slots) ---
+      match /slots/{slotId} {
+        allow get: if isValidId(userId) && isValidSlotId(slotId) && isOwner(userId) && isVerifiedUser();
+        allow list: if isOwner(userId) && isVerifiedUser() && existing().ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser() &&
+          isOwner(userId) &&
+          isValidId(userId) &&
+          isValidSlotId(slotId) &&
+          isValidSaveSlotMeta(incoming(), userId, slotId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          userDocExists(userId);
+        allow update: if isVerifiedUser() &&
+          isOwner(userId) &&
+          isValidId(userId) &&
+          isValidSlotId(slotId) &&
+          isValidSaveSlotMeta(incoming(), userId, slotId) &&
+          incoming().ownerUid == existing().ownerUid &&
+          incoming().slotId == existing().slotId &&
+          incoming().slotIndex == existing().slotIndex &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            // Action: Save slot progress overwrite
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'slotName', 'cityId', 'cityName', 'cityCountry', 'cityLat', 'cityLng', 'cityZoom', 'cityDescription', 'cityIsCustom',
+              'capital', 'mapped1to1Km', 'connectedOsmNodes', 'totalOsmEdgesBuilt', 'tierLabel',
+              'graphChunkCount', 'clientSavedAt', 'updatedAt'
+            ]) ||
+            // Action: Rename slot
+            incoming().diff(existing()).affectedKeys().hasOnly(['slotName', 'updatedAt'])
+          );
+        allow delete: if isValidId(userId) && isValidSlotId(slotId) && isOwner(userId) && isVerifiedUser();
+
+        // --- /users/{userId}/slots/{slotId}/core/{docId} ---
+        match /core/{docId} {
+          allow get: if isValidId(userId) && isValidSlotId(slotId) && docId == 'state' && isOwner(userId) && isVerifiedUser();
+          allow list: if isOwner(userId) && isVerifiedUser() && existing().ownerUid == request.auth.uid;
+          allow create: if isVerifiedUser() &&
+            isOwner(userId) &&
+            isValidId(userId) &&
+            isValidSlotId(slotId) &&
+            docId == 'state' &&
+            isValidSaveSlotCore(incoming(), userId, slotId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time &&
+            parentSlotExists(userId, slotId);
+          allow update: if isVerifiedUser() &&
+            isOwner(userId) &&
+            isValidId(userId) &&
+            isValidSlotId(slotId) &&
+            docId == 'state' &&
+            isValidSaveSlotCore(incoming(), userId, slotId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().slotId == existing().slotId &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'version', 'capital', 'totalLifetimeEarnings', 'lastTickTimestamp',
+              'startingCity', 'stats', 'settings', 'skillsMap',
+              'unlockedAchievementIds', 'loadedOsmChunks', 'loadedOsmRegions', 'pendingSeedRegionIds', 'completedOsmWays',
+              'regions', 'customBridgeEdges', 'minigames', 'updatedAt'
+            ]) &&
+            parentSlotExists(userId, slotId);
+          allow delete: if isValidId(userId) && isValidSlotId(slotId) && docId == 'state' && isOwner(userId) && isVerifiedUser();
+        }
+
+        // --- /users/{userId}/slots/{slotId}/chunks/{chunkId} ---
+        match /chunks/{chunkId} {
+          allow get: if isValidId(userId) && isValidSlotId(slotId) && isValidChunkId(chunkId) && isOwner(userId) && isVerifiedUser();
+          allow list: if isOwner(userId) && isVerifiedUser() && existing().ownerUid == request.auth.uid;
+          allow create: if isVerifiedUser() &&
+            isOwner(userId) &&
+            isValidId(userId) &&
+            isValidSlotId(slotId) &&
+            isValidChunkId(chunkId) &&
+            isValidSaveSlotGraphChunk(incoming(), userId, slotId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time &&
+            parentSlotExists(userId, slotId);
+          allow update: if isVerifiedUser() &&
+            isOwner(userId) &&
+            isValidId(userId) &&
+            isValidSlotId(slotId) &&
+            isValidChunkId(chunkId) &&
+            isValidSaveSlotGraphChunk(incoming(), userId, slotId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().slotId == existing().slotId &&
+            incoming().chunkIndex == existing().chunkIndex &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'nodeIds', 'edgeIds', 'updatedAt'
+            ]) &&
+            parentSlotExists(userId, slotId);
+          allow delete: if isValidId(userId) && isValidSlotId(slotId) && isValidChunkId(chunkId) && isOwner(userId) && isVerifiedUser();
+        }
+      }
+    }
+  }
+}

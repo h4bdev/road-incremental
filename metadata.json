@@ -1,5 +1,5 @@
 {
-  "name": "TerraLine: 1:1 세계 도로·철도 네트워크 방치형 게임",
+  "name": "Road Incremental: 1:1 세계 도로·철도 네트워크 방치형 게임",
   "description": "1:1 실제 지도 위에 정해진 도로와 철도 노선을 연결하고, 랜드마크를 매입하며, 스킬 트리를 통해 수천만 km의 세계 교통망을 구축하는 인크리멘탈 방치형 게임.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

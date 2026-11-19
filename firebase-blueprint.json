@@ -1,0 +1,333 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile and active save slot preference (owner-isolated PII).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name",
+          "maxLength": 120
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified Google account email",
+          "minLength": 1,
+          "maxLength": 254
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Avatar URL",
+          "maxLength": 512
+        },
+        "activeSlotId": {
+          "type": "string",
+          "description": "Currently selected save slot ID (slot_1..slot_5)",
+          "pattern": "^slot_[1-5]$",
+          "minLength": 6,
+          "maxLength": 6
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last-updated timestamp"
+        }
+      },
+      "required": ["uid", "displayName", "email", "photoURL", "activeSlotId", "createdAt", "updatedAt"]
+    },
+    "SaveSlotMeta": {
+      "title": "SaveSlotMeta",
+      "description": "Summary metadata for one of the 5 player save slots.",
+      "type": "object",
+      "properties": {
+        "slotId": {
+          "type": "string",
+          "pattern": "^slot_[1-5]$",
+          "minLength": 6,
+          "maxLength": 6
+        },
+        "slotIndex": {
+          "type": "integer",
+          "description": "1-based slot index (1..5)"
+        },
+        "ownerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "slotName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "cityId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "cityName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "cityCountry": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "cityLat": {
+          "type": "number"
+        },
+        "cityLng": {
+          "type": "number"
+        },
+        "cityZoom": {
+          "type": "number"
+        },
+        "cityDescription": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "cityIsCustom": {
+          "type": "boolean"
+        },
+        "capital": {
+          "type": "number"
+        },
+        "mapped1to1Km": {
+          "type": "number"
+        },
+        "connectedOsmNodes": {
+          "type": "integer"
+        },
+        "totalOsmEdgesBuilt": {
+          "type": "integer"
+        },
+        "tierLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "graphChunkCount": {
+          "type": "integer"
+        },
+        "clientSavedAt": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "slotId",
+        "slotIndex",
+        "ownerUid",
+        "slotName",
+        "cityId",
+        "cityName",
+        "cityCountry",
+        "cityLat",
+        "cityLng",
+        "cityZoom",
+        "cityDescription",
+        "cityIsCustom",
+        "capital",
+        "mapped1to1Km",
+        "connectedOsmNodes",
+        "totalOsmEdgesBuilt",
+        "tierLabel",
+        "graphChunkCount",
+        "clientSavedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SaveSlotCore": {
+      "title": "SaveSlotCore",
+      "description": "Compact player progression, skills, regions, minigames, and custom bridges for a save slot.",
+      "type": "object",
+      "properties": {
+        "ownerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "slotId": {
+          "type": "string",
+          "pattern": "^slot_[1-5]$",
+          "minLength": 6,
+          "maxLength": 6
+        },
+        "version": {
+          "type": "integer"
+        },
+        "capital": {
+          "type": "number"
+        },
+        "totalLifetimeEarnings": {
+          "type": "number"
+        },
+        "lastTickTimestamp": {
+          "type": "integer"
+        },
+        "startingCity": {
+          "type": "object"
+        },
+        "stats": {
+          "type": "object"
+        },
+        "settings": {
+          "type": "object"
+        },
+        "skillsMap": {
+          "type": "object"
+        },
+        "unlockedAchievementIds": {
+          "type": "array"
+        },
+        "loadedOsmChunks": {
+          "type": "array"
+        },
+        "loadedOsmRegions": {
+          "type": "array"
+        },
+        "pendingSeedRegionIds": {
+          "type": "array"
+        },
+        "completedOsmWays": {
+          "type": "array"
+        },
+        "regions": {
+          "type": "array"
+        },
+        "customBridgeEdges": {
+          "type": "array"
+        },
+        "minigames": {
+          "type": "object"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerUid",
+        "slotId",
+        "version",
+        "capital",
+        "totalLifetimeEarnings",
+        "lastTickTimestamp",
+        "startingCity",
+        "stats",
+        "settings",
+        "skillsMap",
+        "unlockedAchievementIds",
+        "loadedOsmChunks",
+        "loadedOsmRegions",
+        "pendingSeedRegionIds",
+        "completedOsmWays",
+        "regions",
+        "customBridgeEdges",
+        "minigames",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SaveSlotGraphChunk": {
+      "title": "SaveSlotGraphChunk",
+      "description": "Bounded chunk of connected OSM node IDs and built edge IDs (max 2000 each per chunk doc).",
+      "type": "object",
+      "properties": {
+        "ownerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "slotId": {
+          "type": "string",
+          "pattern": "^slot_[1-5]$",
+          "minLength": 6,
+          "maxLength": 6
+        },
+        "chunkIndex": {
+          "type": "integer"
+        },
+        "nodeIds": {
+          "type": "array"
+        },
+        "edgeIds": {
+          "type": "array"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerUid",
+        "slotId",
+        "chunkIndex",
+        "nodeIds",
+        "edgeIds",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Owner-only user profile document storing verified Google identity metadata and active save slot."
+    },
+    "/users/{userId}/slots/{slotId}": {
+      "schema": {
+        "$ref": "#/entities/SaveSlotMeta"
+      },
+      "description": "Up to 5 save slot metadata headers per user (slot_1..slot_5)."
+    },
+    "/users/{userId}/slots/{slotId}/core/{docId}": {
+      "schema": {
+        "$ref": "#/entities/SaveSlotCore"
+      },
+      "description": "Core game state payload (docId == 'state') for a save slot."
+    },
+    "/users/{userId}/slots/{slotId}/chunks/{chunkId}": {
+      "schema": {
+        "$ref": "#/entities/SaveSlotGraphChunk"
+      },
+      "description": "Chunked lists of connected OSM node IDs and built edge IDs (chunkId == 'graph_0'..'graph_99')."
+    }
+  }
+}

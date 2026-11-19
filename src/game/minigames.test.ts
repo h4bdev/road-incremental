@@ -386,7 +386,7 @@ test('expanded minigames (Solar, BioDome, Collider) advance milestones without m
   assert.equal(MINIGAME_MILESTONES.length, 56);
 });
 
-test('minigame milestone achievements directly boost main TerraLine money income', () => {
+test('minigame milestone achievements directly boost main Road Incremental money income', () => {
   const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
   let state = { ...createInitialGameState(seoul), capital: 50000 };
 
@@ -430,13 +430,13 @@ test('minigame milestone achievements directly boost main TerraLine money income
   const boostedState = { ...state, minigames: progressedMg };
   const summary = getMinigameMilestoneSummary(boostedState.minigames);
   assert.equal(summary.unlockedCount, 2);
-  assert.equal(summary.totalBoostPct, 30);
-  assert.equal(summary.incomeMult, 1.3);
+  assert.equal(summary.totalBoostPct, 6);
+  assert.equal(summary.incomeMult, 1.06);
 
   const mults = calculateMultipliers(boostedState);
-  assert.equal(mults.minigameBoostPct, 30);
-  assert.equal(mults.minigameIncomeMult, 1.3);
+  assert.equal(mults.minigameBoostPct, 6);
+  assert.equal(mults.minigameIncomeMult, 1.06);
 
   const boostedIncome = calculateTotalIncomePerSec(boostedState);
-  assert.equal(Math.round(boostedIncome), Math.round(baseIncome * 1.3));
+  assert.equal(Math.round(boostedIncome), Math.round(baseIncome * 1.06));
 });

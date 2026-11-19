@@ -102,7 +102,7 @@ function buildRequestHeaders(accept = 'application/json', contentType?: string):
   }
   // Browsers forbid setting User-Agent in fetch; only send it from Node server runtime.
   if (isServerRuntime()) {
-    headers['User-Agent'] = 'TerraLine-OSM-Builder/1.0';
+    headers['User-Agent'] = 'RoadIncremental-OSM-Builder/1.0';
   }
   return headers;
 }
@@ -360,27 +360,100 @@ export function buildFallbackStarterGrid(
   };
 }
 
+function pointToSegmentDistSq(
+  pt: number[],
+  segStart: number[],
+  segEnd: number[]
+): number {
+  const dx = segEnd[0] - segStart[0];
+  const dy = segEnd[1] - segStart[1];
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) {
+    const px = pt[0] - segStart[0];
+    const py = pt[1] - segStart[1];
+    return px * px + py * py;
+  }
+  const t = Math.max(0, Math.min(1, ((pt[0] - segStart[0]) * dx + (pt[1] - segStart[1]) * dy) / lenSq));
+  const projX = segStart[0] + t * dx;
+  const projY = segStart[1] + t * dy;
+  const rx = pt[0] - projX;
+  const ry = pt[1] - projY;
+  return rx * rx + ry * ry;
+}
+
+function douglasPeucker(points: number[][], epsilonSq: number): number[][] {
+  if (points.length <= 2) return points;
+  let maxDistSq = 0;
+  let maxIdx = 0;
+  const lastIdx = points.length - 1;
+  for (let i = 1; i < lastIdx; i++) {
+    const dSq = pointToSegmentDistSq(points[i], points[0], points[lastIdx]);
+    if (dSq > maxDistSq) {
+      maxDistSq = dSq;
+      maxIdx = i;
+    }
+  }
+  if (maxDistSq > epsilonSq && maxIdx > 0 && maxIdx < lastIdx) {
+    const left = douglasPeucker(points.slice(0, maxIdx + 1), epsilonSq);
+    const right = douglasPeucker(points.slice(maxIdx), epsilonSq);
+    return [...left.slice(0, -1), ...right];
+  }
+  return [points[0], points[lastIdx]];
+}
+
 function simplifyRing(ring: number[][], maxPts: number): number[][] {
   if (!Array.isArray(ring) || ring.length < 4) return [];
   const rounded = ring.map((pt) => [
     Number(Number(pt[0]).toFixed(5)),
     Number(Number(pt[1]).toFixed(5)),
   ]);
+  const first = rounded[0];
+  const last = rounded[rounded.length - 1];
+  if (first[0] !== last[0] || first[1] !== last[1]) {
+    rounded.push([first[0], first[1]]);
+  }
   if (rounded.length <= maxPts) {
-    const first = rounded[0];
-    const last = rounded[rounded.length - 1];
-    if (first[0] !== last[0] || first[1] !== last[1]) {
-      rounded.push([first[0], first[1]]);
-    }
     return rounded;
   }
-  const step = Math.max(1, Math.floor((rounded.length - 1) / (maxPts - 1)));
-  const out: number[][] = [];
-  for (let i = 0; i < rounded.length - 1; i += step) {
-    out.push(rounded[i]);
+
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const [x, y] of rounded) {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
   }
-  out.push([rounded[0][0], rounded[0][1]]);
-  return out.length >= 4 ? out : [];
+  const span = Math.max(maxX - minX, maxY - minY, 0.01);
+  let epsilon = span * 0.0012;
+  let simplified = douglasPeucker(rounded, epsilon * epsilon);
+
+  // Relax tolerance smoothly until point count fits maxPts without collapsing ring
+  for (let iter = 0; iter < 8 && simplified.length > maxPts; iter++) {
+    epsilon *= 1.55;
+    const candidate = douglasPeucker(rounded, epsilon * epsilon);
+    if (candidate.length < 4) break;
+    simplified = candidate;
+  }
+
+  if (simplified.length > maxPts) {
+    const step = Math.max(1, Math.floor((simplified.length - 1) / (maxPts - 1)));
+    const strided: number[][] = [];
+    for (let i = 0; i < simplified.length - 1; i += step) {
+      strided.push(simplified[i]);
+    }
+    strided.push([simplified[0][0], simplified[0][1]]);
+    simplified = strided;
+  } else {
+    const sFirst = simplified[0];
+    const sLast = simplified[simplified.length - 1];
+    if (sFirst[0] !== sLast[0] || sFirst[1] !== sLast[1]) {
+      simplified.push([sFirst[0], sFirst[1]]);
+    }
+  }
+  return simplified.length >= 4 ? simplified : [];
 }
 
 function simplifyGeoJsonBoundary(raw: unknown): GeoJsonBoundary | undefined {
@@ -389,15 +462,16 @@ function simplifyGeoJsonBoundary(raw: unknown): GeoJsonBoundary | undefined {
   if (g.type === 'Polygon' && Array.isArray(g.coordinates)) {
     const rings = (g.coordinates as number[][][])
       .slice(0, 1)
-      .map((r) => simplifyRing(r, 120))
+      .map((r) => simplifyRing(r, 320))
       .filter((r) => r.length >= 4);
     if (rings.length === 0) return undefined;
     return { type: 'Polygon', coordinates: rings };
   }
   if (g.type === 'MultiPolygon' && Array.isArray(g.coordinates)) {
     const polys = (g.coordinates as number[][][][])
-      .map((poly) => {
-        const outer = Array.isArray(poly?.[0]) ? simplifyRing(poly[0], 90) : [];
+      .map((poly, idx) => {
+        const budget = idx === 0 ? 240 : 120;
+        const outer = Array.isArray(poly?.[0]) ? simplifyRing(poly[0], budget) : [];
         if (outer.length < 4) return null;
         let minX = Infinity;
         let maxX = -Infinity;
@@ -413,7 +487,7 @@ function simplifyGeoJsonBoundary(raw: unknown): GeoJsonBoundary | undefined {
       })
       .filter((p): p is { outer: number[][]; area: number } => p !== null)
       .sort((a, b) => b.area - a.area)
-      .slice(0, 3);
+      .slice(0, 8);
     if (polys.length === 0) return undefined;
     if (polys.length === 1) {
       return { type: 'Polygon', coordinates: [polys[0].outer] };
@@ -467,7 +541,7 @@ export async function resolveOsmProvincialRegion(
       try {
         const ids = distRelId && distRelId !== relId ? `R${relId},R${distRelId}` : `R${relId}`;
         const nomRes = await fetchWithTimeout(
-          `https://nominatim.openstreetmap.org/lookup?osm_ids=${ids}&format=json&polygon_geojson=1`,
+          `https://nominatim.openstreetmap.org/lookup?osm_ids=${ids}&format=json&polygon_geojson=1&accept-language=ko,en`,
           { headers: buildRequestHeaders('application/json') },
           5500
         );
@@ -519,7 +593,7 @@ export async function resolveOsmProvincialRegion(
 
   try {
     const revRes = await fetchWithTimeout(
-      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=5&addressdetails=1&polygon_geojson=1`,
+      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=5&addressdetails=1&polygon_geojson=1&accept-language=ko,en`,
       { headers: buildRequestHeaders('application/json') },
       5000
     );
@@ -938,21 +1012,21 @@ export async function loadNearbyProvincialRegionsDirect(
   const probes: Array<[number, number]> = isServerRuntime()
     ? [
         [lat, lng],
-        [lat + 0.11, lng],
-        [lat - 0.11, lng],
-        [lat, lng + 0.14],
-        [lat, lng - 0.14],
-        [lat + 0.09, lng + 0.11],
-        [lat + 0.09, lng - 0.11],
-        [lat - 0.09, lng + 0.11],
-        [lat - 0.09, lng - 0.11],
+        [lat + 0.16, lng],
+        [lat - 0.18, lng],
+        [lat, lng + 0.24],
+        [lat, lng - 0.28],
+        [lat + 0.24, lng + 0.35],
+        [lat + 0.24, lng - 0.28],
+        [lat - 0.24, lng + 0.28],
+        [lat - 0.24, lng - 0.28],
       ]
     : [
         [lat, lng],
-        [lat + 0.11, lng],
-        [lat - 0.11, lng],
-        [lat, lng + 0.14],
-        [lat, lng - 0.14],
+        [lat + 0.18, lng],
+        [lat - 0.20, lng],
+        [lat, lng + 0.30],
+        [lat, lng - 0.28],
       ];
 
   const settled = await Promise.allSettled(

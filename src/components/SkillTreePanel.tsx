@@ -22,6 +22,9 @@ import {
   getSkillMoneyCost,
   getSkillTotalInvestedCost,
 } from '../game/rules';
+import { formatMoneyCompact } from '../game/format';
+
+export { formatMoneyCompact };
 
 interface SkillTreePanelProps {
   gameState: GameState;
@@ -34,18 +37,6 @@ interface SkillTreePanelProps {
 
 const TREE_WIDTH = 1600;
 const TREE_HEIGHT = 2160;
-
-export function formatMoneyCompact(val: number): string {
-  if (!Number.isFinite(val)) return '$0';
-  const abs = Math.abs(val);
-  const sign = val < 0 ? '-' : '';
-  if (abs < 1000) return `${sign}$${Math.floor(abs).toLocaleString()}`;
-  if (abs < 1e6) return `${sign}$${(abs / 1e3).toFixed(abs < 1e4 ? 2 : 1)}K`;
-  if (abs < 1e9) return `${sign}$${(abs / 1e6).toFixed(2)}M`;
-  if (abs < 1e12) return `${sign}$${(abs / 1e9).toFixed(2)}B`;
-  if (abs < 1e15) return `${sign}$${(abs / 1e12).toFixed(2)}T`;
-  return `${sign}$${abs.toExponential(2).replace('+', '')}`;
-}
 
 const BRANCH_META: Record<
   SkillBranch,

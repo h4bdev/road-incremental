@@ -12,7 +12,7 @@ test('firestore.rules enforces Eight Pillars baseline and blueprint parity', () 
   assert.ok(rulesText.includes('match /{document=**} {\n      allow read, write: if false;\n    }'));
   assert.ok(rulesText.includes('request.auth.token.email_verified == true'));
   assert.ok(rulesText.includes("slotId.matches('^slot_[1-5]$')"));
-  assert.ok(rulesText.includes("chunkId.matches('^graph_[0-9]{1,2}$')"));
+  assert.ok(rulesText.includes("chunkId.matches('^graph_[0-9]{1,3}$')"));
   assert.ok(rulesText.includes('incoming().createdAt == request.time'));
   assert.ok(rulesText.includes('incoming().updatedAt == request.time'));
   assert.ok(rulesText.includes('incoming().createdAt == existing().createdAt'));

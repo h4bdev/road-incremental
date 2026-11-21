@@ -11,11 +11,14 @@ import {
   Pencil,
   Play,
   RefreshCw,
+  RotateCcw,
   Save,
+  SlidersHorizontal,
   Trash2,
   X,
 } from 'lucide-react';
 import { SAVE_SLOT_IDS, SaveSlotId, SaveSlotSummary, slotIndexFromId } from '../game/saveSlots';
+import { formatMoneyCompact } from '../game/format';
 
 export interface AccountViewInfo {
   uid: string;
@@ -42,6 +45,9 @@ interface SaveSlotsModalProps {
   onLoadSlot: (slotId: SaveSlotId) => Promise<void>;
   onRenameSlot: (slotId: SaveSlotId, newName: string) => Promise<void>;
   onDeleteSlot: (slotId: SaveSlotId) => Promise<void>;
+  currentCapital?: number;
+  recommendedCapital?: number;
+  onAdjustCapital?: (nextCapital: number, clampLifetime?: boolean) => void;
 }
 
 export function formatSlotTime(ms?: number): string {
@@ -74,11 +80,17 @@ export const SaveSlotsModal: React.FC<SaveSlotsModalProps> = ({
   onLoadSlot,
   onRenameSlot,
   onDeleteSlot,
+  currentCapital,
+  recommendedCapital,
+  onAdjustCapital,
 }) => {
   const [editingSlot, setEditingSlot] = useState<SaveSlotId | null>(null);
   const [draftName, setDraftName] = useState('');
   const [confirmDeleteSlot, setConfirmDeleteSlot] = useState<SaveSlotId | null>(null);
   const [confirmOverwriteSlot, setConfirmOverwriteSlot] = useState<SaveSlotId | null>(null);
+  const [customCapValue, setCustomCapValue] = useState('10');
+  const [customCapUnit, setCustomCapUnit] = useState<'1' | 'K' | 'M' | 'B' | 'T'>('K');
+  const [capitalFeedback, setCapitalFeedback] = useState<string | null>(null);
 
   const beginRename = (slotId: SaveSlotId, currentName: string) => {
     setEditingSlot(slotId);
@@ -233,6 +245,134 @@ export const SaveSlotsModal: React.FC<SaveSlotsModalProps> = ({
             </div>
           )}
 
+          {typeof currentCapital === 'number' && onAdjustCapital && (
+            <div
+              data-testid="capital-balance-adjust-card"
+              className={`rounded-xl border p-3.5 space-y-2.5 ${
+                currentCapital >= 1e12
+                  ? 'bg-amber-950/25 border-amber-500/50'
+                  : 'bg-slate-900/80 border-slate-800'
+              }`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <SlidersHorizontal className="w-4 h-4 text-amber-400 shrink-0" />
+                  <div>
+                    <h3 className="text-xs sm:text-sm font-bold text-white">
+                      자금 밸런스 조정
+                    </h3>
+                    <p className="text-[11px] text-slate-400">
+                      도로·연구·지역 진행도는 유지하고 보유 자금만 리셋하거나 원하는 금액으로 맞춥니다.
+                    </p>
+                  </div>
+                </div>
+                <span className="text-xs font-mono-numbers font-bold text-emerald-400">
+                  현재 {formatMoneyCompact(currentCapital)}
+                </span>
+              </div>
+
+              {currentCapital >= 1e12 && (
+                <div className="rounded-lg bg-amber-500/15 border border-amber-500/35 px-2.5 py-1.5 text-[11px] text-amber-200">
+                  밸런스 패치 이전의 폭증 자금이 감지되었습니다. 아래 버튼으로 네트워크 규모에 맞게 조정하거나 초기화할 수 있습니다.
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-2">
+                {typeof recommendedCapital === 'number' && (
+                  <button
+                    type="button"
+                    data-testid="adjust-capital-recommended-btn"
+                    onClick={() => {
+                      onAdjustCapital(recommendedCapital, true);
+                      setCapitalFeedback(
+                        `현재 네트워크에 맞춰 ${formatMoneyCompact(recommendedCapital)}으로 조정했습니다.`
+                      );
+                    }}
+                    className="min-h-[34px] px-3 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <SlidersHorizontal className="w-3.5 h-3.5" />
+                    네트워크 맞춤 조정 ({formatMoneyCompact(recommendedCapital)})
+                  </button>
+                )}
+                <button
+                  type="button"
+                  data-testid="adjust-capital-reset-btn"
+                  onClick={() => {
+                    onAdjustCapital(1200, true);
+                    setCapitalFeedback('보유 자금을 초기 자금($1,200)으로 리셋했습니다.');
+                  }}
+                  className="min-h-[34px] px-3 py-1 rounded-lg bg-rose-600/90 hover:bg-rose-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  초기 자금 리셋 ($1,200)
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                <span className="text-[11px] text-slate-400 mr-1">직접 입력:</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  data-testid="adjust-capital-custom-input"
+                  value={customCapValue}
+                  onChange={(e) => setCustomCapValue(e.target.value)}
+                  className="w-24 min-h-[34px] px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-700 text-xs font-mono-numbers text-white focus:outline-none focus:border-sky-500"
+                />
+                <select
+                  aria-label="자금 단위 선택"
+                  data-testid="adjust-capital-unit-select"
+                  value={customCapUnit}
+                  onChange={(e) =>
+                    setCustomCapUnit(e.target.value as '1' | 'K' | 'M' | 'B' | 'T')
+                  }
+                  className="min-h-[34px] px-2 py-1 rounded-lg bg-slate-950 border border-slate-700 text-xs font-mono-numbers text-slate-200 focus:outline-none focus:border-sky-500"
+                >
+                  <option value="1">$1 (원단위)</option>
+                  <option value="K">K (천)</option>
+                  <option value="M">M (백만)</option>
+                  <option value="B">B (십억)</option>
+                  <option value="T">T (조)</option>
+                </select>
+                <button
+                  type="button"
+                  data-testid="adjust-capital-custom-apply"
+                  onClick={() => {
+                    const num = Number(customCapValue);
+                    if (!Number.isFinite(num) || num < 0) return;
+                    const mult =
+                      customCapUnit === 'K'
+                        ? 1e3
+                        : customCapUnit === 'M'
+                        ? 1e6
+                        : customCapUnit === 'B'
+                        ? 1e9
+                        : customCapUnit === 'T'
+                        ? 1e12
+                        : 1;
+                    const next = Math.floor(num * mult);
+                    onAdjustCapital(next, next < currentCapital);
+                    setCapitalFeedback(
+                      `보유 자금을 ${formatMoneyCompact(next)}으로 설정했습니다.`
+                    );
+                  }}
+                  className="min-h-[34px] px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold cursor-pointer"
+                >
+                  적용
+                </button>
+              </div>
+
+              {capitalFeedback && (
+                <div
+                  data-testid="adjust-capital-feedback"
+                  className="text-[11px] text-emerald-300 font-medium"
+                >
+                  {capitalFeedback}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* 5 Save Slots */}
           <div className="space-y-2.5">
             {SAVE_SLOT_IDS.map((slotId) => {
@@ -340,7 +480,7 @@ export const SaveSlotsModal: React.FC<SaveSlotsModalProps> = ({
                             </span>
                             <span>·</span>
                             <span className="text-emerald-400">
-                              ${Math.floor(summary.capital).toLocaleString()}
+                              {formatMoneyCompact(summary.capital)}
                             </span>
                             <span className="text-slate-500">
                               ({formatSlotTime(summary.clientSavedAt)})

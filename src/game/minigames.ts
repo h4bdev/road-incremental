@@ -116,13 +116,13 @@ export const MINIGAME_ORDER: MinigameId[] = [
 ];
 
 export const MINIGAME_UNLOCK_COSTS: number[] = [
-  600,        // 1st: $600
-  3500,       // 2nd: $3,500
-  25000,      // 3rd: $25,000
-  180000,     // 4th: $180,000
-  1500000,    // 5th: $1,500,000
-  15000000,   // 6th: $15,000,000
-  150000000,  // 7th: $150,000,000
+  600,       // 1st: $600
+  3500,      // 2nd: $3,500
+  25000,     // 3rd: $25,000
+  180000,    // 4th: $180,000
+  1200000,   // 5th: $1,200,000
+  8000000,   // 6th: $8,000,000
+  50000000,  // 7th: $50,000,000
 ];
 
 export function getMinigameUnlockCost(mg?: MinigamesState | null): number {
@@ -166,79 +166,79 @@ export function unlockMinigame(
 }
 
 // ============================================================================
-// MILESTONES (56 Total = 8 Tiers x 7 Minigames -> Main Money Income Boost)
+// MILESTONES (56 Total = 8 Tiers x 7 Minigames -> Cross-Game Mult & Cost Discount)
 // ============================================================================
 
 export const MINIGAME_MILESTONES: MinigameMilestoneDef[] = [
   // 1. Mine (Depth)
-  { id: 'ms_mine_1', gameId: 'mine', tier: 1, title: '표층 암반 돌파', description: '지하 깊이 Lv.3 도달', targetValue: 3, unitLabel: '층', incomeBoostPct: 8 },
-  { id: 'ms_mine_2', gameId: 'mine', tier: 2, title: '기반암 굴착 개시', description: '지하 깊이 Lv.7 도달', targetValue: 7, unitLabel: '층', incomeBoostPct: 15 },
-  { id: 'ms_mine_3', gameId: 'mine', tier: 3, title: '상부 맨틀 진입', description: '지하 깊이 Lv.15 도달', targetValue: 15, unitLabel: '층', incomeBoostPct: 25 },
-  { id: 'ms_mine_4', gameId: 'mine', tier: 4, title: '외핵 관통 시추', description: '지하 깊이 Lv.28 도달', targetValue: 28, unitLabel: '층', incomeBoostPct: 40 },
-  { id: 'ms_mine_5', gameId: 'mine', tier: 5, title: '지구 내핵 정복', description: '지하 깊이 Lv.50 도달', targetValue: 50, unitLabel: '층', incomeBoostPct: 60 },
-  { id: 'ms_mine_6', gameId: 'mine', tier: 6, title: '마그마 공동 굴착', description: '지하 깊이 Lv.85 도달', targetValue: 85, unitLabel: '층', incomeBoostPct: 90 },
-  { id: 'ms_mine_7', gameId: 'mine', tier: 7, title: '지핵 공명 시추', description: '지하 깊이 Lv.140 도달', targetValue: 140, unitLabel: '층', incomeBoostPct: 130 },
-  { id: 'ms_mine_8', gameId: 'mine', tier: 8, title: '행성 관통 샤프트', description: '지하 깊이 Lv.220 도달', targetValue: 220, unitLabel: '층', incomeBoostPct: 180 },
+  { id: 'ms_mine_1', gameId: 'mine', tier: 1, title: '표층 암반 돌파', description: '지하 깊이 Lv.3 도달', targetValue: 3, unitLabel: '층', incomeBoostPct: 5 },
+  { id: 'ms_mine_2', gameId: 'mine', tier: 2, title: '기반암 굴착 개시', description: '지하 깊이 Lv.7 도달', targetValue: 7, unitLabel: '층', incomeBoostPct: 8 },
+  { id: 'ms_mine_3', gameId: 'mine', tier: 3, title: '상부 맨틀 진입', description: '지하 깊이 Lv.15 도달', targetValue: 15, unitLabel: '층', incomeBoostPct: 11 },
+  { id: 'ms_mine_4', gameId: 'mine', tier: 4, title: '외핵 관통 시추', description: '지하 깊이 Lv.28 도달', targetValue: 28, unitLabel: '층', incomeBoostPct: 14 },
+  { id: 'ms_mine_5', gameId: 'mine', tier: 5, title: '지구 내핵 정복', description: '지하 깊이 Lv.50 도달', targetValue: 50, unitLabel: '층', incomeBoostPct: 18 },
+  { id: 'ms_mine_6', gameId: 'mine', tier: 6, title: '마그마 공동 굴착', description: '지하 깊이 Lv.85 도달', targetValue: 85, unitLabel: '층', incomeBoostPct: 22 },
+  { id: 'ms_mine_7', gameId: 'mine', tier: 7, title: '지핵 공명 시추', description: '지하 깊이 Lv.140 도달', targetValue: 140, unitLabel: '층', incomeBoostPct: 28 },
+  { id: 'ms_mine_8', gameId: 'mine', tier: 8, title: '행성 관통 샤프트', description: '지하 깊이 Lv.220 도달', targetValue: 220, unitLabel: '층', incomeBoostPct: 34 },
 
   // 2. Reactor (Cumulative MWh)
-  { id: 'ms_reactor_1', gameId: 'reactor', tier: 1, title: '시운전 송전 개시', description: '누적 발전량 100 MWh 달성', targetValue: 100, unitLabel: 'MWh', incomeBoostPct: 8 },
-  { id: 'ms_reactor_2', gameId: 'reactor', tier: 2, title: '도시 전력망 직결', description: '누적 발전량 350 MWh 달성', targetValue: 350, unitLabel: 'MWh', incomeBoostPct: 15 },
-  { id: 'ms_reactor_3', gameId: 'reactor', tier: 3, title: '초전도 과클럭 가동', description: '누적 발전량 1,800 MWh 달성', targetValue: 1800, unitLabel: 'MWh', incomeBoostPct: 25 },
-  { id: 'ms_reactor_4', gameId: 'reactor', tier: 4, title: '핵융합 기가 그리드', description: '누적 발전량 9,000 MWh 달성', targetValue: 9000, unitLabel: 'MWh', incomeBoostPct: 40 },
-  { id: 'ms_reactor_5', gameId: 'reactor', tier: 5, title: '행성 무한 청정 동력', description: '누적 발전량 45,000 MWh 달성', targetValue: 45000, unitLabel: 'MWh', incomeBoostPct: 60 },
-  { id: 'ms_reactor_6', gameId: 'reactor', tier: 6, title: '테라와트 코어 배열', description: '누적 발전량 250,000 MWh 달성', targetValue: 250000, unitLabel: 'MWh', incomeBoostPct: 90 },
-  { id: 'ms_reactor_7', gameId: 'reactor', tier: 7, title: '항성 플라즈마 격자', description: '누적 발전량 1,200,000 MWh 달성', targetValue: 1200000, unitLabel: 'MWh', incomeBoostPct: 130 },
-  { id: 'ms_reactor_8', gameId: 'reactor', tier: 8, title: '초공간 영점 발전소', description: '누적 발전량 6,000,000 MWh 달성', targetValue: 6000000, unitLabel: 'MWh', incomeBoostPct: 180 },
+  { id: 'ms_reactor_1', gameId: 'reactor', tier: 1, title: '시운전 송전 개시', description: '누적 발전량 100 MWh 달성', targetValue: 100, unitLabel: 'MWh', incomeBoostPct: 5 },
+  { id: 'ms_reactor_2', gameId: 'reactor', tier: 2, title: '도시 전력망 직결', description: '누적 발전량 350 MWh 달성', targetValue: 350, unitLabel: 'MWh', incomeBoostPct: 8 },
+  { id: 'ms_reactor_3', gameId: 'reactor', tier: 3, title: '초전도 과클럭 가동', description: '누적 발전량 1,800 MWh 달성', targetValue: 1800, unitLabel: 'MWh', incomeBoostPct: 11 },
+  { id: 'ms_reactor_4', gameId: 'reactor', tier: 4, title: '핵융합 기가 그리드', description: '누적 발전량 9,000 MWh 달성', targetValue: 9000, unitLabel: 'MWh', incomeBoostPct: 14 },
+  { id: 'ms_reactor_5', gameId: 'reactor', tier: 5, title: '행성 무한 청정 동력', description: '누적 발전량 45,000 MWh 달성', targetValue: 45000, unitLabel: 'MWh', incomeBoostPct: 18 },
+  { id: 'ms_reactor_6', gameId: 'reactor', tier: 6, title: '테라와트 코어 배열', description: '누적 발전량 250,000 MWh 달성', targetValue: 250000, unitLabel: 'MWh', incomeBoostPct: 22 },
+  { id: 'ms_reactor_7', gameId: 'reactor', tier: 7, title: '항성 플라즈마 격자', description: '누적 발전량 1,200,000 MWh 달성', targetValue: 1200000, unitLabel: 'MWh', incomeBoostPct: 28 },
+  { id: 'ms_reactor_8', gameId: 'reactor', tier: 8, title: '초공간 영점 발전소', description: '누적 발전량 6,000,000 MWh 달성', targetValue: 6000000, unitLabel: 'MWh', incomeBoostPct: 34 },
 
   // 3. Shipyard (Cumulative Cargo Shipped, tons)
-  { id: 'ms_ship_1', gameId: 'shipyard', tier: 1, title: '첫 궤도 화물 선적', description: '성간 화물 누적 80 t 수송', targetValue: 80, unitLabel: 't', incomeBoostPct: 8 },
-  { id: 'ms_ship_2', gameId: 'shipyard', tier: 2, title: '반물질 보급선 완편', description: '성간 화물 누적 450 t 수송', targetValue: 450, unitLabel: 't', incomeBoostPct: 15 },
-  { id: 'ms_ship_3', gameId: 'shipyard', tier: 3, title: '성간 물류 허브 구축', description: '성간 화물 누적 2,200 t 수송', targetValue: 2200, unitLabel: 't', incomeBoostPct: 25 },
-  { id: 'ms_ship_4', gameId: 'shipyard', tier: 4, title: '초공간 수송 대함대', description: '성간 화물 누적 12,000 t 수송', targetValue: 12000, unitLabel: 't', incomeBoostPct: 40 },
-  { id: 'ms_ship_5', gameId: 'shipyard', tier: 5, title: '은하 물류 패권 달성', description: '성간 화물 누적 60,000 t 수송', targetValue: 60000, unitLabel: 't', incomeBoostPct: 60 },
-  { id: 'ms_ship_6', gameId: 'shipyard', tier: 6, title: '워프 물류 고속도로', description: '성간 화물 누적 320,000 t 수송', targetValue: 320000, unitLabel: 't', incomeBoostPct: 90 },
-  { id: 'ms_ship_7', gameId: 'shipyard', tier: 7, title: '성단 수송 엘리베이터', description: '성간 화물 누적 1,500,000 t 수송', targetValue: 1500000, unitLabel: 't', incomeBoostPct: 130 },
-  { id: 'ms_ship_8', gameId: 'shipyard', tier: 8, title: '다중우주 공방 함대', description: '성간 화물 누적 8,000,000 t 수송', targetValue: 8000000, unitLabel: 't', incomeBoostPct: 180 },
+  { id: 'ms_ship_1', gameId: 'shipyard', tier: 1, title: '첫 궤도 화물 선적', description: '성간 화물 누적 80 t 수송', targetValue: 80, unitLabel: 't', incomeBoostPct: 5 },
+  { id: 'ms_ship_2', gameId: 'shipyard', tier: 2, title: '반물질 보급선 완편', description: '성간 화물 누적 450 t 수송', targetValue: 450, unitLabel: 't', incomeBoostPct: 8 },
+  { id: 'ms_ship_3', gameId: 'shipyard', tier: 3, title: '성간 물류 허브 구축', description: '성간 화물 누적 2,200 t 수송', targetValue: 2200, unitLabel: 't', incomeBoostPct: 11 },
+  { id: 'ms_ship_4', gameId: 'shipyard', tier: 4, title: '초공간 수송 대함대', description: '성간 화물 누적 12,000 t 수송', targetValue: 12000, unitLabel: 't', incomeBoostPct: 14 },
+  { id: 'ms_ship_5', gameId: 'shipyard', tier: 5, title: '은하 물류 패권 달성', description: '성간 화물 누적 60,000 t 수송', targetValue: 60000, unitLabel: 't', incomeBoostPct: 18 },
+  { id: 'ms_ship_6', gameId: 'shipyard', tier: 6, title: '워프 물류 고속도로', description: '성간 화물 누적 320,000 t 수송', targetValue: 320000, unitLabel: 't', incomeBoostPct: 22 },
+  { id: 'ms_ship_7', gameId: 'shipyard', tier: 7, title: '성단 수송 엘리베이터', description: '성간 화물 누적 1,500,000 t 수송', targetValue: 1500000, unitLabel: 't', incomeBoostPct: 28 },
+  { id: 'ms_ship_8', gameId: 'shipyard', tier: 8, title: '다중우주 공방 함대', description: '성간 화물 누적 8,000,000 t 수송', targetValue: 8000000, unitLabel: 't', incomeBoostPct: 34 },
 
   // 4. Quantum Lab (Cumulative Research Points, RP)
-  { id: 'ms_quantum_1', gameId: 'quantum', tier: 1, title: '초기 파동 공명 관측', description: '누적 양자 연구 60 RP 달성', targetValue: 60, unitLabel: 'RP', incomeBoostPct: 8 },
-  { id: 'ms_quantum_2', gameId: 'quantum', tier: 2, title: '양자 얽힘 실증 완료', description: '누적 양자 연구 160 RP 달성', targetValue: 160, unitLabel: 'RP', incomeBoostPct: 15 },
-  { id: 'ms_quantum_3', gameId: 'quantum', tier: 3, title: '초전도 큐빗 어레이', description: '누적 양자 연구 850 RP 달성', targetValue: 850, unitLabel: 'RP', incomeBoostPct: 25 },
-  { id: 'ms_quantum_4', gameId: 'quantum', tier: 4, title: '시공간 연산 돌파', description: '누적 양자 연구 4,500 RP 달성', targetValue: 4500, unitLabel: 'RP', incomeBoostPct: 40 },
-  { id: 'ms_quantum_5', gameId: 'quantum', tier: 5, title: '특이점 관제 완성', description: '누적 양자 연구 25,000 RP 달성', targetValue: 25000, unitLabel: 'RP', incomeBoostPct: 60 },
-  { id: 'ms_quantum_6', gameId: 'quantum', tier: 6, title: '차원 위상 동기화', description: '누적 양자 연구 140,000 RP 달성', targetValue: 140000, unitLabel: 'RP', incomeBoostPct: 90 },
-  { id: 'ms_quantum_7', gameId: 'quantum', tier: 7, title: '극저온 퀀텀 코어', description: '누적 양자 연구 750,000 RP 달성', targetValue: 750000, unitLabel: 'RP', incomeBoostPct: 130 },
-  { id: 'ms_quantum_8', gameId: 'quantum', tier: 8, title: '다중우주 시뮬레이터', description: '누적 양자 연구 4,000,000 RP 달성', targetValue: 4000000, unitLabel: 'RP', incomeBoostPct: 180 },
+  { id: 'ms_quantum_1', gameId: 'quantum', tier: 1, title: '초기 파동 공명 관측', description: '누적 양자 연구 60 RP 달성', targetValue: 60, unitLabel: 'RP', incomeBoostPct: 5 },
+  { id: 'ms_quantum_2', gameId: 'quantum', tier: 2, title: '양자 얽힘 실증 완료', description: '누적 양자 연구 160 RP 달성', targetValue: 160, unitLabel: 'RP', incomeBoostPct: 8 },
+  { id: 'ms_quantum_3', gameId: 'quantum', tier: 3, title: '초전도 큐빗 어레이', description: '누적 양자 연구 850 RP 달성', targetValue: 850, unitLabel: 'RP', incomeBoostPct: 11 },
+  { id: 'ms_quantum_4', gameId: 'quantum', tier: 4, title: '시공간 연산 돌파', description: '누적 양자 연구 4,500 RP 달성', targetValue: 4500, unitLabel: 'RP', incomeBoostPct: 14 },
+  { id: 'ms_quantum_5', gameId: 'quantum', tier: 5, title: '특이점 관제 완성', description: '누적 양자 연구 25,000 RP 달성', targetValue: 25000, unitLabel: 'RP', incomeBoostPct: 18 },
+  { id: 'ms_quantum_6', gameId: 'quantum', tier: 6, title: '차원 위상 동기화', description: '누적 양자 연구 140,000 RP 달성', targetValue: 140000, unitLabel: 'RP', incomeBoostPct: 22 },
+  { id: 'ms_quantum_7', gameId: 'quantum', tier: 7, title: '극저온 퀀텀 코어', description: '누적 양자 연구 750,000 RP 달성', targetValue: 750000, unitLabel: 'RP', incomeBoostPct: 28 },
+  { id: 'ms_quantum_8', gameId: 'quantum', tier: 8, title: '다중우주 시뮬레이터', description: '누적 양자 연구 4,000,000 RP 달성', targetValue: 4000000, unitLabel: 'RP', incomeBoostPct: 34 },
 
   // 5. Orbital Solar Array (Cumulative Power, GW)
-  { id: 'ms_solar_1', gameId: 'solar', tier: 1, title: '초기 반사경 전개', description: '누적 태양광 120 GW 집광', targetValue: 120, unitLabel: 'GW', incomeBoostPct: 8 },
-  { id: 'ms_solar_2', gameId: 'solar', tier: 2, title: '정지궤도 송전 빔', description: '누적 태양광 600 GW 집광', targetValue: 600, unitLabel: 'GW', incomeBoostPct: 15 },
-  { id: 'ms_solar_3', gameId: 'solar', tier: 3, title: '위상 자동 추적 완료', description: '누적 태양광 3,200 GW 집광', targetValue: 3200, unitLabel: 'GW', incomeBoostPct: 25 },
-  { id: 'ms_solar_4', gameId: 'solar', tier: 4, title: '라그랑주 태양 링', description: '누적 태양광 18,000 GW 집광', targetValue: 18000, unitLabel: 'GW', incomeBoostPct: 40 },
-  { id: 'ms_solar_5', gameId: 'solar', tier: 5, title: '코로나 플레어 포집', description: '누적 태양광 95,000 GW 집광', targetValue: 95000, unitLabel: 'GW', incomeBoostPct: 60 },
-  { id: 'ms_solar_6', gameId: 'solar', tier: 6, title: '내행성 집광 벨트', description: '누적 태양광 500,000 GW 집광', targetValue: 500000, unitLabel: 'GW', incomeBoostPct: 90 },
-  { id: 'ms_solar_7', gameId: 'solar', tier: 7, title: '다이슨 스웜 1단계', description: '누적 태양광 2,500,000 GW 집광', targetValue: 2500000, unitLabel: 'GW', incomeBoostPct: 130 },
-  { id: 'ms_solar_8', gameId: 'solar', tier: 8, title: '항성 완전 포위망', description: '누적 태양광 15,000,000 GW 집광', targetValue: 15000000, unitLabel: 'GW', incomeBoostPct: 180 },
+  { id: 'ms_solar_1', gameId: 'solar', tier: 1, title: '초기 반사경 전개', description: '누적 태양광 120 GW 집광', targetValue: 120, unitLabel: 'GW', incomeBoostPct: 5 },
+  { id: 'ms_solar_2', gameId: 'solar', tier: 2, title: '정지궤도 송전 빔', description: '누적 태양광 600 GW 집광', targetValue: 600, unitLabel: 'GW', incomeBoostPct: 8 },
+  { id: 'ms_solar_3', gameId: 'solar', tier: 3, title: '위상 자동 추적 완료', description: '누적 태양광 3,200 GW 집광', targetValue: 3200, unitLabel: 'GW', incomeBoostPct: 11 },
+  { id: 'ms_solar_4', gameId: 'solar', tier: 4, title: '라그랑주 태양 링', description: '누적 태양광 18,000 GW 집광', targetValue: 18000, unitLabel: 'GW', incomeBoostPct: 14 },
+  { id: 'ms_solar_5', gameId: 'solar', tier: 5, title: '코로나 플레어 포집', description: '누적 태양광 95,000 GW 집광', targetValue: 95000, unitLabel: 'GW', incomeBoostPct: 18 },
+  { id: 'ms_solar_6', gameId: 'solar', tier: 6, title: '내행성 집광 벨트', description: '누적 태양광 500,000 GW 집광', targetValue: 500000, unitLabel: 'GW', incomeBoostPct: 22 },
+  { id: 'ms_solar_7', gameId: 'solar', tier: 7, title: '다이슨 스웜 1단계', description: '누적 태양광 2,500,000 GW 집광', targetValue: 2500000, unitLabel: 'GW', incomeBoostPct: 28 },
+  { id: 'ms_solar_8', gameId: 'solar', tier: 8, title: '항성 완전 포위망', description: '누적 태양광 15,000,000 GW 집광', targetValue: 15000000, unitLabel: 'GW', incomeBoostPct: 34 },
 
   // 6. Terra Biodome (Cumulative Biomass, Bio)
-  { id: 'ms_bio_1', gameId: 'bio', tier: 1, title: '광합성 배양 개시', description: '누적 바이오매스 150 Bio 달성', targetValue: 150, unitLabel: 'Bio', incomeBoostPct: 8 },
-  { id: 'ms_bio_2', gameId: 'bio', tier: 2, title: '온실 원시림 조성', description: '누적 바이오매스 800 Bio 달성', targetValue: 800, unitLabel: 'Bio', incomeBoostPct: 15 },
-  { id: 'ms_bio_3', gameId: 'bio', tier: 3, title: '순환 생태계 안착', description: '누적 바이오매스 4,500 Bio 달성', targetValue: 4500, unitLabel: 'Bio', incomeBoostPct: 25 },
-  { id: 'ms_bio_4', gameId: 'bio', tier: 4, title: '대륙 녹화 프로젝트', description: '누적 바이오매스 24,000 Bio 달성', targetValue: 24000, unitLabel: 'Bio', incomeBoostPct: 40 },
-  { id: 'ms_bio_5', gameId: 'bio', tier: 5, title: '행성 생물권 완성', description: '누적 바이오매스 120,000 Bio 달성', targetValue: 120000, unitLabel: 'Bio', incomeBoostPct: 60 },
-  { id: 'ms_bio_6', gameId: 'bio', tier: 6, title: '에코 교통망 통합', description: '누적 바이오매스 650,000 Bio 달성', targetValue: 650000, unitLabel: 'Bio', incomeBoostPct: 90 },
-  { id: 'ms_bio_7', gameId: 'bio', tier: 7, title: '가이아 공명 진화', description: '누적 바이오매스 3,200,000 Bio 달성', targetValue: 3200000, unitLabel: 'Bio', incomeBoostPct: 130 },
-  { id: 'ms_bio_8', gameId: 'bio', tier: 8, title: '테라포밍 정점', description: '누적 바이오매스 18,000,000 Bio 달성', targetValue: 18000000, unitLabel: 'Bio', incomeBoostPct: 180 },
+  { id: 'ms_bio_1', gameId: 'bio', tier: 1, title: '광합성 배양 개시', description: '누적 바이오매스 150 Bio 달성', targetValue: 150, unitLabel: 'Bio', incomeBoostPct: 5 },
+  { id: 'ms_bio_2', gameId: 'bio', tier: 2, title: '온실 원시림 조성', description: '누적 바이오매스 800 Bio 달성', targetValue: 800, unitLabel: 'Bio', incomeBoostPct: 8 },
+  { id: 'ms_bio_3', gameId: 'bio', tier: 3, title: '순환 생태계 안착', description: '누적 바이오매스 4,500 Bio 달성', targetValue: 4500, unitLabel: 'Bio', incomeBoostPct: 11 },
+  { id: 'ms_bio_4', gameId: 'bio', tier: 4, title: '대륙 녹화 프로젝트', description: '누적 바이오매스 24,000 Bio 달성', targetValue: 24000, unitLabel: 'Bio', incomeBoostPct: 14 },
+  { id: 'ms_bio_5', gameId: 'bio', tier: 5, title: '행성 생물권 완성', description: '누적 바이오매스 120,000 Bio 달성', targetValue: 120000, unitLabel: 'Bio', incomeBoostPct: 18 },
+  { id: 'ms_bio_6', gameId: 'bio', tier: 6, title: '에코 교통망 통합', description: '누적 바이오매스 650,000 Bio 달성', targetValue: 650000, unitLabel: 'Bio', incomeBoostPct: 22 },
+  { id: 'ms_bio_7', gameId: 'bio', tier: 7, title: '가이아 공명 진화', description: '누적 바이오매스 3,200,000 Bio 달성', targetValue: 3200000, unitLabel: 'Bio', incomeBoostPct: 28 },
+  { id: 'ms_bio_8', gameId: 'bio', tier: 8, title: '테라포밍 정점', description: '누적 바이오매스 18,000,000 Bio 달성', targetValue: 18000000, unitLabel: 'Bio', incomeBoostPct: 34 },
 
   // 7. Superconducting Collider (Cumulative Collision Energy, TeV)
-  { id: 'ms_col_1', gameId: 'collider', tier: 1, title: '첫 양성자 빔 충돌', description: '누적 충돌 200 TeV 달성', targetValue: 200, unitLabel: 'TeV', incomeBoostPct: 8 },
-  { id: 'ms_col_2', gameId: 'collider', tier: 2, title: '힉스 공명 관측', description: '누적 충돌 1,000 TeV 달성', targetValue: 1000, unitLabel: 'TeV', incomeBoostPct: 15 },
-  { id: 'ms_col_3', gameId: 'collider', tier: 3, title: '초전도 대링 가동', description: '누적 충돌 5,500 TeV 달성', targetValue: 5500, unitLabel: 'TeV', incomeBoostPct: 25 },
-  { id: 'ms_col_4', gameId: 'collider', tier: 4, title: '쿼크-글루온 플라즈마', description: '누적 충돌 30,000 TeV 달성', targetValue: 30000, unitLabel: 'TeV', incomeBoostPct: 40 },
-  { id: 'ms_col_5', gameId: 'collider', tier: 5, title: '타키온 선형 링', description: '누적 충돌 160,000 TeV 달성', targetValue: 160000, unitLabel: 'TeV', incomeBoostPct: 60 },
-  { id: 'ms_col_6', gameId: 'collider', tier: 6, title: '초대칭 입자 합성', description: '누적 충돌 850,000 TeV 달성', targetValue: 850000, unitLabel: 'TeV', incomeBoostPct: 90 },
-  { id: 'ms_col_7', gameId: 'collider', tier: 7, title: '플랑크 스케일 가속', description: '누적 충돌 4,500,000 TeV 달성', targetValue: 4500000, unitLabel: 'TeV', incomeBoostPct: 130 },
-  { id: 'ms_col_8', gameId: 'collider', tier: 8, title: '미니 빅뱅 통제 실험', description: '누적 충돌 25,000,000 TeV 달성', targetValue: 25000000, unitLabel: 'TeV', incomeBoostPct: 180 },
+  { id: 'ms_col_1', gameId: 'collider', tier: 1, title: '첫 양성자 빔 충돌', description: '누적 충돌 200 TeV 달성', targetValue: 200, unitLabel: 'TeV', incomeBoostPct: 5 },
+  { id: 'ms_col_2', gameId: 'collider', tier: 2, title: '힉스 공명 관측', description: '누적 충돌 1,000 TeV 달성', targetValue: 1000, unitLabel: 'TeV', incomeBoostPct: 8 },
+  { id: 'ms_col_3', gameId: 'collider', tier: 3, title: '초전도 대링 가동', description: '누적 충돌 5,500 TeV 달성', targetValue: 5500, unitLabel: 'TeV', incomeBoostPct: 11 },
+  { id: 'ms_col_4', gameId: 'collider', tier: 4, title: '쿼크-글루온 플라즈마', description: '누적 충돌 30,000 TeV 달성', targetValue: 30000, unitLabel: 'TeV', incomeBoostPct: 14 },
+  { id: 'ms_col_5', gameId: 'collider', tier: 5, title: '타키온 선형 링', description: '누적 충돌 160,000 TeV 달성', targetValue: 160000, unitLabel: 'TeV', incomeBoostPct: 18 },
+  { id: 'ms_col_6', gameId: 'collider', tier: 6, title: '초대칭 입자 합성', description: '누적 충돌 850,000 TeV 달성', targetValue: 850000, unitLabel: 'TeV', incomeBoostPct: 22 },
+  { id: 'ms_col_7', gameId: 'collider', tier: 7, title: '플랑크 스케일 가속', description: '누적 충돌 4,500,000 TeV 달성', targetValue: 4500000, unitLabel: 'TeV', incomeBoostPct: 28 },
+  { id: 'ms_col_8', gameId: 'collider', tier: 8, title: '미니 빅뱅 통제 실험', description: '누적 충돌 25,000,000 TeV 달성', targetValue: 25000000, unitLabel: 'TeV', incomeBoostPct: 34 },
 ];
 
 export interface MinigameMilestoneStatus {
@@ -299,6 +299,15 @@ export function getMinigameMilestoneSummary(mg: MinigamesState, filterGameId?: M
   const statuses: MinigameMilestoneStatus[] = [];
   let totalBoostPct = 0;
   let unlockedCount = 0;
+  const perGameBoostPct: Record<MinigameId, number> = {
+    mine: 0,
+    reactor: 0,
+    shipyard: 0,
+    quantum: 0,
+    solar: 0,
+    bio: 0,
+    collider: 0,
+  };
 
   for (const ms of MINIGAME_MILESTONES) {
     const val = getMinigameProgressValue(mg, ms.gameId);
@@ -306,6 +315,7 @@ export function getMinigameMilestoneSummary(mg: MinigamesState, filterGameId?: M
       val >= ms.targetValue || (mg.unlockedMilestoneIds || []).includes(ms.id);
     if (achieved) {
       totalBoostPct += ms.incomeBoostPct;
+      perGameBoostPct[ms.gameId] += ms.incomeBoostPct;
       unlockedCount += 1;
     }
     if (!filterGameId || ms.gameId === filterGameId) {
@@ -318,25 +328,49 @@ export function getMinigameMilestoneSummary(mg: MinigamesState, filterGameId?: M
     }
   }
 
+  let incomeMult = 1;
+  for (const gid of MINIGAME_ORDER) {
+    incomeMult *= 1 + perGameBoostPct[gid] / 100;
+  }
+  const buildCostDiscountPct = Math.min(35, Number((unlockedCount * 0.6).toFixed(2)));
+  const buildCostMult = Math.max(0.65, Number((1 - buildCostDiscountPct / 100).toFixed(4)));
+
   return {
     unlockedCount,
     totalCount: MINIGAME_MILESTONES.length,
     totalBoostPct,
-    incomeMult: 1 + totalBoostPct / 100,
+    perGameBoostPct,
+    incomeMult,
+    buildCostDiscountPct,
+    buildCostMult,
     statuses,
   };
 }
 
 export function getMinigameIncomeBoost(mg?: MinigamesState | null): {
   boostPct: number;
+  perGameBoostPct: Record<MinigameId, number>;
   incomeMult: number;
+  buildCostDiscountPct: number;
+  buildCostMult: number;
   unlockedCount: number;
   totalCount: number;
 } {
   if (!mg) {
     return {
       boostPct: 0,
+      perGameBoostPct: {
+        mine: 0,
+        reactor: 0,
+        shipyard: 0,
+        quantum: 0,
+        solar: 0,
+        bio: 0,
+        collider: 0,
+      },
       incomeMult: 1,
+      buildCostDiscountPct: 0,
+      buildCostMult: 1,
       unlockedCount: 0,
       totalCount: MINIGAME_MILESTONES.length,
     };
@@ -344,7 +378,10 @@ export function getMinigameIncomeBoost(mg?: MinigamesState | null): {
   const summary = getMinigameMilestoneSummary(mg);
   return {
     boostPct: summary.totalBoostPct,
+    perGameBoostPct: summary.perGameBoostPct,
     incomeMult: summary.incomeMult,
+    buildCostDiscountPct: summary.buildCostDiscountPct,
+    buildCostMult: summary.buildCostMult,
     unlockedCount: summary.unlockedCount,
     totalCount: summary.totalCount,
   };

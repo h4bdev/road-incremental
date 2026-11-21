@@ -15,6 +15,7 @@ import { db, handleFirestoreError, OperationType } from '../firebase';
 import {
   DehydratedCloudSlot,
   dehydrateGameStateForCloud,
+  estimateFirestoreDocBytes,
   isSaveSlotId,
   rehydrateGameStateFromCloudPayload,
   RestoredGraphMarks,
@@ -30,7 +31,11 @@ export interface CloudDownloadResult {
   baseState: GameState;
   marks: RestoredGraphMarks;
   chunkCoordCenters: Array<{ lat: number; lng: number }>;
+  pendingChunkKeys: string[];
 }
+
+const MAX_WRITE_BATCH_BYTES = 450 * 1024;
+const MAX_WRITE_BATCH_OPS = 100;
 
 const ensuredProfilesInSession = new Set<string>();
 
@@ -140,11 +145,36 @@ export async function fetchCloudSlotSummaries(
   }
 }
 
+const lastUploadedGraphSig = new Map<
+  string,
+  { sig: string; chunkCount: number }
+>();
+
+function computeGraphChunksSig(
+  chunks: DehydratedCloudSlot['graphChunks']
+): string {
+  let acc = `${chunks.length}`;
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i];
+    const nLen = c.nodeIds.length;
+    const eLen = c.edgeIds.length;
+    acc += `|${c.chunkIndex}:${nLen}:${eLen}:${c.nodeIds[0] || ''}:${
+      nLen > 0 ? c.nodeIds[nLen - 1] : ''
+    }:${c.edgeIds[0] || ''}:${eLen > 0 ? c.edgeIds[eLen - 1] : ''}`;
+  }
+  return acc;
+}
+
 export async function uploadSlotToCloud(
   user: User,
   slotId: SaveSlotId,
   state: GameState,
-  options?: { slotName?: string; clientSavedAt?: number }
+  options?: {
+    slotName?: string;
+    clientSavedAt?: number;
+    forceGraphSync?: boolean;
+    pendingMarks?: RestoredGraphMarks | null;
+  }
 ): Promise<SaveSlotSummary> {
   if (!SAVE_SLOT_IDS.includes(slotId)) {
     throw new Error(`Invalid save slot id: ${slotId}`);
@@ -160,108 +190,182 @@ export async function uploadSlotToCloud(
   const chunksCol = collection(db, 'users', uid, 'slots', slotId, 'chunks');
 
   try {
-    const slotSnap = await getDoc(slotRef);
-    const coreSnap = slotSnap.exists() ? await getDoc(coreRef) : null;
-    const existingChunksSnap = slotSnap.exists()
-      ? await getDocs(query(chunksCol, where('ownerUid', '==', uid))).catch(() => null)
-      : null;
+    const dehydrated = dehydrateGameStateForCloud(slotId, state, {
+      slotName: options?.slotName,
+      clientSavedAt: options?.clientSavedAt,
+      pendingMarks: options?.pendingMarks,
+    });
+    const nextGraphSig = computeGraphChunksSig(dehydrated.graphChunks);
+    const cacheKey = `${uid}:${slotId}`;
+    const prevGraphCached = lastUploadedGraphSig.get(cacheKey);
+    const canSkipChunks =
+      !options?.forceGraphSync &&
+      Boolean(prevGraphCached) &&
+      prevGraphCached!.sig === nextGraphSig;
 
-    const existingSlotName = slotSnap.exists()
-      ? String(slotSnap.data()?.slotName || '')
+    const slotSnap = await getDoc(slotRef);
+    const slotExists = slotSnap.exists();
+    const coreSnap = slotExists ? await getDoc(coreRef) : null;
+    const existingChunksSnap =
+      slotExists && !canSkipChunks
+        ? await getDocs(query(chunksCol, where('ownerUid', '==', uid)))
+        : null;
+
+    const existingSlotName = slotExists
+      ? String(slotSnap.data()?.slotName || '').trim()
       : undefined;
     const resolvedName =
-      options?.slotName ||
+      options?.slotName?.trim() ||
       (existingSlotName && slotSnap.data()?.cityId === state.startingCity.id
         ? existingSlotName
         : undefined);
-
-    const dehydrated = dehydrateGameStateForCloud(slotId, state, {
-      slotName: resolvedName,
-      clientSavedAt: options?.clientSavedAt,
-    });
-
-    const batch = writeBatch(db);
-
-    if (slotSnap.exists()) {
-      batch.update(slotRef, {
-        slotName: dehydrated.metaFields.slotName,
-        cityId: dehydrated.metaFields.cityId,
-        cityName: dehydrated.metaFields.cityName,
-        cityCountry: dehydrated.metaFields.cityCountry,
-        cityLat: dehydrated.metaFields.cityLat,
-        cityLng: dehydrated.metaFields.cityLng,
-        cityZoom: dehydrated.metaFields.cityZoom,
-        cityDescription: dehydrated.metaFields.cityDescription,
-        cityIsCustom: dehydrated.metaFields.cityIsCustom,
-        capital: dehydrated.metaFields.capital,
-        mapped1to1Km: dehydrated.metaFields.mapped1to1Km,
-        connectedOsmNodes: dehydrated.metaFields.connectedOsmNodes,
-        totalOsmEdgesBuilt: dehydrated.metaFields.totalOsmEdgesBuilt,
-        tierLabel: dehydrated.metaFields.tierLabel,
-        graphChunkCount: dehydrated.metaFields.graphChunkCount,
-        clientSavedAt: dehydrated.metaFields.clientSavedAt,
-        updatedAt: serverTimestamp(),
-      });
-    } else {
-      batch.set(slotRef, {
-        ...dehydrated.metaFields,
-        ownerUid: uid,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+    if (resolvedName && resolvedName !== dehydrated.metaFields.slotName) {
+      dehydrated.metaFields.slotName = resolvedName;
     }
 
-    if (coreSnap && coreSnap.exists()) {
-      batch.update(coreRef, {
-        ...dehydrated.coreFields,
-        updatedAt: serverTimestamp(),
-      });
-    } else {
-      batch.set(coreRef, {
-        ...dehydrated.coreFields,
-        ownerUid: uid,
-        slotId,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    }
-
-    const existingChunkIds = new Set<string>();
-    if (existingChunksSnap) {
-      existingChunksSnap.forEach((d) => existingChunkIds.add(d.id));
-    }
-
-    const nextChunkIds = new Set<string>();
-    for (const chunk of dehydrated.graphChunks) {
-      const chunkId = `graph_${chunk.chunkIndex}`;
-      nextChunkIds.add(chunkId);
-      const chunkRef = doc(db, 'users', uid, 'slots', slotId, 'chunks', chunkId);
-      if (existingChunkIds.has(chunkId)) {
-        batch.update(chunkRef, {
-          nodeIds: chunk.nodeIds,
-          edgeIds: chunk.edgeIds,
+    const metaPayload = slotExists
+      ? {
+          slotName: dehydrated.metaFields.slotName,
+          cityId: dehydrated.metaFields.cityId,
+          cityName: dehydrated.metaFields.cityName,
+          cityCountry: dehydrated.metaFields.cityCountry,
+          cityLat: dehydrated.metaFields.cityLat,
+          cityLng: dehydrated.metaFields.cityLng,
+          cityZoom: dehydrated.metaFields.cityZoom,
+          cityDescription: dehydrated.metaFields.cityDescription,
+          cityIsCustom: dehydrated.metaFields.cityIsCustom,
+          capital: dehydrated.metaFields.capital,
+          mapped1to1Km: dehydrated.metaFields.mapped1to1Km,
+          connectedOsmNodes: dehydrated.metaFields.connectedOsmNodes,
+          totalOsmEdgesBuilt: dehydrated.metaFields.totalOsmEdgesBuilt,
+          tierLabel: dehydrated.metaFields.tierLabel,
+          graphChunkCount: dehydrated.metaFields.graphChunkCount,
+          clientSavedAt: dehydrated.metaFields.clientSavedAt,
           updatedAt: serverTimestamp(),
-        });
-      } else {
-        batch.set(chunkRef, {
+        }
+      : {
+          ...dehydrated.metaFields,
           ownerUid: uid,
-          slotId,
-          chunkIndex: chunk.chunkIndex,
-          nodeIds: chunk.nodeIds,
-          edgeIds: chunk.edgeIds,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
-        });
-      }
+        };
+
+    const corePayload =
+      coreSnap && coreSnap.exists()
+        ? {
+            ...dehydrated.coreFields,
+            updatedAt: serverTimestamp(),
+          }
+        : {
+            ...dehydrated.coreFields,
+            ownerUid: uid,
+            slotId,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          };
+
+    const metaBytes = estimateFirestoreDocBytes(metaPayload as unknown as Record<string, unknown>);
+    const coreBytes = estimateFirestoreDocBytes(corePayload as unknown as Record<string, unknown>);
+
+    const metaBatch = writeBatch(db);
+    if (slotExists) {
+      metaBatch.update(slotRef, metaPayload);
+    } else {
+      metaBatch.set(slotRef, metaPayload);
     }
 
-    for (const oldChunkId of existingChunkIds) {
-      if (!nextChunkIds.has(oldChunkId)) {
-        batch.delete(doc(db, 'users', uid, 'slots', slotId, 'chunks', oldChunkId));
+    if (metaBytes + coreBytes <= MAX_WRITE_BATCH_BYTES) {
+      if (coreSnap && coreSnap.exists()) {
+        metaBatch.update(coreRef, corePayload);
+      } else {
+        metaBatch.set(coreRef, corePayload);
       }
+      await metaBatch.commit();
+    } else {
+      await metaBatch.commit();
+      const coreBatch = writeBatch(db);
+      if (coreSnap && coreSnap.exists()) {
+        coreBatch.update(coreRef, corePayload);
+      } else {
+        coreBatch.set(coreRef, corePayload);
+      }
+      await coreBatch.commit();
     }
 
-    await batch.commit();
+    if (!canSkipChunks || !slotExists) {
+      const existingChunkIds = new Set<string>();
+      if (existingChunksSnap) {
+        existingChunksSnap.forEach((d) => existingChunkIds.add(d.id));
+      }
+
+      const nextChunkIds = new Set<string>();
+      let chunkBatch = writeBatch(db);
+      let batchOps = 0;
+      let batchBytes = 0;
+
+      const flushChunkBatch = async () => {
+        if (batchOps === 0) return;
+        await chunkBatch.commit();
+        chunkBatch = writeBatch(db);
+        batchOps = 0;
+        batchBytes = 0;
+      };
+
+      for (const chunk of dehydrated.graphChunks) {
+        const chunkId = `graph_${chunk.chunkIndex}`;
+        nextChunkIds.add(chunkId);
+        const chunkRef = doc(db, 'users', uid, 'slots', slotId, 'chunks', chunkId);
+        const isUpdate = existingChunkIds.has(chunkId);
+        const chunkPayload = isUpdate
+          ? {
+              nodeIds: chunk.nodeIds,
+              edgeIds: chunk.edgeIds,
+              updatedAt: serverTimestamp(),
+            }
+          : {
+              ownerUid: uid,
+              slotId,
+              chunkIndex: chunk.chunkIndex,
+              nodeIds: chunk.nodeIds,
+              edgeIds: chunk.edgeIds,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            };
+        const opBytes = estimateFirestoreDocBytes(chunkPayload as unknown as Record<string, unknown>);
+
+        if (
+          batchOps > 0 &&
+          (batchOps >= MAX_WRITE_BATCH_OPS || batchBytes + opBytes > MAX_WRITE_BATCH_BYTES)
+        ) {
+          await flushChunkBatch();
+        }
+
+        if (isUpdate) {
+          chunkBatch.update(chunkRef, chunkPayload);
+        } else {
+          chunkBatch.set(chunkRef, chunkPayload);
+        }
+        batchOps++;
+        batchBytes += opBytes;
+      }
+
+      for (const oldChunkId of existingChunkIds) {
+        if (!nextChunkIds.has(oldChunkId)) {
+          if (batchOps >= MAX_WRITE_BATCH_OPS || batchBytes + 256 > MAX_WRITE_BATCH_BYTES) {
+            await flushChunkBatch();
+          }
+          chunkBatch.delete(doc(db, 'users', uid, 'slots', slotId, 'chunks', oldChunkId));
+          batchOps++;
+          batchBytes += 256;
+        }
+      }
+
+      await flushChunkBatch();
+      lastUploadedGraphSig.set(cacheKey, {
+        sig: nextGraphSig,
+        chunkCount: dehydrated.graphChunks.length,
+      });
+    }
 
     return {
       ...dehydrated.metaFields,
@@ -349,11 +453,16 @@ export async function downloadCloudSlot(
       cloudSavedAt: Number(metaData.clientSavedAt) || 0,
     };
 
+    const pendingChunkKeys = Array.from(
+      new Set((coreData.loadedOsmChunks || []).map((k) => String(k || '').trim()).filter(Boolean))
+    );
+
     return {
       summary,
       baseState,
       marks,
       chunkCoordCenters,
+      pendingChunkKeys,
     };
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, slotPath);
@@ -389,16 +498,20 @@ export async function deleteCloudSlot(uid: string, slotId: SaveSlotId): Promise<
     if (!slotSnap.exists()) {
       return;
     }
-    const chunksSnap = await getDocs(query(chunksCol, where('ownerUid', '==', uid))).catch(
-      () => null
-    );
-    const batch = writeBatch(db);
-    if (chunksSnap) {
-      chunksSnap.forEach((c) => batch.delete(c.ref));
+    const chunksSnap = await getDocs(query(chunksCol, where('ownerUid', '==', uid)));
+    const chunkRefs = chunksSnap.docs.map((d) => d.ref);
+    for (let i = 0; i < chunkRefs.length; i += MAX_WRITE_BATCH_OPS) {
+      const delBatch = writeBatch(db);
+      const slice = chunkRefs.slice(i, i + MAX_WRITE_BATCH_OPS);
+      for (const ref of slice) {
+        delBatch.delete(ref);
+      }
+      await delBatch.commit();
     }
-    batch.delete(coreRef);
-    batch.delete(slotRef);
-    await batch.commit();
+    const finalBatch = writeBatch(db);
+    finalBatch.delete(coreRef);
+    finalBatch.delete(slotRef);
+    await finalBatch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, slotPath);
   }

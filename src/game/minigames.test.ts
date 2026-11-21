@@ -430,13 +430,14 @@ test('minigame milestone achievements directly boost main Road Incremental money
   const boostedState = { ...state, minigames: progressedMg };
   const summary = getMinigameMilestoneSummary(boostedState.minigames);
   assert.equal(summary.unlockedCount, 2);
-  assert.equal(summary.totalBoostPct, 6);
-  assert.equal(summary.incomeMult, 1.06);
+  assert.equal(summary.totalBoostPct, 10);
+  assert.equal(Number(summary.incomeMult.toFixed(4)), 1.1025);
+  assert.ok(summary.buildCostMult < 1, 'Unlocked minigame milestones should discount build costs');
 
   const mults = calculateMultipliers(boostedState);
-  assert.equal(mults.minigameBoostPct, 6);
-  assert.equal(mults.minigameIncomeMult, 1.06);
+  assert.equal(mults.minigameBoostPct, 10);
+  assert.equal(Number(mults.minigameIncomeMult.toFixed(4)), 1.1025);
 
   const boostedIncome = calculateTotalIncomePerSec(boostedState);
-  assert.equal(Math.round(boostedIncome), Math.round(baseIncome * 1.06));
+  assert.equal(Math.round(boostedIncome), Math.round(baseIncome * 1.1025));
 });

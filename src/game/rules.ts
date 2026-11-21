@@ -370,15 +370,87 @@ function isPointInPolygonCoords(lat: number, lng: number, rings: number[][][]): 
   return true;
 }
 
-export function isPointInGeoJson(lat: number, lng: number, boundary: GeoJsonBoundary): boolean {
-  if (boundary.type === 'Polygon') {
-    return isPointInPolygonCoords(lat, lng, boundary.coordinates as number[][][]);
+interface CachedPolygonPart {
+  poly: number[][][];
+  bbox: [number, number, number, number]; // [minLat, minLng, maxLat, maxLng]
+}
+
+const geoJsonPolyBboxCache = new WeakMap<GeoJsonBoundary, CachedPolygonPart[]>();
+
+function computeRingBbox(ring: number[][]): [number, number, number, number] {
+  let minLat = Infinity;
+  let minLng = Infinity;
+  let maxLat = -Infinity;
+  let maxLng = -Infinity;
+  for (let i = 0; i < ring.length; i++) {
+    const pt = ring[i];
+    if (pt[1] < minLat) minLat = pt[1];
+    if (pt[1] > maxLat) maxLat = pt[1];
+    if (pt[0] < minLng) minLng = pt[0];
+    if (pt[0] > maxLng) maxLng = pt[0];
   }
-  if (boundary.type === 'MultiPolygon') {
+  return [minLat, minLng, maxLat, maxLng];
+}
+
+function getGeoJsonCachedParts(boundary: GeoJsonBoundary): CachedPolygonPart[] {
+  let cached = geoJsonPolyBboxCache.get(boundary);
+  if (cached) return cached;
+
+  if (boundary.type === 'Polygon') {
+    const poly = boundary.coordinates as number[][][];
+    cached = poly.length > 0 ? [{ poly, bbox: computeRingBbox(poly[0] || []) }] : [];
+  } else if (boundary.type === 'MultiPolygon') {
     const polys = boundary.coordinates as number[][][][];
-    return polys.some((poly) => isPointInPolygonCoords(lat, lng, poly));
+    cached = polys.map((poly) => ({
+      poly,
+      bbox: computeRingBbox(poly[0] || []),
+    }));
+  } else {
+    cached = [];
+  }
+  geoJsonPolyBboxCache.set(boundary, cached);
+  return cached;
+}
+
+export function isPointInGeoJson(lat: number, lng: number, boundary: GeoJsonBoundary): boolean {
+  const parts = getGeoJsonCachedParts(boundary);
+  for (let i = 0; i < parts.length; i++) {
+    const { poly, bbox } = parts[i];
+    if (lat < bbox[0] || lat > bbox[2] || lng < bbox[1] || lng > bbox[3]) continue;
+    if (isPointInPolygonCoords(lat, lng, poly)) return true;
   }
   return false;
+}
+
+function computeGeoJsonBbox(boundary: GeoJsonBoundary): [number, number, number, number] | null {
+  const parts = getGeoJsonCachedParts(boundary);
+  if (parts.length === 0) return null;
+  let minLat = Infinity;
+  let minLng = Infinity;
+  let maxLat = -Infinity;
+  let maxLng = -Infinity;
+  for (let i = 0; i < parts.length; i++) {
+    const b = parts[i].bbox;
+    if (!Number.isFinite(b[0]) || !Number.isFinite(b[1]) || !Number.isFinite(b[2]) || !Number.isFinite(b[3])) {
+      continue;
+    }
+    if (b[0] < minLat) minLat = b[0];
+    if (b[1] < minLng) minLng = b[1];
+    if (b[2] > maxLat) maxLat = b[2];
+    if (b[3] > maxLng) maxLng = b[3];
+  }
+  if (!Number.isFinite(minLat) || !Number.isFinite(minLng) || !Number.isFinite(maxLat) || !Number.isFinite(maxLng)) {
+    return null;
+  }
+  return [minLat, minLng, maxLat, maxLng];
+}
+
+function mergeRegionBboxWithBoundary(
+  prevBbox: [number, number, number, number],
+  boundary?: GeoJsonBoundary
+): [number, number, number, number] {
+  if (!boundary) return prevBbox;
+  return computeGeoJsonBbox(boundary) || prevBbox;
 }
 
 export function isPointInRegionBoundary(
@@ -546,9 +618,12 @@ export function getRegionUnlockCost(state: GameState, region: ProvincialRegion):
     );
   }
 
-  // Province/State-scale exponential curve (1.85^(unlocked-1)) scaled for 도/주 광역 행정구역
-  const expFactor = Math.pow(1.85, unlockedCount - 1);
-  const base = isolated ? 60000 * (1 + Math.min(4.0, minDistKm / 150)) : 18000;
+  // Moderate provincial unlock curve (1.62^(unlocked-1) up to 12, then 1.38x)
+  const expFactor =
+    unlockedCount <= 12
+      ? Math.pow(1.62, unlockedCount - 1)
+      : Math.pow(1.62, 11) * Math.pow(1.38, unlockedCount - 12);
+  const base = isolated ? 55000 * (1 + Math.min(3.0, minDistKm / 180)) : 18000;
   return Math.max(5000, Math.round((base * expFactor) / 100) * 100);
 }
 
@@ -663,10 +738,123 @@ function normalizeAdminRegionName(name: string): string {
     .toLowerCase()
     .replace(/\([^)]*\)/g, ' ')
     .replace(/특별자치도|특별자치시|특별시|광역시|자치도|자치시/g, '')
-    .replace(/\b(province|state|prefecture|region|metropolitan city|special city|special self-governing province|special self-governing city|do|si)\b/g, '')
+    .replace(
+      /\b(special self-governing province|special self-governing city|metropolitan city|special city|city of|state of|province|state|prefecture|region|metropolis|do|si)\b/g,
+      ''
+    )
+    .replace(/(teukbyeolsi|gwangyeoksi|province|prefecture|state)$/g, '')
     .replace(/[-_.,·]/g, ' ')
     .replace(/\s+/g, '')
     .trim();
+}
+
+const COUNTRY_RELATION_IDS = new Set([
+  'osm_rel_307756', // South Korea
+  'osm_rel_192756', // North Korea
+  'osm_rel_382313', // Japan
+  'osm_rel_148838', // USA
+  'osm_rel_62149',  // UK
+  'osm_rel_1403916', // France
+  'osm_rel_2202162', // France metropolitan/full
+  'osm_rel_270056', // China
+]);
+
+const COUNTRY_EXACT_NAMES = new Set([
+  '대한민국',
+  '한국',
+  '남한',
+  '조선민주주의인민공화국',
+  '북한',
+  'southkorea',
+  'republicofkorea',
+  'korea',
+  'northkorea',
+  '일본',
+  '일본국',
+  'japan',
+  '미국',
+  '미합중국',
+  'unitedstates',
+  'unitedstatesofamerica',
+  'usa',
+  '중국',
+  '중화인민공화국',
+  'china',
+  '영국',
+  'unitedkingdom',
+  '프랑스',
+  'france',
+  '대만',
+  'taiwan',
+  '독일',
+  'germany',
+]);
+
+export function isCountryLevelRegion(meta: {
+  regionId?: string;
+  regionName?: string;
+  adminLevel?: string;
+  bbox?: [number, number, number, number];
+}): boolean {
+  if (meta.regionId && COUNTRY_RELATION_IDS.has(meta.regionId)) {
+    return true;
+  }
+  if (meta.adminLevel && meta.adminLevel.trim() === '2') {
+    return true;
+  }
+  if (meta.regionName) {
+    const compact = meta.regionName
+      .toLowerCase()
+      .replace(/\([^)]*\)/g, '')
+      .replace(/[-_.,·\s]/g, '')
+      .trim();
+    if (COUNTRY_EXACT_NAMES.has(compact)) {
+      return true;
+    }
+  }
+  if (meta.bbox && meta.bbox.length === 4) {
+    const [minLat, minLng, maxLat, maxLng] = meta.bbox;
+    const latSpan = maxLat - minLat;
+    const lngSpan = maxLng - minLng;
+    // South Korea national bounding box or gigantic multi-state span
+    if (
+      (latSpan >= 3.5 &&
+        lngSpan >= 3.2 &&
+        minLat <= 34.5 &&
+        maxLat >= 37.8 &&
+        minLng <= 126.2 &&
+        maxLng >= 129.0) ||
+      latSpan > 12 ||
+      lngSpan > 14
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function isSyntheticFallbackRegion(
+  regionId: string,
+  regionName?: string,
+  meta?: { adminLevel?: string; bbox?: [number, number, number, number] }
+): boolean {
+  if (isCountryLevelRegion({ regionId, regionName, adminLevel: meta?.adminLevel, bbox: meta?.bbox })) {
+    return true;
+  }
+  if (
+    regionId.startsWith('osm_prov_') ||
+    regionId.startsWith('osm_grid_') ||
+    regionId.startsWith('osm_nom_')
+  ) {
+    return true;
+  }
+  const trimmed = (regionName || '').trim();
+  return (
+    trimmed === '인접 광역 행정구역' ||
+    trimmed === '인접 도·주 광역 행정구역' ||
+    trimmed === '도시 행정구역' ||
+    trimmed === '인접 도시 행정구역'
+  );
 }
 
 function getCanonicalAdminRegionKey(name: string, lat: number, lng: number): string | null {
@@ -675,14 +863,14 @@ function getCanonicalAdminRegionKey(name: string, lat: number, lng: number): str
 
   const isKorea = lat >= 33.0 && lat <= 38.9 && lng >= 124.4 && lng <= 132.0;
   if (isKorea) {
-    if (norm === '서울' || norm === 'seoul') return 'kr_seoul';
+    if (norm === '서울' || norm === 'seoul' || norm === 'seoulmetropolitan') return 'kr_seoul';
     if (norm === '경기' || norm === '경기도' || norm === 'gyeonggi' || norm === 'gyeonggido') return 'kr_gyeonggi';
     if (norm === '인천' || norm === 'incheon') return 'kr_incheon';
     if (norm === '강원' || norm === '강원도' || norm === 'gangwon' || norm === 'gangwondo') return 'kr_gangwon';
     if (norm === '충북' || norm === '충청북' || norm === '충청북도' || norm === 'chungbuk' || norm === 'chungcheongbuk' || norm === 'chungcheongbukdo' || norm === 'northchungcheong') return 'kr_chungbuk';
     if (norm === '충남' || norm === '충청남' || norm === '충청남도' || norm === 'chungnam' || norm === 'chungcheongnam' || norm === 'chungcheongnamdo' || norm === 'southchungcheong') return 'kr_chungnam';
     if (norm === '대전' || norm === 'daejeon') return 'kr_daejeon';
-    if (norm === '세종' || norm === 'sejong') return 'kr_sejong';
+    if (norm === '세종' || norm === 'sejong' || norm === 'sejongsi') return 'kr_sejong';
     if (norm === '전북' || norm === '전라북' || norm === '전라북도' || norm === 'jeonbuk' || norm === 'jeollabuk' || norm === 'jeollabukdo' || norm === 'northjeolla') return 'kr_jeonbuk';
     if (norm === '전남' || norm === '전라남' || norm === '전라남도' || norm === 'jeonnam' || norm === 'jeollanam' || norm === 'jeollanamdo' || norm === 'southjeolla') return 'kr_jeonnam';
     if (norm === '광주' || norm === 'gwangju') return 'kr_gwangju';
@@ -832,6 +1020,107 @@ export function deduplicateProvincialRegions(regions: ProvincialRegion[]): Provi
   return result;
 }
 
+export function retagNodesIntoUnlockedRegions(
+  state: GameState,
+  strippedRegionIds?: Set<string>
+): GameState {
+  const regions = state.provincialRegions || [];
+  if (regions.length === 0) return state;
+
+  const regionMap = new Map(regions.map((r) => [r.regionId, r]));
+  const unlockedRegions = [...regions]
+    .filter((r) => r.unlocked)
+    .sort((a, b) => bboxAreaDegSq(a.bbox) - bboxAreaDegSq(b.bbox));
+  const lockedRegions = [...regions]
+    .filter((r) => !r.unlocked)
+    .sort((a, b) => bboxAreaDegSq(a.bbox) - bboxAreaDegSq(b.bbox));
+
+  if (unlockedRegions.length === 0) return state;
+
+  const padFor = () => 0.002;
+  const rawNodes = state.osmNodes || [];
+  let nodesChanged = false;
+
+  const nextNodes = rawNodes.map((n) => {
+    const rid = n.regionId;
+    const isMissingOrLockedOut =
+      !rid ||
+      rid === '__locked_outside__' ||
+      (strippedRegionIds ? strippedRegionIds.has(rid) : false) ||
+      !regionMap.has(rid);
+
+    if (isMissingOrLockedOut) {
+      const unlockedMatch = unlockedRegions.find((ur) =>
+        isPointInRegionBoundary(n.lat, n.lng, ur, padFor())
+      );
+      if (unlockedMatch) {
+        if (rid !== unlockedMatch.regionId) {
+          nodesChanged = true;
+          return { ...n, regionId: unlockedMatch.regionId };
+        }
+        return n;
+      }
+      if (!rid || (strippedRegionIds && strippedRegionIds.has(rid)) || (rid !== '__locked_outside__' && !regionMap.has(rid))) {
+        const lockedMatch = lockedRegions.find((lr) =>
+          isPointInRegionBoundary(n.lat, n.lng, lr, padFor())
+        );
+        const nextRid = lockedMatch ? lockedMatch.regionId : '__locked_outside__';
+        if (rid !== nextRid) {
+          nodesChanged = true;
+          return { ...n, regionId: nextRid };
+        }
+      }
+      return n;
+    }
+
+    const curReg = regionMap.get(rid);
+    if (curReg && !curReg.unlocked) {
+      const unlockedMatch = unlockedRegions.find((ur) =>
+        isPointInRegionBoundary(n.lat, n.lng, ur, padFor())
+      );
+      if (unlockedMatch && !isPointInRegionBoundary(n.lat, n.lng, curReg, 0)) {
+        nodesChanged = true;
+        return { ...n, regionId: unlockedMatch.regionId };
+      }
+    }
+    return n;
+  });
+
+  const nodeRegionById = new Map(nextNodes.map((n) => [n.id, n.regionId]));
+  const startRegId =
+    unlockedRegions.find((r) => r.isStartingRegion)?.regionId || unlockedRegions[0]?.regionId;
+  const rawEdges = state.osmEdges || [];
+  let edgesChanged = false;
+
+  const nextEdges = rawEdges.map((e) => {
+    const rid = e.regionId;
+    const needsFix =
+      !rid ||
+      rid === '__locked_outside__' ||
+      (strippedRegionIds ? strippedRegionIds.has(rid) : false) ||
+      !regionMap.has(rid);
+    if (!needsFix) return e;
+    const fromRid = nodeRegionById.get(e.fromNodeId);
+    const toRid = nodeRegionById.get(e.toNodeId);
+    const replacement =
+      (fromRid && fromRid !== '__locked_outside__' ? fromRid : undefined) ||
+      (toRid && toRid !== '__locked_outside__' ? toRid : undefined) ||
+      startRegId;
+    if (replacement && replacement !== rid) {
+      edgesChanged = true;
+      return { ...e, regionId: replacement };
+    }
+    return e;
+  });
+
+  if (!nodesChanged && !edgesChanged) return state;
+  return {
+    ...state,
+    osmNodes: nodesChanged ? nextNodes : rawNodes,
+    osmEdges: edgesChanged ? nextEdges : rawEdges,
+  };
+}
+
 export function registerStartingProvincialRegion(
   state: GameState,
   meta: {
@@ -845,6 +1134,9 @@ export function registerStartingProvincialRegion(
     totalNodeCount?: number;
   }
 ): GameState {
+  if (isCountryLevelRegion(meta)) {
+    return state;
+  }
   const regions = state.provincialRegions || [];
   const existingStart = regions.find((r) => r.isStartingRegion);
   const canonicalMatch = regions.find(
@@ -873,6 +1165,7 @@ export function registerStartingProvincialRegion(
       : meta.regionName;
 
   const filtered = regions.filter((r) => {
+    if (isCountryLevelRegion(r)) return false;
     if (r.isStartingRegion) return false;
     if (canonicalMatch && r.regionId === canonicalMatch.regionId) return false;
     if (
@@ -909,11 +1202,12 @@ export function registerStartingProvincialRegion(
       undefined,
   };
 
+  const startPad = 0.002;
   const retaggedNodes = (state.osmNodes || []).map((n) => {
-    if (!n.regionId || (oldStartId && n.regionId === oldStartId)) {
-      return isPointInRegionBoundary(n.lat, n.lng, unlockedStart, 0.002)
+    if (!n.regionId || n.regionId === '__locked_outside__' || (oldStartId && n.regionId === oldStartId)) {
+      return isPointInRegionBoundary(n.lat, n.lng, unlockedStart, startPad)
         ? { ...n, regionId: resolvedStartId }
-        : { ...n, regionId: '__locked_outside__' };
+        : { ...n, regionId: n.regionId || '__locked_outside__' };
     }
     return n;
   });
@@ -940,12 +1234,12 @@ export function registerStartingProvincialRegion(
         }
   );
 
-  return {
+  return retagNodesIntoUnlockedRegions({
     ...state,
     provincialRegions: updatedRegions,
     osmNodes: retaggedNodes,
     osmEdges: retaggedEdges,
-  };
+  });
 }
 
 export function registerDiscoveredProvincialRegion(
@@ -962,6 +1256,9 @@ export function registerDiscoveredProvincialRegion(
     totalNodeCount?: number;
   }
 ): GameState {
+  if (isSyntheticFallbackRegion(meta.regionId, meta.regionName, meta)) {
+    return state;
+  }
   const regions = state.provincialRegions || [];
   const isIncomingRealOsm = isRealOsmBoundaryMeta(meta);
   const unlocked = regions.filter((r) => r.unlocked);
@@ -1024,7 +1321,29 @@ export function registerDiscoveredProvincialRegion(
             ),
       };
     });
-    return { ...state, provincialRegions: deduplicateProvincialRegions(updated) };
+    const nextState: GameState = { ...state, provincialRegions: deduplicateProvincialRegions(updated) };
+    return canonicalMatch.unlocked ? retagNodesIntoUnlockedRegions(nextState) : nextState;
+  }
+
+  const incomingKey = getCanonicalAdminRegionKey(meta.regionName, meta.centerLat, meta.centerLng);
+  const incomingArea = bboxAreaDegSq(meta.bbox);
+  if (!incomingKey && incomingArea > 0) {
+    const parentContainer = regions.find((r) => {
+      const rArea = bboxAreaDegSq(r.bbox);
+      if (rArea <= incomingArea * 1.8) return false;
+      const interMinLat = Math.max(meta.bbox[0], r.bbox[0]);
+      const interMinLng = Math.max(meta.bbox[1], r.bbox[1]);
+      const interMaxLat = Math.min(meta.bbox[2], r.bbox[2]);
+      const interMaxLng = Math.min(meta.bbox[3], r.bbox[3]);
+      if (interMaxLat <= interMinLat || interMaxLng <= interMinLng) return false;
+      const interArea = (interMaxLat - interMinLat) * (interMaxLng - interMinLng);
+      if (interArea / incomingArea < 0.6) return false;
+      if (!isPointInRegionBoundary(meta.centerLat, meta.centerLng, r, 0)) return false;
+      return meta.adminLevel !== '4' || r.adminLevel === '4';
+    });
+    if (parentContainer) {
+      return state;
+    }
   }
 
   const anchor = unlocked.find((r) => r.isStartingRegion) || unlocked[0];
@@ -1153,7 +1472,10 @@ export function buildInitialProvincialRegions(startingCity: StartingCity): Provi
   return [startingRegion, ...others];
 }
 
-export function scopeGameStateToStartingCity(state: GameState): GameState {
+export function scopeGameStateToStartingCity(
+  state: GameState,
+  options?: { trustedV2?: boolean }
+): GameState {
   const cityId = state.startingCity.id;
   const nodes = (state.nodes || []).filter((n) => n.cityId === cityId);
 
@@ -1186,10 +1508,19 @@ export function scopeGameStateToStartingCity(state: GameState): GameState {
   );
   const curatedById = new Map(CURATED_PROVINCIAL_REGIONS.map((c) => [c.regionId, c]));
 
+  const strippedRegionIds = new Set<string>();
   let provincialRegions: ProvincialRegion[];
   if (Array.isArray(state.provincialRegions) && state.provincialRegions.length > 0) {
     const cleaned = state.provincialRegions
       .filter((r) => {
+        if (isCountryLevelRegion(r)) {
+          strippedRegionIds.add(r.regionId);
+          return false;
+        }
+        if (!r.unlocked && isSyntheticFallbackRegion(r.regionId, r.regionName, r)) {
+          strippedRegionIds.add(r.regionId);
+          return false;
+        }
         if (r.unlocked) return true;
         if (startCluster) {
           const rc = getRegionalClusterKey(r.regionId, r.centerLat, r.centerLng);
@@ -1216,9 +1547,13 @@ export function scopeGameStateToStartingCity(state: GameState): GameState {
           : r;
       });
     const dedupedCleaned = deduplicateProvincialRegions(cleaned);
-    const missingFromBaseline = seededBaselineRegions.filter(
-      (b) => !b.unlocked && !dedupedCleaned.some((r) => areSameProvincialRegion(r, b))
-    );
+    const hasAnyUnlocked = dedupedCleaned.some((r) => r.unlocked);
+    const missingFromBaseline = seededBaselineRegions.filter((b) => {
+      if (b.isStartingRegion) {
+        return !hasAnyUnlocked;
+      }
+      return !b.unlocked && !dedupedCleaned.some((r) => areSameProvincialRegion(r, b));
+    });
     const combined = deduplicateProvincialRegions([...dedupedCleaned, ...missingFromBaseline]);
     const unlockedCombined = combined.filter((r) => r.unlocked);
     provincialRegions = combined.map((r) =>
@@ -1247,15 +1582,43 @@ export function scopeGameStateToStartingCity(state: GameState): GameState {
   const startRegion =
     unlockedRegions.find((r) => r.isStartingRegion) || unlockedRegions[0];
 
-  const taggedNodes = (state.osmNodes || []).map((n) => {
-    if (n.regionId) return n;
-    if (!startRegion) return n;
-    const match = unlockedRegions.find((ur) => isPointInRegionBoundary(n.lat, n.lng, ur, 0.002));
-    return { ...n, regionId: match ? match.regionId : '__locked_outside__' };
-  });
-  const taggedEdges = (state.osmEdges || []).map((e) =>
-    e.regionId || !startRegion ? e : { ...e, regionId: startRegion.regionId }
-  );
+  const rawOsmNodes = state.osmNodes || [];
+  let needsNodeTag = false;
+  if (startRegion) {
+    for (let i = 0; i < rawOsmNodes.length; i++) {
+      const rid = rawOsmNodes[i].regionId;
+      if (!rid || strippedRegionIds.has(rid)) {
+        needsNodeTag = true;
+        break;
+      }
+    }
+  }
+  const taggedNodes = !needsNodeTag
+    ? rawOsmNodes
+    : rawOsmNodes.map((n) => {
+        if (n.regionId && !strippedRegionIds.has(n.regionId)) return n;
+        const match = unlockedRegions.find((ur) => isPointInRegionBoundary(n.lat, n.lng, ur, 0.002));
+        return { ...n, regionId: match ? match.regionId : '__locked_outside__' };
+      });
+
+  const rawOsmEdges = state.osmEdges || [];
+  let needsEdgeTag = false;
+  if (startRegion) {
+    for (let i = 0; i < rawOsmEdges.length; i++) {
+      const rid = rawOsmEdges[i].regionId;
+      if (!rid || strippedRegionIds.has(rid)) {
+        needsEdgeTag = true;
+        break;
+      }
+    }
+  }
+  const taggedEdges = !needsEdgeTag
+    ? rawOsmEdges
+    : rawOsmEdges.map((e) =>
+        (e.regionId && !strippedRegionIds.has(e.regionId)) || !startRegion
+          ? e
+          : { ...e, regionId: startRegion.regionId }
+      );
 
   const hasConnectedNodes = taggedNodes.some((n) => n.connected);
   const startPendingManualSeed =
@@ -1263,12 +1626,13 @@ export function scopeGameStateToStartingCity(state: GameState): GameState {
     Boolean(startRegion && pendingSeedRegionIds.includes(startRegion.regionId));
 
   let seededOsmNodes = taggedNodes;
-  if (!startPendingManualSeed) {
+  if (!startPendingManualSeed && !(options?.trustedV2 && hasConnectedNodes)) {
+    const regionMap = new Map(provincialRegions.map((r) => [r.regionId, r]));
     const unlockedPoolForSeed = taggedNodes.filter((n) => {
       const rid = n.regionId;
       if (rid === '__locked_outside__') return false;
       if (rid) {
-        const known = provincialRegions.find((r) => r.regionId === rid);
+        const known = regionMap.get(rid);
         if (known) return known.unlocked && isPointInRegionBoundary(n.lat, n.lng, known, 0.002);
       }
       return unlockedRegions.some((ur) => isPointInRegionBoundary(n.lat, n.lng, ur, 0.002));
@@ -1282,9 +1646,11 @@ export function scopeGameStateToStartingCity(state: GameState): GameState {
         .filter((n) => n.connected)
         .map((n) => n.id)
     );
-    seededOsmNodes = taggedNodes.map((n) =>
-      seededUnlockedIds.has(n.id) ? { ...n, connected: true } : n
-    );
+    if (seededUnlockedIds.size > 0) {
+      seededOsmNodes = taggedNodes.map((n) =>
+        seededUnlockedIds.has(n.id) && !n.connected ? { ...n, connected: true } : n
+      );
+    }
   }
 
   const nextState: GameState = {
@@ -1403,7 +1769,7 @@ export function createInitialGameState(
 
 export function getNodeBuildCostScaleMult(connectedNodeCount: number): number {
   const nAbove = Math.max(0, connectedNodeCount - 1);
-  return Number((1 + nAbove * 0.015 + Math.pow(nAbove / 35, 1.3)).toFixed(4));
+  return Number((1 + nAbove * 0.022 + Math.pow(nAbove / 32, 1.4)).toFixed(4));
 }
 
 export function calculateMultipliers(state: GameState): ActiveMultipliers {
@@ -1413,15 +1779,17 @@ export function calculateMultipliers(state: GameState): ActiveMultipliers {
   }
   const sk = (id: string) => skillLevels.get(id) || 0;
 
-  // Build cost reduction from studies ([21], [41], [53], [74], [83], [143]) - capped so total costs never collapse
-  const costFactor =
-    Math.pow(0.95, sk('sk_root_l')) *
-    Math.pow(0.94, sk('sk_infra_1')) *
-    Math.pow(0.95, sk('sk_re_2')) *
-    Math.pow(0.94, sk('sk_infra_cost2')) *
-    Math.pow(0.94, sk('sk_commerce_3')) *
-    Math.pow(0.93, sk('sk_quantum_dispatch'));
-  const buildCostMult = Math.max(0.15, costFactor);
+  const rawMg = getMinigameIncomeBoost(state.minigames);
+
+  // Build cost reduction from studies + minigame milestones - strictly bounded at 0.15 floor
+  const studyCostFactor =
+    Math.pow(0.965, sk('sk_root_l')) *
+    Math.pow(0.96, sk('sk_infra_1')) *
+    Math.pow(0.965, sk('sk_re_2')) *
+    Math.pow(0.955, sk('sk_infra_cost2')) *
+    Math.pow(0.96, sk('sk_commerce_3')) *
+    Math.pow(0.955, sk('sk_quantum_dispatch'));
+  const buildCostMult = Math.max(0.15, studyCostFactor * rawMg.buildCostMult);
 
   const graphIdx = getOsmGraphIndex(state.osmNodes || [], state.osmEdges || []);
   const actualConnectedNodes = Math.max(
@@ -1434,7 +1802,7 @@ export function calculateMultipliers(state: GameState): ActiveMultipliers {
   const networkKmMult = 1;
   const nodeScaleMult = 1;
 
-  // Achievement % bonus amplified by [75] sk_ach_amp (heavily nerfed from 0.25 -> 0.06)
+  // Achievement % bonus amplified by [75] sk_ach_amp
   let achievementIncomePct = 0;
   for (const ach of state.achievements) {
     if (ach.unlocked) achievementIncomePct += ach.bonusIncomePct;
@@ -1450,82 +1818,88 @@ export function calculateMultipliers(state: GameState): ActiveMultipliers {
     (state.provincialRegions || []).filter((r) => r.unlocked).length
   );
 
-  // Sublinear, capped scale-sensitive multipliers (prevent late-game exponential runaway)
-  const edgeSynergyMult = 1 + sk('sk_infra_regional') * Math.min(2.5, Math.sqrt(builtEdges) * 0.04);
-  const nodeGeoMult = 1 + sk('sk_scale_nodes') * Math.min(3.0, Math.sqrt(connectedNodes) * 0.03);
-  const citySynergyMult = 1 + sk('sk_city_synergy') * (unlockedCitiesCount - 1) * 0.08;
-  const kmExpMult = 1 + sk('sk_km_exponential') * 0.15 * Math.log10(1 + mappedKm);
+  // Additive pools across 4 study categories to prevent 1e30+ compounding runaway
+  const corePool =
+    1 +
+    sk('sk_root_0') * 0.16 +
+    sk('sk_trunk_1') * 0.14 +
+    sk('sk_trunk_2') * 0.16 +
+    sk('sk_speed_1') * 0.15 +
+    sk('sk_re_2') * 0.14 +
+    (sk('sk_multi_path') > 0 ? 1.0 : 0);
 
-  // Rebalanced Study Tree multipliers (Tier 1 -> Tier 16) - Balanced Moderate Buff
-  const treeGlobalMult =
-    Math.pow(1.10, sk('sk_root_0')) *
-    Math.pow(1.09, sk('sk_trunk_1')) *
-    Math.pow(1.10, sk('sk_trunk_2')) *
-    Math.pow(1.10, sk('sk_speed_1')) *
-    Math.pow(1.09, sk('sk_re_2')) *
-    Math.pow(1.12, sk('sk_infra_5')) *
-    Math.pow(1.18, sk('sk_infra_6')) *
-    Math.pow(1.12, sk('sk_speed_3')) *
-    Math.pow(1.11, sk('sk_freight_dispatch')) *
-    Math.pow(1.14, sk('sk_speed_4')) *
-    Math.pow(1.18, sk('sk_speed_5')) *
-    Math.pow(1.12, sk('sk_commerce_2')) *
-    Math.pow(1.11, sk('sk_commerce_3')) *
-    Math.pow(1.12, sk('sk_re_4')) *
-    Math.pow(1.15, sk('sk_re_5')) *
-    Math.pow(1.20, sk('sk_commerce_apex')) *
-    (sk('sk_multi_path') > 0 ? 2.0 : 1) *
-    Math.pow(1.18, sk('sk_crown_1')) *
-    Math.pow(1.20, sk('sk_subsea_tunnel')) *
-    Math.pow(1.24, sk('sk_crown_2')) *
-    Math.pow(1.16, sk('sk_commerce_mega')) *
-    Math.pow(1.28, sk('sk_quantum_dispatch')) *
-    Math.pow(1.32, sk('sk_dyson_grid')) *
-    Math.pow(1.30, sk('sk_terra_logistics')) *
-    Math.pow(1.38, sk('sk_crown_3')) *
-    edgeSynergyMult *
-    nodeGeoMult *
-    citySynergyMult *
-    kmExpMult;
+  const specPool =
+    1 +
+    sk('sk_infra_5') * 0.2 +
+    sk('sk_speed_3') * 0.18 +
+    sk('sk_freight_dispatch') * 0.16 +
+    sk('sk_commerce_2') * 0.18 +
+    sk('sk_commerce_3') * 0.16 +
+    sk('sk_re_4') * 0.18 +
+    sk('sk_speed_4') * 0.24 +
+    sk('sk_re_5') * 0.24 +
+    sk('sk_infra_6') * 0.35 +
+    sk('sk_speed_5') * 0.35 +
+    sk('sk_commerce_apex') * 0.35;
 
-  const rawMg = getMinigameIncomeBoost(state.minigames);
-  const mgSynergyMult = 1 + sk('sk_mg_synergy') * 0.12;
-  const effectiveMgBoostPct = rawMg.boostPct * mgSynergyMult;
-  const effectiveMgMult = 1 + effectiveMgBoostPct / 100;
+  const latePool =
+    1 +
+    sk('sk_crown_1') * 0.25 +
+    sk('sk_subsea_tunnel') * 0.32 +
+    sk('sk_crown_2') * 0.4 +
+    sk('sk_commerce_mega') * 0.25 +
+    sk('sk_quantum_dispatch') * 0.45 +
+    sk('sk_dyson_grid') * 0.55 +
+    sk('sk_terra_logistics') * 0.55 +
+    sk('sk_crown_3') * 0.85;
+
+  const edgeBonus = sk('sk_infra_regional') * Math.min(0.15, Math.sqrt(builtEdges) * 0.015);
+  const nodeBonus = sk('sk_scale_nodes') * Math.min(0.18, Math.sqrt(connectedNodes) * 0.015);
+  const cityBonus = sk('sk_city_synergy') * Math.min(0.22, (unlockedCitiesCount - 1) * 0.06);
+  const kmBonus = sk('sk_km_exponential') * Math.min(0.36, 0.18 * Math.log10(1 + mappedKm));
+  const synergyPool = 1 + edgeBonus + nodeBonus + cityBonus + kmBonus;
+
+  const treeGlobalMult = corePool * specPool * latePool * synergyPool;
+
+  const mgSynergyMult = 1 + sk('sk_mg_synergy') * 0.08;
+  const effectiveMgBoostPct = Math.round(rawMg.boostPct * mgSynergyMult * 100) / 100;
+  let effectiveMgMult = 1;
+  for (const pct of Object.values(rawMg.perGameBoostPct)) {
+    if (pct > 0) {
+      effectiveMgMult *= 1 + (pct * mgSynergyMult) / 100;
+    }
+  }
 
   const globalIncomeMult = treeGlobalMult * achMult * effectiveMgMult;
 
-  const roadIncomeMult = Math.pow(1.12, sk('sk_infra_3'));
-  const railIncomeMult = Math.pow(1.15, sk('sk_double_track')) * Math.pow(1.10, sk('sk_speed_3'));
+  const roadIncomeMult = 1 + sk('sk_infra_3') * 0.18;
+  const railIncomeMult = 1 + sk('sk_double_track') * 0.2 + sk('sk_speed_3') * 0.15;
 
-  const osmNodeIncomeMult =
-    (1 +
-      sk('sk_trunk_1') * 0.18 +
-      sk('sk_node_yield') * 0.15 +
-      sk('sk_re_1') * 0.2) *
-    Math.pow(1.10, sk('sk_infra_2')) *
-    Math.pow(1.12, sk('sk_infra_4')) *
-    Math.pow(1.12, sk('sk_interchange_grid')) *
-    Math.pow(1.15, sk('sk_commerce_1')) *
-    Math.pow(1.18, sk('sk_re_3')) *
-    Math.pow(1.20, sk('sk_commerce_mega')) *
-    Math.pow(1.25, sk('sk_planetary_nodes')) *
-    Math.pow(1.22, sk('sk_crown_3')) *
-    globalIncomeMult;
+  const osmNodePool =
+    1 +
+    sk('sk_trunk_1') * 0.14 +
+    sk('sk_node_yield') * 0.12 +
+    sk('sk_re_1') * 0.16 +
+    sk('sk_infra_2') * 0.18 +
+    sk('sk_infra_4') * 0.2 +
+    sk('sk_interchange_grid') * 0.22 +
+    sk('sk_commerce_1') * 0.22 +
+    sk('sk_re_3') * 0.25 +
+    sk('sk_commerce_mega') * 0.3 +
+    sk('sk_planetary_nodes') * 0.42 +
+    sk('sk_crown_3') * 0.5;
+  const osmNodeIncomeMult = osmNodePool * globalIncomeMult;
 
   const junctionFlatPerNode =
     (sk('sk_node_yield') * 1.0 + sk('sk_interchange_grid') * 4.0) * globalIncomeMult;
 
   const clickBonusMult =
-    (1 + sk('sk_root_r') * 0.25) *
-    Math.pow(1.12, sk('sk_snap_tool')) *
-    Math.pow(1.2, sk('sk_speed_2')) *
-    Math.pow(1.22, sk('sk_speed_4')) *
-    Math.pow(1.12, sk('sk_subsea_tunnel')) *
-    Math.pow(1.25, sk('sk_terra_logistics'));
+    (1 + sk('sk_root_r') * 0.25 + sk('sk_snap_tool') * 0.15) *
+    (1 + sk('sk_speed_2') * 0.25 + sk('sk_speed_4') * 0.3) *
+    (1 + sk('sk_subsea_tunnel') * 0.25 + sk('sk_terra_logistics') * 0.4);
   const clickDpsSeconds = 1.6 + sk('sk_speed_2') * 0.2;
   const edgeCashbackFlat =
-    sk('sk_snap_tool') * 8 +
+    sk('sk_snap_tool') * 10 +
     sk('sk_commerce_2') * 25 +
     sk('sk_commerce_apex') * 60;
 
@@ -1685,18 +2059,31 @@ export const CUSTOM_BRIDGE_WAY_NAMES = new Set([
   '교차로 연결 링크',
   '철도 연결 링크',
   '복합 환승 직결',
+  '인접 시 경계 직결 링크',
+  '인접 노선 연결',
+]);
+
+const ISOLATED_PIONEER_HIGHWAYS = new Set([
+  'pedestrian',
+  'living_street',
+  'track',
+  'service',
 ]);
 
 interface IsolatedBridgeCacheEntry {
   allowedTargetsByComp: Map<number, Set<string>>;
   allowedTargetsByOrigin: Map<string, Set<string>>;
+  minorTargetIds: Set<string>;
 }
 
 interface UnlockedOsmTopology {
   compIdByNode: Map<string, number>;
+  compNodesById: Map<number, OsmNode[]>;
   deadEndOrigins: Set<string>;
+  isolatedMinorComps: Set<number>;
   frontierCache: Map<string, Map<string, number>>;
   isolatedBridgeCache: Map<string, IsolatedBridgeCacheEntry>;
+  unseededIslandNodeIds?: Set<string>;
 }
 
 interface OsmGraphIndex {
@@ -1733,7 +2120,8 @@ function getOsmGraphIndex(osmNodes: OsmNode[], osmEdges: OsmEdge[]): OsmGraphInd
   const connectedNodes: OsmNode[] = [];
   const nodeModeMap = new Map<string, 'road' | 'rail' | 'mixed'>();
 
-  for (const n of osmNodes) {
+  for (let i = 0; i < osmNodes.length; i++) {
+    const n = osmNodes[i];
     nodeById.set(n.id, n);
     if (n.connected) connectedNodes.push(n);
     if (n.mode) nodeModeMap.set(n.id, n.mode);
@@ -1753,7 +2141,8 @@ function getOsmGraphIndex(osmNodes: OsmNode[], osmEdges: OsmEdge[]): OsmGraphInd
     { wayName: string; mode: 'road' | 'rail'; total: number; built: number }
   >();
 
-  for (const e of osmEdges) {
+  for (let i = 0; i < osmEdges.length; i++) {
+    const e = osmEdges[i];
     edgeById.set(e.id, e);
     if (e.built) {
       builtEdges.push(e);
@@ -1762,41 +2151,53 @@ function getOsmGraphIndex(osmNodes: OsmNode[], osmEdges: OsmEdge[]): OsmGraphInd
       else builtRoadIncomeBase += e.baseIncomePerSec;
     }
 
-    hasEdgesSet.add(e.fromNodeId);
-    hasEdgesSet.add(e.toNodeId);
+    const fromId = e.fromNodeId;
+    const toId = e.toNodeId;
+    const mode = e.mode;
+    hasEdgesSet.add(fromId);
+    hasEdgesSet.add(toId);
 
-    for (const nid of [e.fromNodeId, e.toNodeId]) {
-      const prev = nodeModeMap.get(nid);
-      if (!prev) nodeModeMap.set(nid, e.mode);
-      else if (prev !== e.mode) nodeModeMap.set(nid, 'mixed');
+    const prevFromMode = nodeModeMap.get(fromId);
+    if (!prevFromMode) nodeModeMap.set(fromId, mode);
+    else if (prevFromMode !== mode) nodeModeMap.set(fromId, 'mixed');
 
-      let allList = adjEdgesAll.get(nid);
-      if (!allList) {
-        allList = [];
-        adjEdgesAll.set(nid, allList);
-      }
-      allList.push(e);
+    const prevToMode = nodeModeMap.get(toId);
+    if (!prevToMode) nodeModeMap.set(toId, mode);
+    else if (prevToMode !== mode) nodeModeMap.set(toId, 'mixed');
+
+    let allFrom = adjEdgesAll.get(fromId);
+    if (!allFrom) {
+      allFrom = [];
+      adjEdgesAll.set(fromId, allFrom);
     }
+    allFrom.push(e);
 
-    const modeAdj = e.mode === 'rail' ? adjRail : adjRoad;
-    let fromList = modeAdj.get(e.fromNodeId);
+    let allTo = adjEdgesAll.get(toId);
+    if (!allTo) {
+      allTo = [];
+      adjEdgesAll.set(toId, allTo);
+    }
+    allTo.push(e);
+
+    const modeAdj = mode === 'rail' ? adjRail : adjRoad;
+    let fromList = modeAdj.get(fromId);
     if (!fromList) {
       fromList = [];
-      modeAdj.set(e.fromNodeId, fromList);
+      modeAdj.set(fromId, fromList);
     }
-    fromList.push({ nextId: e.toNodeId, edge: e });
-    let toList = modeAdj.get(e.toNodeId);
+    fromList.push({ nextId: toId, edge: e });
+    let toList = modeAdj.get(toId);
     if (!toList) {
       toList = [];
-      modeAdj.set(e.toNodeId, toList);
+      modeAdj.set(toId, toList);
     }
-    toList.push({ nextId: e.fromNodeId, edge: e });
+    toList.push({ nextId: fromId, edge: e });
 
     if (e.wayName && !CUSTOM_BRIDGE_WAY_NAMES.has(e.wayName)) {
-      const key = `${e.mode}::${e.wayName}`;
+      const key = `${mode}::${e.wayName}`;
       let grp = wayStats.get(key);
       if (!grp) {
-        grp = { wayName: e.wayName, mode: e.mode, total: 0, built: 0 };
+        grp = { wayName: e.wayName, mode, total: 0, built: 0 };
         wayStats.set(key, grp);
       }
       grp.total += 1;
@@ -2035,21 +2436,16 @@ export function evaluateLinesAndAchievements(state: GameState): {
 function analyzeRouteComponentsAndDeadEnds(
   osmNodes: OsmNode[],
   osmEdges: OsmEdge[],
-  isUnlockedFn: (node: OsmNode) => boolean
+  isUnlockedFn: (node: OsmNode) => boolean,
+  precomputedIdx?: OsmGraphIndex
 ) {
-  const nativeAdj = new Map<string, string[]>();
+  const graphIdx = precomputedIdx || getOsmGraphIndex(osmNodes, osmEdges);
+  const adjEdgesAll = graphIdx.adjEdgesAll;
+  const nodeMap = graphIdx.nodeById;
   const unbuiltDegree = new Map<string, number>();
-  const totalDegree = new Map<string, number>();
 
-  for (const e of osmEdges) {
-    if (!nativeAdj.has(e.fromNodeId)) nativeAdj.set(e.fromNodeId, []);
-    if (!nativeAdj.has(e.toNodeId)) nativeAdj.set(e.toNodeId, []);
-    nativeAdj.get(e.fromNodeId)!.push(e.toNodeId);
-    nativeAdj.get(e.toNodeId)!.push(e.fromNodeId);
-
-    totalDegree.set(e.fromNodeId, (totalDegree.get(e.fromNodeId) || 0) + 1);
-    totalDegree.set(e.toNodeId, (totalDegree.get(e.toNodeId) || 0) + 1);
-
+  for (let i = 0; i < osmEdges.length; i++) {
+    const e = osmEdges[i];
     if (!e.built) {
       unbuiltDegree.set(e.fromNodeId, (unbuiltDegree.get(e.fromNodeId) || 0) + 1);
       unbuiltDegree.set(e.toNodeId, (unbuiltDegree.get(e.toNodeId) || 0) + 1);
@@ -2057,42 +2453,76 @@ function analyzeRouteComponentsAndDeadEnds(
   }
 
   const compIdByNode = new Map<string, number>();
+  const compNodesById = new Map<number, OsmNode[]>();
   const compHasUnbuilt = new Map<number, boolean>();
-  const nodeMap = new Map(osmNodes.map((n) => [n.id, n]));
+  const isolatedMinorComps = new Set<number>();
   let nextCompId = 1;
 
-  for (const n of osmNodes) {
+  for (let i = 0; i < osmNodes.length; i++) {
+    const n = osmNodes[i];
     if (compIdByNode.has(n.id)) continue;
     const cid = nextCompId++;
     const queue = [n.id];
     compIdByNode.set(n.id, cid);
+    const compNodes: OsmNode[] = [];
     let hasUnbuilt = false;
+    let hasConnected = false;
+    let hasUnlocked = false;
+    let edgeCount = 0;
+    let hasPedestrian = false;
+    let allMinorRoad = true;
     let head = 0;
+
     while (head < queue.length) {
       const curr = queue[head++];
-      if ((unbuiltDegree.get(curr) || 0) > 0) {
-        const currNode = nodeMap.get(curr);
-        if (currNode && isUnlockedFn(currNode)) {
-          hasUnbuilt = true;
+      const currNode = nodeMap.get(curr);
+      if (currNode) {
+        compNodes.push(currNode);
+        if (currNode.connected) hasConnected = true;
+        if (isUnlockedFn(currNode)) {
+          hasUnlocked = true;
+          if ((unbuiltDegree.get(curr) || 0) > 0) {
+            hasUnbuilt = true;
+          }
         }
       }
-      for (const nxt of nativeAdj.get(curr) || []) {
-        if (!compIdByNode.has(nxt)) {
-          compIdByNode.set(nxt, cid);
-          queue.push(nxt);
+      const inc = adjEdgesAll.get(curr);
+      if (inc) {
+        for (let j = 0; j < inc.length; j++) {
+          const e = inc[j];
+          if (e.fromNodeId === curr) {
+            edgeCount++;
+            if (e.highwayType === 'pedestrian') {
+              hasPedestrian = true;
+            }
+            if (e.mode !== 'road' || !ISOLATED_PIONEER_HIGHWAYS.has(e.highwayType)) {
+              allMinorRoad = false;
+            }
+          }
+          const nxt = e.fromNodeId === curr ? e.toNodeId : e.fromNodeId;
+          if (!compIdByNode.has(nxt)) {
+            compIdByNode.set(nxt, cid);
+            queue.push(nxt);
+          }
         }
       }
     }
+    compNodesById.set(cid, compNodes);
     compHasUnbuilt.set(cid, hasUnbuilt);
+    if (!hasConnected && hasUnlocked && edgeCount >= 1 && (hasPedestrian || allMinorRoad)) {
+      isolatedMinorComps.add(cid);
+    }
   }
 
   const deadEndOrigins = new Set<string>();
-  for (const n of osmNodes) {
-    if (!n.connected || !isUnlockedFn(n)) continue;
+  const connNodes = graphIdx.connectedNodes;
+  for (let i = 0; i < connNodes.length; i++) {
+    const n = connNodes[i];
+    if (!isUnlockedFn(n)) continue;
     const unb = unbuiltDegree.get(n.id) || 0;
     if (unb > 0) continue;
 
-    const tot = totalDegree.get(n.id) || 0;
+    const tot = adjEdgesAll.get(n.id)?.length || 0;
     const cid = compIdByNode.get(n.id) || 0;
     const entireCompExhausted = !compHasUnbuilt.get(cid);
 
@@ -2101,7 +2531,7 @@ function analyzeRouteComponentsAndDeadEnds(
     }
   }
 
-  return { compIdByNode, deadEndOrigins };
+  return { compIdByNode, compNodesById, deadEndOrigins, isolatedMinorComps };
 }
 
 function areModesBridgeCompatible(
@@ -2219,6 +2649,77 @@ function findIsolatedBridgePairs(
   return pairs;
 }
 
+function findIsolatedMinorBridgePairs(
+  connectedUnlockedNodes: OsmNode[],
+  isolatedMinorComps: Set<number>,
+  compNodesById: Map<number, OsmNode[]>,
+  deriveMode: (node: OsmNode) => 'road' | 'rail' | 'mixed',
+  transferDistanceKm: number,
+  excludeTargetIds: Set<string>,
+  isUnlockedFn: (node: OsmNode) => boolean
+): IsolatedBridgePair[] {
+  if (connectedUnlockedNodes.length === 0 || isolatedMinorComps.size === 0) return [];
+
+  const CELL_DEG = 0.005;
+  const connGrid = new Map<string, OsmNode[]>();
+  for (const cn of connectedUnlockedNodes) {
+    const gx = Math.floor(cn.lat / CELL_DEG);
+    const gy = Math.floor(cn.lng / CELL_DEG);
+    const k = `${gx}_${gy}`;
+    let list = connGrid.get(k);
+    if (!list) {
+      list = [];
+      connGrid.set(k, list);
+    }
+    list.push(cn);
+  }
+
+  const cellSpan = Math.max(1, Math.ceil(ISOLATED_ROUTE_BRIDGE_MAX_KM / 55 / CELL_DEG) + 1);
+  const pairs: IsolatedBridgePair[] = [];
+
+  for (const cid of isolatedMinorComps) {
+    const compNodes = compNodesById.get(cid);
+    if (!compNodes || compNodes.length === 0) continue;
+    if (compNodes.some((n) => excludeTargetIds.has(n.id))) continue;
+
+    let bestOriginId: string | null = null;
+    let bestTargetId: string | null = null;
+    let bestDistKm = Infinity;
+
+    for (const target of compNodes) {
+      if (target.connected || !isUnlockedFn(target)) continue;
+      const targetMode = deriveMode(target);
+      const gx = Math.floor(target.lat / CELL_DEG);
+      const gy = Math.floor(target.lng / CELL_DEG);
+
+      for (let dx = -cellSpan; dx <= cellSpan; dx++) {
+        for (let dy = -cellSpan; dy <= cellSpan; dy++) {
+          const bucket = connGrid.get(`${gx + dx}_${gy + dy}`);
+          if (!bucket) continue;
+          for (const cn of bucket) {
+            const distKm = haversineKm(cn.lat, cn.lng, target.lat, target.lng);
+            if (distKm > ISOLATED_ROUTE_BRIDGE_MAX_KM) continue;
+            if (!areModesBridgeCompatible(deriveMode(cn), targetMode, distKm, transferDistanceKm)) {
+              continue;
+            }
+            if (distKm < bestDistKm) {
+              bestDistKm = distKm;
+              bestOriginId = cn.id;
+              bestTargetId = target.id;
+            }
+          }
+        }
+      }
+    }
+
+    if (bestOriginId && bestTargetId) {
+      pairs.push({ originId: bestOriginId, targetId: bestTargetId, distKm: bestDistKm });
+    }
+  }
+
+  return pairs;
+}
+
 function getUnlockedOsmTopology(state: GameState): UnlockedOsmTopology {
   const osmNodes = state.osmNodes || [];
   const osmEdges = state.osmEdges || [];
@@ -2228,14 +2729,18 @@ function getUnlockedOsmTopology(state: GameState): UnlockedOsmTopology {
   let topo = graphIdx.unlockedCache.get(regions);
   if (topo) return topo;
 
-  const { compIdByNode, deadEndOrigins } = analyzeRouteComponentsAndDeadEnds(
-    osmNodes,
-    osmEdges,
-    (n) => isNodeInUnlockedRegion(state, n)
-  );
+  const { compIdByNode, compNodesById, deadEndOrigins, isolatedMinorComps } =
+    analyzeRouteComponentsAndDeadEnds(
+      osmNodes,
+      osmEdges,
+      (n) => isNodeInUnlockedRegion(state, n),
+      graphIdx
+    );
   topo = {
     compIdByNode,
+    compNodesById,
     deadEndOrigins,
+    isolatedMinorComps,
     frontierCache: new Map(),
     isolatedBridgeCache: new Map(),
   };
@@ -2257,15 +2762,21 @@ function getIsolatedBridgeCacheEntry(
 
   const allowedTargetsByComp = new Map<number, Set<string>>();
   const allowedTargetsByOrigin = new Map<string, Set<string>>();
+  const minorTargetIds = new Set<string>();
 
-  if (topo.deadEndOrigins.size > 0 && graphIdx.hasAnyConnected) {
+  if ((topo.deadEndOrigins.size > 0 || topo.isolatedMinorComps.size > 0) && graphIdx.hasAnyConnected) {
     const isUnlockedFn = (n: OsmNode) => isNodeInUnlockedRegion(state, n);
+    const deriveMode = (node: OsmNode): 'road' | 'rail' | 'mixed' =>
+      graphIdx.nodeModeMap.get(node.id) || node.mode || 'road';
+
     const normalReached = new Set<string>();
     const nQueue: Array<[string, number]> = [];
+    const connectedUnlockedNodes: OsmNode[] = [];
     for (const cn of graphIdx.connectedNodes) {
       if (isUnlockedFn(cn)) {
         normalReached.add(cn.id);
         nQueue.push([cn.id, 0]);
+        connectedUnlockedNodes.push(cn);
       }
     }
     let nh = 0;
@@ -2283,33 +2794,50 @@ function getIsolatedBridgeCacheEntry(
       }
     }
 
-    const pairs = findIsolatedBridgePairs(
-      osmNodes,
-      osmEdges,
-      topo.deadEndOrigins,
-      topo.compIdByNode,
-      (node) => graphIdx.nodeModeMap.get(node.id) || node.mode || 'road',
-      transferDistanceKm,
-      normalReached,
-      isUnlockedFn
-    );
+    if (topo.deadEndOrigins.size > 0) {
+      const pairs = findIsolatedBridgePairs(
+        osmNodes,
+        osmEdges,
+        topo.deadEndOrigins,
+        topo.compIdByNode,
+        deriveMode,
+        transferDistanceKm,
+        normalReached,
+        isUnlockedFn
+      );
 
-    for (const p of pairs) {
-      let byOrigin = allowedTargetsByOrigin.get(p.originId);
-      if (!byOrigin) {
-        byOrigin = new Set();
-        allowedTargetsByOrigin.set(p.originId, byOrigin);
-      }
-      byOrigin.add(p.targetId);
-
-      const comp = topo.compIdByNode.get(p.originId);
-      if (comp !== undefined) {
-        let byComp = allowedTargetsByComp.get(comp);
-        if (!byComp) {
-          byComp = new Set();
-          allowedTargetsByComp.set(comp, byComp);
+      for (const p of pairs) {
+        let byOrigin = allowedTargetsByOrigin.get(p.originId);
+        if (!byOrigin) {
+          byOrigin = new Set();
+          allowedTargetsByOrigin.set(p.originId, byOrigin);
         }
-        byComp.add(p.targetId);
+        byOrigin.add(p.targetId);
+
+        const comp = topo.compIdByNode.get(p.originId);
+        if (comp !== undefined) {
+          let byComp = allowedTargetsByComp.get(comp);
+          if (!byComp) {
+            byComp = new Set();
+            allowedTargetsByComp.set(comp, byComp);
+          }
+          byComp.add(p.targetId);
+        }
+      }
+    }
+
+    if (topo.isolatedMinorComps.size > 0) {
+      const minorPairs = findIsolatedMinorBridgePairs(
+        connectedUnlockedNodes,
+        topo.isolatedMinorComps,
+        topo.compNodesById,
+        deriveMode,
+        transferDistanceKm,
+        normalReached,
+        isUnlockedFn
+      );
+      for (const p of minorPairs) {
+        minorTargetIds.add(p.targetId);
       }
     }
   }
@@ -2317,6 +2845,7 @@ function getIsolatedBridgeCacheEntry(
   const entry: IsolatedBridgeCacheEntry = {
     allowedTargetsByComp,
     allowedTargetsByOrigin,
+    minorTargetIds,
   };
   topo.isolatedBridgeCache.set(key, entry);
   return entry;
@@ -2330,7 +2859,9 @@ export function computeOsmFrontierDistances(
   isUnlockedFn: (node: OsmNode) => boolean = () => true,
   precomputedTopo?: {
     compIdByNode: Map<string, number>;
+    compNodesById?: Map<number, OsmNode[]>;
     deadEndOrigins: Set<string>;
+    isolatedMinorComps?: Set<number>;
   }
 ): Map<string, number> {
   const distances = new Map<string, number>();
@@ -2353,8 +2884,10 @@ export function computeOsmFrontierDistances(
     }
   }
 
-  const { compIdByNode, deadEndOrigins } =
-    precomputedTopo || analyzeRouteComponentsAndDeadEnds(osmNodes, osmEdges, isUnlockedFn);
+  const topo =
+    precomputedTopo ||
+    analyzeRouteComponentsAndDeadEnds(osmNodes, osmEdges, isUnlockedFn, graphIdx);
+  const { compIdByNode, deadEndOrigins } = topo;
 
   const deriveMode = (node: OsmNode): 'road' | 'rail' | 'mixed' =>
     graphIdx.nodeModeMap.get(node.id) || node.mode || 'road';
@@ -2386,7 +2919,7 @@ export function computeOsmFrontierDistances(
           if (!bucket) continue;
           for (const n of bucket) {
             if (distances.has(n.id)) continue;
-            if (Math.abs(n.lat - cn.lat) > 0.005 || Math.abs(n.lng - cn.lng) > 0.0065) continue;
+            if (Math.abs(n.lat - cn.lat) > 0.005 || Math.abs(n.lng - cn.lng) > 0.009) continue;
 
             const distKm = haversineKm(cn.lat, cn.lng, n.lat, n.lng);
             const nMode = deriveMode(n);
@@ -2428,26 +2961,49 @@ export function computeOsmFrontierDistances(
     }
   }
 
-  // Isolated/dead-end routes: bridge ONLY to the single nearest compatible node and show d <= 3 (2~3 hop horizon) around it
+  // Isolated/dead-end & unconnected minor/pedestrian routes:
+  // Bridge to the single nearest compatible entry node and expose d <= 3 (2~3 hop horizon) around it.
   const isolatedCap = Math.min(maxDist, ISOLATED_ROUTE_BRIDGE_FRONTIER_CAP);
-  if (isolatedCap >= 1 && deadEndOrigins.size > 0) {
+  const hasMinorTargets = Boolean(topo.isolatedMinorComps && topo.isolatedMinorComps.size > 0 && connectedNodes.length > 0);
+  if (isolatedCap >= 1 && (deadEndOrigins.size > 0 || hasMinorTargets)) {
     const alreadyReached = new Set(distances.keys());
-    const pairs = findIsolatedBridgePairs(
-      osmNodes,
-      osmEdges,
-      deadEndOrigins,
-      compIdByNode,
-      deriveMode,
-      transferDistanceKm,
-      alreadyReached,
-      isUnlockedFn
-    );
-
     const localQueue: string[] = [];
-    for (const p of pairs) {
-      if (!distances.has(p.targetId)) {
-        distances.set(p.targetId, 1);
-        localQueue.push(p.targetId);
+
+    if (deadEndOrigins.size > 0) {
+      const pairs = findIsolatedBridgePairs(
+        osmNodes,
+        osmEdges,
+        deadEndOrigins,
+        compIdByNode,
+        deriveMode,
+        transferDistanceKm,
+        alreadyReached,
+        isUnlockedFn
+      );
+      for (const p of pairs) {
+        if (!distances.has(p.targetId)) {
+          distances.set(p.targetId, 1);
+          localQueue.push(p.targetId);
+          alreadyReached.add(p.targetId);
+        }
+      }
+    }
+
+    if (hasMinorTargets && topo.compNodesById && topo.isolatedMinorComps) {
+      const minorPairs = findIsolatedMinorBridgePairs(
+        connectedNodes,
+        topo.isolatedMinorComps,
+        topo.compNodesById,
+        deriveMode,
+        transferDistanceKm,
+        alreadyReached,
+        isUnlockedFn
+      );
+      for (const p of minorPairs) {
+        if (!distances.has(p.targetId)) {
+          distances.set(p.targetId, 1);
+          localQueue.push(p.targetId);
+        }
       }
     }
 
@@ -2472,12 +3028,111 @@ export function computeOsmFrontierDistances(
   return distances;
 }
 
+export function getUnseededIslandNodeIds(state: GameState): Set<string> {
+  const graphIdx = getOsmGraphIndex(state.osmNodes || [], state.osmEdges || []);
+  if (!graphIdx.hasAnyConnected) return new Set();
+
+  const topo = getUnlockedOsmTopology(state);
+  if (topo.unseededIslandNodeIds) {
+    return topo.unseededIslandNodeIds;
+  }
+
+  const regions = state.provincialRegions || [];
+  const multiPolygonUnlocked = regions.filter(
+    (r) =>
+      r.unlocked &&
+      r.boundaryGeoJson?.type === 'MultiPolygon' &&
+      Array.isArray(r.boundaryGeoJson.coordinates) &&
+      r.boundaryGeoJson.coordinates.length >= 2
+  );
+
+  if (multiPolygonUnlocked.length === 0) {
+    const empty = new Set<string>();
+    topo.unseededIslandNodeIds = empty;
+    return empty;
+  }
+
+  const frontier = computeOsmFrontierDistancesForState(state);
+  const pendingSet = new Set(state.pendingSeedRegionIds || []);
+  const result = new Set<string>();
+
+  for (const ur of multiPolygonUnlocked) {
+    if (pendingSet.has(ur.regionId)) continue;
+    const polys = ur.boundaryGeoJson!.coordinates as number[][][][];
+    const polyBboxes: Array<[number, number, number, number]> = polys.map((poly) => {
+      const outer = poly[0] || [];
+      let minLat = Infinity;
+      let minLng = Infinity;
+      let maxLat = -Infinity;
+      let maxLng = -Infinity;
+      for (const pt of outer) {
+        if (pt[1] < minLat) minLat = pt[1];
+        if (pt[1] > maxLat) maxLat = pt[1];
+        if (pt[0] < minLng) minLng = pt[0];
+        if (pt[0] > maxLng) maxLng = pt[0];
+      }
+      return [minLat - 0.002, minLng - 0.002, maxLat + 0.002, maxLng + 0.002];
+    });
+
+    const partHasConnected = new Array<boolean>(polys.length).fill(false);
+    const partContainsCenter = polys.map((poly, k) => {
+      const b = polyBboxes[k];
+      return (
+        ur.centerLat >= b[0] &&
+        ur.centerLat <= b[2] &&
+        ur.centerLng >= b[1] &&
+        ur.centerLng <= b[3] &&
+        isPointInPolygonCoords(ur.centerLat, ur.centerLng, poly)
+      );
+    });
+
+    const regionUnconnectedNodesByPart: Array<OsmNode[]> = polys.map(() => []);
+
+    for (const n of state.osmNodes || []) {
+      if (n.regionId === '__locked_outside__') continue;
+      if (n.regionId && n.regionId !== ur.regionId) continue;
+      if (!n.regionId && !isPointInRegionBoundary(n.lat, n.lng, ur, 0.002)) continue;
+
+      for (let k = 0; k < polys.length; k++) {
+        const b = polyBboxes[k];
+        if (n.lat < b[0] || n.lat > b[2] || n.lng < b[1] || n.lng > b[3]) continue;
+        if (!isPointInPolygonCoords(n.lat, n.lng, polys[k])) continue;
+        if (n.connected) {
+          partHasConnected[k] = true;
+        } else if (
+          !frontier.has(n.id) &&
+          (graphIdx.adjEdgesAll.get(n.id)?.length || 0) > 0
+        ) {
+          regionUnconnectedNodesByPart[k].push(n);
+        }
+        break;
+      }
+    }
+
+    const anyPartConnected = partHasConnected.some(Boolean);
+    for (let k = 0; k < polys.length; k++) {
+      if (partHasConnected[k]) continue;
+      if (k === 0 && !anyPartConnected) continue;
+      if (partContainsCenter[k] && !anyPartConnected) continue;
+      for (const n of regionUnconnectedNodesByPart[k]) {
+        result.add(n.id);
+      }
+    }
+  }
+
+  topo.unseededIslandNodeIds = result;
+  return result;
+}
+
 export function isNodeInUnseededModeInUnlockedRegion(
   state: GameState,
   node: OsmNode
 ): boolean {
   if (node.connected) return false;
   if (!isNodeInUnlockedRegion(state, node)) return false;
+
+  const pendingIds = state.pendingSeedRegionIds || [];
+  if (pendingIds.length === 0) return false;
 
   const graphIdx = getOsmGraphIndex(state.osmNodes || [], state.osmEdges || []);
   const incident = graphIdx.adjEdgesAll.get(node.id);
@@ -2490,7 +3145,9 @@ export function isNodeInUnseededModeInUnlockedRegion(
   const nodeRegion =
     (node.regionId ? regions.find((r) => r.regionId === node.regionId) : undefined) ||
     unlocked.find((ur) => isPointInRegionBoundary(node.lat, node.lng, ur, 0.002));
-  if (!nodeRegion || !nodeRegion.unlocked) return false;
+  if (!nodeRegion || !nodeRegion.unlocked || !pendingIds.includes(nodeRegion.regionId)) {
+    return false;
+  }
 
   let hasConnectedSameMode = false;
   for (const cn of graphIdx.connectedNodes) {
@@ -2528,17 +3185,6 @@ export function computeOsmFrontierDistancesForState(
     (node) => isNodeInUnlockedRegion(state, node),
     topo
   );
-
-  // If there are unseeded modes in any unlocked region (e.g. connected roads but 0 connected rails in a region),
-  // include candidate seed nodes for the unseeded mode with d=1 so they are visible and pioneerable!
-  const unseededNodes = (state.osmNodes || []).filter(
-    (n) => !n.connected && !computed.has(n.id) && isNodeInUnseededModeInUnlockedRegion(state, n)
-  );
-  if (unseededNodes.length > 0) {
-    for (const un of unseededNodes) {
-      computed.set(un.id, 1);
-    }
-  }
 
   topo.frontierCache.set(cacheKey, computed);
   return computed;
@@ -2737,6 +3383,7 @@ export function mergeOsmChunk(
   regionId?: string,
   options?: {
     skipAutoSeed?: boolean;
+    skipEvaluate?: boolean;
     boundaryGeoJson?: GeoJsonBoundary;
     totalNodeCount?: number;
   }
@@ -2755,13 +3402,14 @@ export function mergeOsmChunk(
     unlockedRegions.find((r) => r.isStartingRegion) ||
     unlockedRegions[0];
 
+  const padForRegion = () => 0.002;
   const resolveIncomingNodeRegionId = (n: OsmNode): string | undefined => {
     if (n.regionId) {
       if (n.regionId === '__locked_outside__') return '__locked_outside__';
       const explicitRegion = regionMap.get(n.regionId);
       if (explicitRegion) {
         if (!explicitRegion.unlocked) return explicitRegion.regionId;
-        if (isPointInRegionBoundary(n.lat, n.lng, explicitRegion, 0.002)) {
+        if (isPointInRegionBoundary(n.lat, n.lng, explicitRegion, padForRegion())) {
           return explicitRegion.regionId;
         }
       }
@@ -2771,18 +3419,18 @@ export function mergeOsmChunk(
       return n.regionId || regionId;
     }
 
-    if (defaultUnlocked && isPointInRegionBoundary(n.lat, n.lng, defaultUnlocked, 0.002)) {
+    if (defaultUnlocked && isPointInRegionBoundary(n.lat, n.lng, defaultUnlocked, padForRegion())) {
       return defaultUnlocked.regionId;
     }
     const matchingUnlocked = unlockedRegions.find((ur) =>
-      isPointInRegionBoundary(n.lat, n.lng, ur, 0.002)
+      isPointInRegionBoundary(n.lat, n.lng, ur, padForRegion())
     );
     if (matchingUnlocked) {
       return matchingUnlocked.regionId;
     }
 
     const matchingLocked = lockedRegions.find((lr) =>
-      isPointInRegionBoundary(n.lat, n.lng, lr, 0.002)
+      isPointInRegionBoundary(n.lat, n.lng, lr, padForRegion())
     );
     return matchingLocked ? matchingLocked.regionId : '__locked_outside__';
   };
@@ -2791,19 +3439,26 @@ export function mergeOsmChunk(
   incomingNodes.forEach((n) => {
     const prev = existingNodeMap.get(n.id);
     const resolvedRegionId = resolveIncomingNodeRegionId(n);
+    const keepPrevRegion =
+      prev?.regionId && prev.regionId !== '__locked_outside__' ? prev.regionId : undefined;
     if (!prev) {
       existingNodeMap.set(n.id, { ...n, regionId: resolvedRegionId });
     } else if (n.mode && prev.mode && prev.mode !== n.mode) {
       existingNodeMap.set(n.id, {
         ...prev,
         mode: 'mixed',
-        regionId: prev.regionId || resolvedRegionId,
+        regionId: keepPrevRegion || resolvedRegionId,
       });
     } else if (n.mode && !prev.mode) {
       existingNodeMap.set(n.id, {
         ...prev,
         mode: n.mode,
-        regionId: prev.regionId || resolvedRegionId,
+        regionId: keepPrevRegion || resolvedRegionId,
+      });
+    } else if (!keepPrevRegion && resolvedRegionId && resolvedRegionId !== prev.regionId) {
+      existingNodeMap.set(n.id, {
+        ...prev,
+        regionId: resolvedRegionId,
       });
     }
   });
@@ -2830,8 +3485,9 @@ export function mergeOsmChunk(
         defaultUnlocked && (state.pendingSeedRegionIds || []).includes(defaultUnlocked.regionId)
       ));
 
+  const hasConnectedBeforeMerge = (state.osmNodes || []).some((n) => n.connected);
   let seededNodes = allNodes;
-  if (!options?.skipAutoSeed && !hasPendingStartSeed) {
+  if (!options?.skipAutoSeed && !hasPendingStartSeed && !hasConnectedBeforeMerge) {
     const unlockedPool = allNodes.filter((n) => isNodeInUnlockedRegion(state, n));
     const seededUnlocked = ensureSeedConnectedOsmNodes(
       unlockedPool,
@@ -2858,10 +3514,14 @@ export function mergeOsmChunk(
 
   // Update totalNodeCount & boundaryGeoJson on target region if present
   let nextRegions = regions;
+  let upgradedUnlockedBoundary = false;
   if (regionId && (options?.boundaryGeoJson || options?.totalNodeCount || incomingNodes.length > 0)) {
     const countedInRegion = seededNodes.filter((n) => n.regionId === regionId).length;
     nextRegions = regions.map((r) => {
       if (r.regionId !== regionId) return r;
+      if (r.unlocked && options?.boundaryGeoJson && !r.hasRealOsmBoundary) {
+        upgradedUnlockedBoundary = true;
+      }
       const nextTotal = Math.max(
         r.totalNodeCount || 0,
         options?.totalNodeCount || 0,
@@ -2869,13 +3529,15 @@ export function mergeOsmChunk(
       );
       return {
         ...r,
+        bbox: options?.boundaryGeoJson ? mergeRegionBboxWithBoundary(r.bbox, options.boundaryGeoJson) : r.bbox,
         boundaryGeoJson: options?.boundaryGeoJson || r.boundaryGeoJson,
+        hasRealOsmBoundary: r.hasRealOsmBoundary || Boolean(options?.boundaryGeoJson),
         totalNodeCount: nextTotal > 0 ? nextTotal : r.totalNodeCount,
       };
     });
   }
 
-  const mergedState: GameState = {
+  let mergedState: GameState = {
     ...state,
     provincialRegions: nextRegions,
     osmNodes: seededNodes,
@@ -2884,7 +3546,77 @@ export function mergeOsmChunk(
     loadedOsmRegions: loadedRegions,
   };
 
-  return evaluateLinesAndAchievements(mergedState).newState;
+  if (upgradedUnlockedBoundary) {
+    mergedState = retagNodesIntoUnlockedRegions(mergedState);
+  }
+
+  return options?.skipEvaluate
+    ? mergedState
+    : evaluateLinesAndAchievements(mergedState).newState;
+}
+
+export interface BatchOsmChunkInput {
+  chunkKey: string;
+  osmNodes: OsmNode[];
+  osmEdges: OsmEdge[];
+  regionId?: string;
+  boundaryGeoJson?: GeoJsonBoundary;
+  totalNodeCount?: number;
+}
+
+export function mergeOsmChunksBatch(
+  state: GameState,
+  chunks: BatchOsmChunkInput[],
+  options?: {
+    skipAutoSeed?: boolean;
+    skipEvaluate?: boolean;
+    boundaryMap?: Map<string, { boundaryGeoJson?: GeoJsonBoundary; totalNodeCount?: number }>;
+  }
+): GameState {
+  const hasBoundaryUpdates = Boolean(options?.boundaryMap && options.boundaryMap.size > 0);
+  if ((!chunks || chunks.length === 0) && !hasBoundaryUpdates) return state;
+
+  let next = state;
+  let upgradedUnlockedBoundary = false;
+  if (hasBoundaryUpdates && options?.boundaryMap) {
+    const bMap = options.boundaryMap;
+    let changed = false;
+    const nextRegions = (next.provincialRegions || []).map((r) => {
+      const upd = bMap.get(r.regionId);
+      if (!upd || !upd.boundaryGeoJson) return r;
+      changed = true;
+      if (r.unlocked) {
+        upgradedUnlockedBoundary = true;
+      }
+      return {
+        ...r,
+        bbox: mergeRegionBboxWithBoundary(r.bbox, upd.boundaryGeoJson),
+        boundaryGeoJson: upd.boundaryGeoJson,
+        hasRealOsmBoundary: true,
+        totalNodeCount: Math.max(r.totalNodeCount || 0, upd.totalNodeCount || 0) || undefined,
+      };
+    });
+    if (changed) {
+      next = { ...next, provincialRegions: nextRegions };
+    }
+  }
+
+  for (let i = 0; i < chunks.length; i++) {
+    const ch = chunks[i];
+    const isLast = i === chunks.length - 1;
+    next = mergeOsmChunk(next, ch.chunkKey, ch.osmNodes, ch.osmEdges, ch.regionId, {
+      skipAutoSeed: options?.skipAutoSeed ?? !isLast,
+      skipEvaluate: true,
+      boundaryGeoJson: ch.boundaryGeoJson,
+      totalNodeCount: ch.totalNodeCount,
+    });
+  }
+
+  if (upgradedUnlockedBoundary) {
+    next = retagNodesIntoUnlockedRegions(next);
+  }
+
+  return options?.skipEvaluate ? next : evaluateLinesAndAchievements(next).newState;
 }
 
 export function unlockProvincialRegion(
@@ -2949,7 +3681,10 @@ export function unlockProvincialRegion(
     };
   }
 
-  const resolvedBbox = payload?.bbox || target.bbox;
+  const baseBbox = payload?.bbox || target.bbox;
+  const resolvedBbox = payload?.boundaryGeoJson
+    ? mergeRegionBboxWithBoundary(baseBbox, payload.boundaryGeoJson)
+    : baseBbox;
   const isIsolated = computeRegionIsolation(
     resolvedBbox,
     target.centerLat,
@@ -2991,14 +3726,14 @@ export function unlockProvincialRegion(
         }
   );
 
-  let nextState: GameState = {
+  let nextState: GameState = retagNodesIntoUnlockedRegions({
     ...state,
     capital: state.capital - cost,
     provincialRegions: refreshedRegions,
     pendingSeedRegionIds: isIsolated
       ? Array.from(new Set([...(state.pendingSeedRegionIds || []), regionId]))
       : state.pendingSeedRegionIds || [],
-  };
+  });
 
   if (payload && (payload.osmNodes.length > 0 || payload.osmEdges.length > 0)) {
     nextState = mergeOsmChunk(
@@ -3053,7 +3788,9 @@ export function selectIsolatedRegionSeed(
     node.regionId;
 
   const isUnseededMode = isNodeInUnseededModeInUnlockedRegion(state, node);
-  if (!matchingRegionId && pendingIds.length === 0 && !isUnseededMode) {
+  const unseededIslandSet = getUnseededIslandNodeIds(state);
+  const isUnseededIsland = unseededIslandSet.has(node.id);
+  if (!matchingRegionId && pendingIds.length === 0 && !isUnseededMode && !isUnseededIsland) {
     return { success: false, newState: state, reason: '시작 노드를 기다리는 고립 지역이 없습니다.' };
   }
 
@@ -3062,7 +3799,7 @@ export function selectIsolatedRegionSeed(
   const seedIds = new Set<string>([nodeId]);
 
   // When seeding a region or starting fresh, if clicked mode is single-modal (road or rail),
-  // automatically seed the closest complementary mode node in the region if available
+  // automatically seed the closest complementary mode node in the region/island if available
   // so neither mode is blocked!
   if (clickedMode !== 'mixed') {
     const counterpartMode = clickedMode === 'rail' ? 'road' : 'rail';
@@ -3070,6 +3807,7 @@ export function selectIsolatedRegionSeed(
 
     const counterpartCandidates = (state.osmNodes || []).filter((n) => {
       if (n.id === nodeId || n.connected) return false;
+      if (isUnseededIsland && !unseededIslandSet.has(n.id)) return false;
       const m = graphIdx.nodeModeMap.get(n.id) || n.mode;
       if (m !== counterpartMode && m !== 'mixed') return false;
       if (matchingRegionId && n.regionId && n.regionId !== matchingRegionId) return false;
@@ -3466,19 +4204,23 @@ export function resolveProximityBridgeInfo(
     const originNode = nA.connected ? nA : nB;
     const targetNode = nA.connected ? nB : nA;
 
-    if (
-      topo.deadEndOrigins.has(originNode.id) &&
-      topo.compIdByNode.get(originNode.id) !== topo.compIdByNode.get(targetNode.id)
-    ) {
+    if (topo.compIdByNode.get(originNode.id) !== topo.compIdByNode.get(targetNode.id)) {
       const transferUnlocked = (state.skills.find((s) => s.id === 'sk_infra_4')?.level || 0) > 0;
       const transferDistanceKm = transferUnlocked ? 0.035 : 0;
       const cache = getIsolatedBridgeCacheEntry(state, transferDistanceKm);
-      const originComp = topo.compIdByNode.get(originNode.id);
-      const matchesOrigin = cache.allowedTargetsByOrigin.get(originNode.id)?.has(targetNode.id);
-      const matchesComp =
-        originComp !== undefined && cache.allowedTargetsByComp.get(originComp)?.has(targetNode.id);
-      if (matchesOrigin || matchesComp) {
+
+      if (cache.minorTargetIds.has(targetNode.id)) {
         return { kind: 'isolated_route', maxKm: ISOLATED_ROUTE_BRIDGE_MAX_KM, distKm };
+      }
+
+      if (topo.deadEndOrigins.has(originNode.id)) {
+        const originComp = topo.compIdByNode.get(originNode.id);
+        const matchesOrigin = cache.allowedTargetsByOrigin.get(originNode.id)?.has(targetNode.id);
+        const matchesComp =
+          originComp !== undefined && cache.allowedTargetsByComp.get(originComp)?.has(targetNode.id);
+        if (matchesOrigin || matchesComp) {
+          return { kind: 'isolated_route', maxKm: ISOLATED_ROUTE_BRIDGE_MAX_KM, distKm };
+        }
       }
     }
   }
@@ -3535,7 +4277,7 @@ export function getReachableOsmNodeSet(
       if (nId === fromNodeId || result.has(nId)) continue;
       const nB = graphIdx.nodeById.get(nId);
       if (!nB) continue;
-      if (Math.abs(fromNode.lat - nB.lat) > 0.005 || Math.abs(fromNode.lng - nB.lng) > 0.0065) {
+      if (Math.abs(fromNode.lat - nB.lat) > 0.005 || Math.abs(fromNode.lng - nB.lng) > 0.009) {
         continue;
       }
       if (transferSkillLevel > 0 && haversineKm(fromNode.lat, fromNode.lng, nB.lat, nB.lng) <= 0.035) {
@@ -3549,7 +4291,7 @@ export function getReachableOsmNodeSet(
   } else if (transferSkillLevel > 0) {
     for (const nB of state.osmNodes || []) {
       if (nB.id === fromNodeId || result.has(nB.id)) continue;
-      if (Math.abs(fromNode.lat - nB.lat) > 0.005 || Math.abs(fromNode.lng - nB.lng) > 0.0065) {
+      if (Math.abs(fromNode.lat - nB.lat) > 0.005 || Math.abs(fromNode.lng - nB.lng) > 0.009) {
         continue;
       }
       if (isNodeInUnlockedRegion(state, nB) && haversineKm(fromNode.lat, fromNode.lng, nB.lat, nB.lng) <= 0.035) {
@@ -4335,6 +5077,32 @@ export function advanceTick(
     newlyUnlockedAchievements: [],
     newlyCompletedOsmWays: [],
     newlyUnlockedMilestones,
+  };
+}
+
+export function getRecommendedBalancedCapital(state: GameState): number {
+  const income = calculateTotalIncomePerSec(state);
+  const connected = Math.max(1, state.stats?.connectedOsmNodes || 0);
+  const byIncome = Math.round(income * 300);
+  const byNodes = Math.round(1200 + connected * 85);
+  return Math.max(1200, Math.min(1e12, Math.max(byIncome, byNodes)));
+}
+
+export function adjustGameCapital(
+  state: GameState,
+  nextCapital: number,
+  options?: { clampLifetime?: boolean }
+): GameState {
+  const sanitized = Number.isFinite(nextCapital)
+    ? Math.max(0, Math.min(1e15, Math.floor(nextCapital)))
+    : 1200;
+  const nextLifetime = options?.clampLifetime
+    ? Math.min(state.totalLifetimeEarnings || 0, Math.max(sanitized, 1200))
+    : state.totalLifetimeEarnings;
+  return {
+    ...state,
+    capital: sanitized,
+    totalLifetimeEarnings: nextLifetime,
   };
 }
 

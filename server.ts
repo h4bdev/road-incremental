@@ -32,12 +32,13 @@ async function startServer() {
   app.get('/api/osm-region-info', async (req, res) => {
     const lat = Number(req.query.lat);
     const lng = Number(req.query.lng);
+    const name = typeof req.query.name === 'string' ? req.query.name.trim() : undefined;
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
       res.status(400).json({ error: 'Invalid lat/lng coordinates' });
       return;
     }
 
-    const info = await loadOsmRegionInfoDirect(lat, lng);
+    const info = await loadOsmRegionInfoDirect(lat, lng, name || undefined);
     res.json(info);
   });
 
@@ -56,12 +57,13 @@ async function startServer() {
   app.get('/api/osm-province', async (req, res) => {
     const lat = Number(req.query.lat);
     const lng = Number(req.query.lng);
+    const name = typeof req.query.name === 'string' ? req.query.name.trim() : undefined;
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
       res.status(400).json({ error: 'Invalid lat/lng coordinates' });
       return;
     }
 
-    const payload = await loadOsmProvinceDirect(lat, lng);
+    const payload = await loadOsmProvinceDirect(lat, lng, name || undefined);
     res.json(payload);
   });
 

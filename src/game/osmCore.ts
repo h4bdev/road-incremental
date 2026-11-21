@@ -14,8 +14,23 @@ export interface OsmRawWay {
   tags?: Record<string, string>;
 }
 
+export interface OsmRawRelationMember {
+  type: 'node' | 'way' | 'relation';
+  ref?: number;
+  role?: string;
+  geometry?: Array<{ lat: number; lon: number }>;
+}
+
+export interface OsmRawRelation {
+  type: 'relation';
+  id: number;
+  bounds?: { minlat: number; minlon: number; maxlat: number; maxlon: number };
+  members?: OsmRawRelationMember[];
+  tags?: Record<string, string>;
+}
+
 export interface OsmMapResponse {
-  elements?: Array<OsmRawNode | OsmRawWay | { type: string }>;
+  elements?: Array<OsmRawNode | OsmRawWay | OsmRawRelation | { type: string }>;
 }
 
 export interface ChunkPayload {
@@ -427,7 +442,7 @@ function simplifyRing(ring: number[][], maxPts: number): number[][] {
     if (y > maxY) maxY = y;
   }
   const span = Math.max(maxX - minX, maxY - minY, 0.01);
-  let epsilon = span * 0.0012;
+  let epsilon = span * 0.0005;
   let simplified = douglasPeucker(rounded, epsilon * epsilon);
 
   // Relax tolerance smoothly until point count fits maxPts without collapsing ring
@@ -462,7 +477,7 @@ function simplifyGeoJsonBoundary(raw: unknown): GeoJsonBoundary | undefined {
   if (g.type === 'Polygon' && Array.isArray(g.coordinates)) {
     const rings = (g.coordinates as number[][][])
       .slice(0, 1)
-      .map((r) => simplifyRing(r, 320))
+      .map((r) => simplifyRing(r, 520))
       .filter((r) => r.length >= 4);
     if (rings.length === 0) return undefined;
     return { type: 'Polygon', coordinates: rings };
@@ -470,7 +485,7 @@ function simplifyGeoJsonBoundary(raw: unknown): GeoJsonBoundary | undefined {
   if (g.type === 'MultiPolygon' && Array.isArray(g.coordinates)) {
     const polys = (g.coordinates as number[][][][])
       .map((poly, idx) => {
-        const budget = idx === 0 ? 240 : 120;
+        const budget = idx === 0 ? 380 : idx < 10 ? 120 : 50;
         const outer = Array.isArray(poly?.[0]) ? simplifyRing(poly[0], budget) : [];
         if (outer.length < 4) return null;
         let minX = Infinity;
@@ -487,7 +502,7 @@ function simplifyGeoJsonBoundary(raw: unknown): GeoJsonBoundary | undefined {
       })
       .filter((p): p is { outer: number[][]; area: number } => p !== null)
       .sort((a, b) => b.area - a.area)
-      .slice(0, 8);
+      .slice(0, 36);
     if (polys.length === 0) return undefined;
     if (polys.length === 1) {
       return { type: 'Polygon', coordinates: [polys[0].outer] };
@@ -497,28 +512,332 @@ function simplifyGeoJsonBoundary(raw: unknown): GeoJsonBoundary | undefined {
   return undefined;
 }
 
+export function stitchOverpassWaysToGeoJson(
+  elements: Array<OsmRawRelation | { type: string }>
+): { bbox?: [number, number, number, number]; boundaryGeoJson?: GeoJsonBoundary } {
+  const rel = elements.find(
+    (el): el is OsmRawRelation => el.type === 'relation' && Array.isArray((el as OsmRawRelation).members)
+  );
+  if (!rel || !rel.members) return {};
+
+  const outerSegments: Array<number[][]> = [];
+  for (const m of rel.members) {
+    if (m.type !== 'way' || !Array.isArray(m.geometry) || m.geometry.length < 2) continue;
+    const role = (m.role || '').trim();
+    if (role !== '' && role !== 'outer') continue;
+    const coords = m.geometry
+      .filter((pt) => Number.isFinite(pt.lon) && Number.isFinite(pt.lat))
+      .map((pt) => [pt.lon, pt.lat]);
+    if (coords.length >= 2) {
+      outerSegments.push(coords);
+    }
+  }
+
+  if (outerSegments.length === 0) return {};
+
+  const ptKey = (pt: number[]) => `${pt[0].toFixed(6)},${pt[1].toFixed(6)}`;
+  const samePt = (a: number[], b: number[]) =>
+    Math.abs(a[0] - b[0]) <= 1e-5 && Math.abs(a[1] - b[1]) <= 1e-5;
+
+  const remaining = outerSegments.slice();
+  const rings: number[][][] = [];
+
+  while (remaining.length > 0) {
+    const ring = remaining.shift()!.slice();
+    let changed = true;
+    while (changed && !samePt(ring[0], ring[ring.length - 1])) {
+      changed = false;
+      const head = ring[0];
+      const tail = ring[ring.length - 1];
+      const tailKey = ptKey(tail);
+      const headKey = ptKey(head);
+
+      for (let i = 0; i < remaining.length; i++) {
+        const seg = remaining[i];
+        const sFirst = seg[0];
+        const sLast = seg[seg.length - 1];
+        if (ptKey(sFirst) === tailKey || samePt(sFirst, tail)) {
+          ring.push(...seg.slice(1));
+          remaining.splice(i, 1);
+          changed = true;
+          break;
+        }
+        if (ptKey(sLast) === tailKey || samePt(sLast, tail)) {
+          ring.push(...seg.slice(0, -1).reverse());
+          remaining.splice(i, 1);
+          changed = true;
+          break;
+        }
+        if (ptKey(sLast) === headKey || samePt(sLast, head)) {
+          ring.unshift(...seg.slice(0, -1));
+          remaining.splice(i, 1);
+          changed = true;
+          break;
+        }
+        if (ptKey(sFirst) === headKey || samePt(sFirst, head)) {
+          ring.unshift(...seg.slice(1).reverse());
+          remaining.splice(i, 1);
+          changed = true;
+          break;
+        }
+      }
+    }
+
+    if (ring.length >= 4) {
+      if (!samePt(ring[0], ring[ring.length - 1])) {
+        ring.push([ring[0][0], ring[0][1]]);
+      }
+      rings.push(ring);
+    }
+  }
+
+  if (rings.length === 0) return {};
+
+  let minLat = rel.bounds?.minlat ?? Infinity;
+  let minLng = rel.bounds?.minlon ?? Infinity;
+  let maxLat = rel.bounds?.maxlat ?? -Infinity;
+  let maxLng = rel.bounds?.maxlon ?? -Infinity;
+
+  if (!rel.bounds) {
+    for (const r of rings) {
+      for (const [lng, lat] of r) {
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+        if (lng < minLng) minLng = lng;
+        if (lng > maxLng) maxLng = lng;
+      }
+    }
+  }
+
+  const rawBoundary: GeoJsonBoundary =
+    rings.length === 1
+      ? { type: 'Polygon', coordinates: [rings[0]] }
+      : { type: 'MultiPolygon', coordinates: rings.map((r) => [r]) };
+  const boundaryGeoJson = simplifyGeoJsonBoundary(rawBoundary);
+  const bbox: [number, number, number, number] | undefined =
+    Number.isFinite(minLat) && Number.isFinite(minLng) && Number.isFinite(maxLat) && Number.isFinite(maxLng)
+      ? [minLat, minLng, maxLat, maxLng]
+      : undefined;
+
+  return { bbox, boundaryGeoJson };
+}
+
+export async function fetchOverpassRelationBoundary(
+  relId: number
+): Promise<{ bbox?: [number, number, number, number]; boundaryGeoJson?: GeoJsonBoundary } | null> {
+  try {
+    const query = `[out:json][timeout:10];relation(${relId});out geom;`;
+    const res = await fetchOverpassQuery(query, 9500);
+    const stitched = stitchOverpassWaysToGeoJson((res.elements || []) as Array<OsmRawRelation | { type: string }>);
+    return stitched.boundaryGeoJson ? stitched : null;
+  } catch {
+    return null;
+  }
+}
+
+const KNOWN_COUNTRY_REL_IDS = new Set([
+  307756, // South Korea (대한민국)
+  192756, // North Korea
+  382313, // Japan
+  148838, // United States
+  62149,  // United Kingdom
+  1403916, // France (territories)
+  2202162, // Metropolitan France
+  270056, // China
+]);
+
+const COUNTRY_NAME_NORM_SET = new Set([
+  '대한민국',
+  '남한',
+  '한국',
+  'southkorea',
+  'republicofkorea',
+  'korea',
+  '조선민주주의인민공화국',
+  'northkorea',
+  '일본',
+  'japan',
+  '日本',
+  '미국',
+  'unitedstates',
+  'unitedstatesofamerica',
+  'usa',
+  '영국',
+  'unitedkingdom',
+  'greatbritain',
+  'uk',
+  '프랑스',
+  'france',
+  '중국',
+  'china',
+  '中华人民共和国',
+]);
+
+function normalizeNameToken(value?: string): string {
+  return (value || '')
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, '')
+    .replace(/[\s\-_.,·]/g, '')
+    .trim();
+}
+
+export function isCountryLevelOsmArea(params: {
+  name?: string;
+  relId?: number;
+  regionId?: string;
+  adminLevel?: string;
+  tags?: Record<string, string>;
+  addresstype?: string;
+  bbox?: [number, number, number, number];
+}): boolean {
+  if (params.adminLevel === '2' || params.tags?.admin_level === '2') return true;
+  if (params.tags?.['ISO3166-1'] || params.tags?.border_type === 'nation') return true;
+  if (params.addresstype === 'country') return true;
+  if (params.relId && KNOWN_COUNTRY_REL_IDS.has(params.relId)) return true;
+  if (params.regionId) {
+    const m = params.regionId.match(/^osm_rel_(\d+)$/);
+    if (m && KNOWN_COUNTRY_REL_IDS.has(Number(m[1]))) return true;
+  }
+  const norm = normalizeNameToken(params.name);
+  if (norm && COUNTRY_NAME_NORM_SET.has(norm)) return true;
+  if (params.bbox && params.bbox.length === 4) {
+    const [minLat, minLng, maxLat, maxLng] = params.bbox;
+    const latSpan = maxLat - minLat;
+    const lngSpan = maxLng - minLng;
+    const inKoreaBox = minLat >= 32.0 && maxLat <= 40.2 && minLng >= 123.0 && maxLng <= 133.0;
+    if (inKoreaBox && latSpan > 3.5 && lngSpan > 3.2) return true;
+    if (latSpan > 15 && lngSpan > 20) return true;
+  }
+  return false;
+}
+
+function adminNamesLikelyMatch(a?: string, b?: string): boolean {
+  const clean = (s?: string) =>
+    normalizeNameToken(s)
+      .replace(/특별자치도|특별자치시|특별시|광역시|자치도|자치시/g, '')
+      .replace(/(province|prefecture|state|metropolitancity|specialcity|do|si)$/g, '');
+  const na = clean(a);
+  const nb = clean(b);
+  if (!na || !nb) return false;
+  return na === nb || na.includes(nb) || nb.includes(na);
+}
+
+async function searchOsmProvinceByName(
+  expectedName: string,
+  nearLat: number,
+  nearLng: number
+): Promise<ResolvedAdminRegion | null> {
+  const cleanQuery = expectedName.replace(/\([^)]*\)/g, ' ').trim();
+  if (!cleanQuery) return null;
+  try {
+    const res = await fetchWithTimeout(
+      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
+        cleanQuery
+      )}&format=jsonv2&polygon_geojson=1&addressdetails=1&accept-language=ko,en&limit=5`,
+      { headers: buildRequestHeaders('application/json') },
+      6500
+    );
+    if (!res.ok) return null;
+    const items = (await res.json()) as Array<{
+      osm_type?: string;
+      osm_id?: number;
+      name?: string;
+      display_name?: string;
+      addresstype?: string;
+      boundingbox?: [string, string, string, string];
+      geojson?: unknown;
+    }>;
+    for (const item of items) {
+      if (item.osm_type !== 'relation' || !item.osm_id) continue;
+      const bbox: [number, number, number, number] =
+        item.boundingbox && item.boundingbox.length === 4
+          ? [
+              parseFloat(item.boundingbox[0]),
+              parseFloat(item.boundingbox[2]),
+              parseFloat(item.boundingbox[1]),
+              parseFloat(item.boundingbox[3]),
+            ]
+          : [nearLat - 0.15, nearLng - 0.15, nearLat + 0.15, nearLng + 0.15];
+      const itemName = item.name || item.display_name?.split(',')[0] || cleanQuery;
+      if (
+        isCountryLevelOsmArea({
+          name: itemName,
+          relId: item.osm_id,
+          addresstype: item.addresstype,
+          bbox,
+        })
+      ) {
+        continue;
+      }
+      const cLat = (bbox[0] + bbox[2]) / 2;
+      const cLng = (bbox[1] + bbox[3]) / 2;
+      if (haversineMeters(nearLat, nearLng, cLat, cLng) > 650_000) continue;
+
+      let boundaryGeoJson = simplifyGeoJsonBoundary(item.geojson);
+      if (!boundaryGeoJson) {
+        const opGeom = await fetchOverpassRelationBoundary(item.osm_id);
+        if (opGeom?.boundaryGeoJson) boundaryGeoJson = opGeom.boundaryGeoJson;
+      }
+      if (!boundaryGeoJson) continue;
+      return {
+        regionId: `osm_rel_${item.osm_id}`,
+        relId: item.osm_id,
+        regionName: itemName,
+        adminLevel: '4',
+        bbox,
+        boundaryGeoJson,
+      };
+    }
+  } catch {
+    // Ignore Nominatim search failures
+  }
+  return null;
+}
+
 export async function resolveOsmProvincialRegion(
   lat: number,
-  lng: number
+  lng: number,
+  expectedRegionName?: string
 ): Promise<ResolvedAdminRegion | null> {
+  if (expectedRegionName && !isCountryLevelOsmArea({ name: expectedRegionName })) {
+    const byNameFirst = await searchOsmProvinceByName(expectedRegionName, lat, lng);
+    if (byNameFirst && byNameFirst.boundaryGeoJson) {
+      return byNameFirst;
+    }
+  }
+
   try {
-    const query = `[out:json][timeout:6];is_in(${lat.toFixed(6)},${lng.toFixed(6)})->.a;area.a["boundary"="administrative"]["admin_level"~"^(4|5|6|8)$"];out tags;`;
+    const query = `[out:json][timeout:6];is_in(${lat.toFixed(6)},${lng.toFixed(6)})->.a;area.a["boundary"="administrative"]["admin_level"~"^(3|4|5|6|8)$"];out tags;`;
     const areaRes = await fetchOverpassQuery(query, 6500);
     const areas = (areaRes.elements || []).filter(
       (el): el is { type: 'area'; id: number; tags?: Record<string, string> } =>
         el.type === 'area' && 'id' in el
     );
 
-    const byLevel = (lvl: string) => areas.filter((a) => a.tags?.admin_level === lvl);
     const getAreaName = (a?: { id: number; tags?: Record<string, string> }) =>
       a?.tags?.['name:ko'] || a?.tags?.name || a?.tags?.['name:en'] || '';
 
-    const a3 = byLevel('3')[0];
+    const validAreas = areas.filter((a) => {
+      const relId = a.id > 3600000000 ? a.id - 3600000000 : a.id;
+      return !isCountryLevelOsmArea({
+        name: getAreaName(a),
+        relId,
+        tags: a.tags,
+      });
+    });
+
+    const byLevel = (lvl: string) => validAreas.filter((a) => a.tags?.admin_level === lvl);
+
+    const nameMatched = expectedRegionName
+      ? validAreas.find((a) => adminNamesLikelyMatch(getAreaName(a), expectedRegionName))
+      : undefined;
+
     const a4 = byLevel('4')[0];
     const a5 = byLevel('5')[0];
     const a6 = byLevel('6')[0];
+    const a3 = byLevel('3')[0];
 
-    const provinceArea = a4 || a3 || a5 || a6;
+    const provinceArea = nameMatched || a4 || a5 || a6 || a3;
     const districtArea = byLevel('8')[0] || byLevel('6')[0] || byLevel('5')[0];
 
     if (provinceArea) {
@@ -528,6 +847,7 @@ export async function resolveOsmProvincialRegion(
           ? districtArea.id - 3600000000
           : districtArea?.id;
       const displayName = getAreaName(provinceArea) || `Province #${relId}`;
+      const adminLevel = provinceArea.tags?.admin_level || '4';
 
       let bbox: [number, number, number, number] = [
         lat - 0.075,
@@ -535,6 +855,7 @@ export async function resolveOsmProvincialRegion(
         lat + 0.075,
         lng + 0.095,
       ];
+      let hasExplicitBbox = false;
       let districtBbox: [number, number, number, number] | undefined;
       let boundaryGeoJson: GeoJsonBoundary | undefined;
 
@@ -559,6 +880,7 @@ export async function resolveOsmProvincialRegion(
               parseFloat(pItem.boundingbox[1]),
               parseFloat(pItem.boundingbox[3]),
             ];
+            hasExplicitBbox = true;
           }
           if (pItem?.geojson) {
             boundaryGeoJson = simplifyGeoJsonBoundary(pItem.geojson);
@@ -574,48 +896,107 @@ export async function resolveOsmProvincialRegion(
           }
         }
       } catch {
-        // Keep fallback bbox
+        // Fallback to Overpass relation geometry below
       }
 
-      return {
-        regionId: `osm_rel_${relId}`,
-        relId,
-        regionName: displayName,
-        adminLevel: '4',
-        bbox,
-        districtBbox,
-        boundaryGeoJson,
-      };
+      if (!boundaryGeoJson) {
+        const opGeom = await fetchOverpassRelationBoundary(relId);
+        if (opGeom?.boundaryGeoJson) {
+          boundaryGeoJson = opGeom.boundaryGeoJson;
+        }
+        if (!hasExplicitBbox && opGeom?.bbox) {
+          bbox = opGeom.bbox;
+        }
+      }
+
+      if (
+        !isCountryLevelOsmArea({
+          name: displayName,
+          relId,
+          adminLevel,
+          bbox,
+        })
+      ) {
+        return {
+          regionId: `osm_rel_${relId}`,
+          relId,
+          regionName: displayName,
+          adminLevel,
+          bbox,
+          districtBbox,
+          boundaryGeoJson,
+        };
+      }
     }
   } catch {
     // Fallback to Nominatim reverse lookup below
   }
 
-  try {
-    const revRes = await fetchWithTimeout(
-      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=5&addressdetails=1&polygon_geojson=1&accept-language=ko,en`,
-      { headers: buildRequestHeaders('application/json') },
-      5000
-    );
-    if (revRes.ok) {
+  for (const zoomLevel of [5, 6, 8]) {
+    try {
+      const revRes = await fetchWithTimeout(
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=${zoomLevel}&addressdetails=1&polygon_geojson=1&accept-language=ko,en`,
+        { headers: buildRequestHeaders('application/json') },
+        5000
+      );
+      if (!revRes.ok) continue;
       const rev = (await revRes.json()) as {
         osm_type?: string;
         osm_id?: number;
         name?: string;
         display_name?: string;
-        address?: { state?: string; province?: string; region?: string; city?: string; county?: string };
+        addresstype?: string;
+        address?: {
+          state?: string;
+          province?: string;
+          region?: string;
+          city?: string;
+          county?: string;
+          country?: string;
+        };
         boundingbox?: [string, string, string, string];
         geojson?: unknown;
       };
-      const name =
+
+      const provinceName =
         rev.address?.state ||
         rev.address?.province ||
         rev.address?.region ||
-        rev.name ||
+        (rev.addresstype !== 'country' ? rev.name : undefined);
+
+      if (
+        rev.addresstype === 'country' ||
+        isCountryLevelOsmArea({ name: rev.name, relId: rev.osm_id, addresstype: rev.addresstype })
+      ) {
+        if (provinceName && !isCountryLevelOsmArea({ name: provinceName })) {
+          const viaName = await searchOsmProvinceByName(provinceName, lat, lng);
+          if (viaName) return viaName;
+        }
+        continue;
+      }
+
+      if (
+        provinceName &&
+        rev.name &&
+        !adminNamesLikelyMatch(provinceName, rev.name) &&
+        !isCountryLevelOsmArea({ name: provinceName })
+      ) {
+        const viaProvinceName = await searchOsmProvinceByName(provinceName, lat, lng);
+        if (viaProvinceName) return viaProvinceName;
+      }
+
+      const name =
+        provinceName ||
         rev.address?.city ||
+        rev.address?.county ||
+        rev.name ||
         rev.display_name?.split(',')[0] ||
-        '인접 도·주 광역 행정구역';
-      const bbox: [number, number, number, number] =
+        '';
+      if (!name || isCountryLevelOsmArea({ name, relId: rev.osm_id, addresstype: rev.addresstype })) {
+        continue;
+      }
+
+      let bbox: [number, number, number, number] =
         rev.boundingbox && rev.boundingbox.length === 4
           ? [
               parseFloat(rev.boundingbox[0]),
@@ -624,7 +1005,21 @@ export async function resolveOsmProvincialRegion(
               parseFloat(rev.boundingbox[3]),
             ]
           : [lat - 0.075, lng - 0.095, lat + 0.075, lng + 0.095];
+      if (isCountryLevelOsmArea({ name, relId: rev.osm_id, bbox })) {
+        continue;
+      }
+
       const relId = rev.osm_type === 'relation' && rev.osm_id ? rev.osm_id : undefined;
+      let boundaryGeoJson = simplifyGeoJsonBoundary(rev.geojson);
+      if (relId && !boundaryGeoJson) {
+        const opGeom = await fetchOverpassRelationBoundary(relId);
+        if (opGeom?.boundaryGeoJson) {
+          boundaryGeoJson = opGeom.boundaryGeoJson;
+        }
+        if (!rev.boundingbox && opGeom?.bbox) {
+          bbox = opGeom.bbox;
+        }
+      }
       return {
         regionId: relId
           ? `osm_rel_${relId}`
@@ -633,13 +1028,13 @@ export async function resolveOsmProvincialRegion(
           : `osm_grid_${quantizeChunkKey(lat, lng)}`,
         relId,
         regionName: name,
-        adminLevel: '6',
+        adminLevel: relId ? '4' : '6',
         bbox,
-        boundaryGeoJson: simplifyGeoJsonBoundary(rev.geojson),
+        boundaryGeoJson,
       };
+    } catch {
+      // Try next zoom level
     }
-  } catch {
-    // Ignore
   }
 
   return null;
@@ -715,9 +1110,11 @@ export function buildDenseRealOsmGraph(
   const MIN_VERTEX_METERS = options?.maxEdgeMeters ? Math.min(25, options.maxEdgeMeters * 0.35) : 10.0;
   const CLIP_LAT = options?.clipLat ?? 0.0048;
   const CLIP_LNG = options?.clipLng ?? 0.0062;
-  const roadBudget = options?.roadBudget ?? 1250;
-  const railBudget = options?.railBudget ?? 320;
-  const maxPerWayBudget = options?.maxPerWay ?? 60;
+  const BRIDGE_CLIP_LAT = CLIP_LAT * 1.45;
+  const BRIDGE_CLIP_LNG = CLIP_LNG * 1.45;
+  const roadBudget = options?.roadBudget ?? 1750;
+  const railBudget = options?.railBudget ?? 420;
+  const maxPerWayBudget = options?.maxPerWay ?? 85;
 
   const roadWays = validWays.filter((w) => !w.tags?.railway);
   const railWays = validWays.filter((w) => Boolean(w.tags?.railway));
@@ -757,19 +1154,37 @@ export function buildDenseRealOsmGraph(
         way.tags?.ref ||
         `${hwType.toUpperCase()} #${way.id}`;
 
+      const isInsideClip = (coord: { lat: number; lng: number }) =>
+        Math.abs(coord.lat - centerLat) <= CLIP_LAT &&
+        Math.abs(coord.lng - centerLng) <= CLIP_LNG;
+
+      const isInsideBridgeClip = (coord: { lat: number; lng: number }) =>
+        Math.abs(coord.lat - centerLat) <= BRIDGE_CLIP_LAT &&
+        Math.abs(coord.lng - centerLng) <= BRIDGE_CLIP_LNG;
+
       const basePts: { id: string; lat: number; lng: number; label: string }[] = [];
       for (let i = 0; i < wayNodes.length; i++) {
         const osmId = wayNodes[i];
         const coord = rawNodeCoords.get(osmId);
         if (!coord) continue;
-        if (
-          Math.abs(coord.lat - centerLat) > CLIP_LAT ||
-          Math.abs(coord.lng - centerLng) > CLIP_LNG
-        ) {
-          continue;
+
+        const inClip = isInsideClip(coord);
+        let keepAsBoundaryBridge = false;
+        if (!inClip) {
+          if (!isInsideBridgeClip(coord)) continue;
+          const prevCoord = i > 0 ? rawNodeCoords.get(wayNodes[i - 1]) : undefined;
+          const nextCoord = i + 1 < wayNodes.length ? rawNodeCoords.get(wayNodes[i + 1]) : undefined;
+          keepAsBoundaryBridge =
+            Boolean(prevCoord && isInsideClip(prevCoord)) ||
+            Boolean(nextCoord && isInsideClip(nextCoord));
+          if (!keepAsBoundaryBridge) continue;
         }
+
         const isMandatory =
-          i === 0 || i === wayNodes.length - 1 || (nodeRefCount.get(osmId) || 0) > 1;
+          keepAsBoundaryBridge ||
+          i === 0 ||
+          i === wayNodes.length - 1 ||
+          (nodeRefCount.get(osmId) || 0) > 1;
         const prev = basePts[basePts.length - 1];
         if (
           !prev ||
@@ -906,16 +1321,19 @@ export function clampBbox(
 
 export async function resolveRegionCached(
   lat: number,
-  lng: number
+  lng: number,
+  expectedRegionName?: string
 ): Promise<ResolvedAdminRegion | null> {
-  const key = quantizeChunkKey(lat, lng);
+  const key = expectedRegionName
+    ? `${quantizeChunkKey(lat, lng)}:${normalizeNameToken(expectedRegionName)}`
+    : quantizeChunkKey(lat, lng);
   const cachedInfo = regionInfoCache.get(key);
-  if (cachedInfo) return cachedInfo;
+  if (cachedInfo && cachedInfo.boundaryGeoJson) return cachedInfo;
 
   let pendingInfo = inFlightRegionInfo.get(key);
   if (!pendingInfo) {
-    pendingInfo = resolveOsmProvincialRegion(lat, lng).then((resolved) => {
-      if (resolved) {
+    pendingInfo = resolveOsmProvincialRegion(lat, lng, expectedRegionName).then((resolved) => {
+      if (resolved && resolved.boundaryGeoJson && !isCountryLevelOsmArea(resolved)) {
         regionInfoCache.set(key, resolved);
       }
       return resolved;
@@ -936,8 +1354,8 @@ export async function loadOsmRoadChunkDirect(lat: number, lng: number): Promise<
   let pending = inFlightChunks.get(chunkKey);
   if (!pending) {
     pending = (async () => {
-      const dLat1 = 0.0028;
-      const dLng1 = 0.0036;
+      const dLat1 = 0.0038;
+      const dLng1 = 0.0048;
       let raw = await fetchOsmBbox(lat - dLat1, lng - dLng1, lat + dLat1, lng + dLng1);
       let payload = raw ? buildDenseRealOsmGraph(raw, chunkKey, lat, lng) : null;
 
@@ -980,11 +1398,12 @@ export async function loadOsmRoadChunkDirect(lat: number, lng: number): Promise<
 
 export async function loadOsmRegionInfoDirect(
   lat: number,
-  lng: number
+  lng: number,
+  expectedRegionName?: string
 ): Promise<ProvincialRegionMeta> {
   const chunkKey = quantizeChunkKey(lat, lng);
-  const region = await resolveRegionCached(lat, lng);
-  if (!region) {
+  const region = await resolveRegionCached(lat, lng, expectedRegionName);
+  if (!region || isCountryLevelOsmArea(region)) {
     return {
       regionId: `osm_prov_${chunkKey}`,
       regionName: '인접 광역 행정구역',
@@ -1029,14 +1448,25 @@ export async function loadNearbyProvincialRegionsDirect(
         [lat, lng - 0.28],
       ];
 
-  const settled = await Promise.allSettled(
-    probes.map(([pLat, pLng]) => resolveRegionCached(pLat, pLng))
-  );
+  const resolvedList: Array<{ idx: number; region: ResolvedAdminRegion | null }> = [];
+  const batchSize = 3;
+  for (let start = 0; start < probes.length; start += batchSize) {
+    const slice = probes.slice(start, start + batchSize);
+    const settled = await Promise.allSettled(
+      slice.map(([pLat, pLng]) => resolveRegionCached(pLat, pLng))
+    );
+    settled.forEach((entry, offset) => {
+      resolvedList.push({
+        idx: start + offset,
+        region: entry.status === 'fulfilled' ? entry.value : null,
+      });
+    });
+  }
+
   const byId = new Map<string, ProvincialRegionMeta>();
 
-  settled.forEach((entry, idx) => {
-    if (entry.status !== 'fulfilled' || !entry.value) return;
-    const r = entry.value;
+  resolvedList.forEach(({ idx, region: r }) => {
+    if (!r || isCountryLevelOsmArea(r)) return;
     if (!byId.has(r.regionId)) {
       byId.set(r.regionId, {
         regionId: r.regionId,
@@ -1053,11 +1483,15 @@ export async function loadNearbyProvincialRegionsDirect(
   return Array.from(byId.values());
 }
 
-export async function loadOsmProvinceDirect(lat: number, lng: number): Promise<ProvincePayload> {
+export async function loadOsmProvinceDirect(
+  lat: number,
+  lng: number,
+  expectedRegionName?: string
+): Promise<ProvincePayload> {
   const chunkKey = quantizeChunkKey(lat, lng);
-  const region = await resolveRegionCached(lat, lng);
+  const region = await resolveRegionCached(lat, lng, expectedRegionName);
   const regionId = region?.regionId || `osm_prov_${chunkKey}`;
-  const regionName = region?.regionName || '인접 도시 행정구역';
+  const regionName = region?.regionName || expectedRegionName || '인접 도시 행정구역';
   const adminLevel = region?.adminLevel || '6';
 
   const cached = provinceCache.get(regionId);
@@ -1081,8 +1515,8 @@ export async function loadOsmProvinceDirect(lat: number, lng: number): Promise<P
         region?.bbox || [lat - 0.09, lng - 0.11, lat + 0.09, lng + 0.11],
         cityCenterLat,
         cityCenterLng,
-        0.18,
-        0.24
+        region?.relId ? 0.45 : 0.18,
+        region?.relId ? 0.60 : 0.24
       );
 
       const distBoxStr = `${distBounds[0].toFixed(6)},${distBounds[1].toFixed(6)},${distBounds[2].toFixed(6)},${distBounds[3].toFixed(6)}`;

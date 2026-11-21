@@ -1,7 +1,16 @@
-import { MapNode, OsmEdge, OsmNode, PredefinedSegment, StartingCity, TransportLine } from './types';
+import {
+  MapNode,
+  OsmEdge,
+  OsmNode,
+  PredefinedSegment,
+  ProvincialRegion,
+  StartingCity,
+  TransportLine,
+} from './types';
 import {
   buildFallbackStarterGrid,
   fetchOverpassQuery,
+  isCountryLevelOsmArea,
   loadNearbyProvincialRegionsDirect,
   loadOsmProvinceDirect,
   loadOsmRegionInfoDirect,
@@ -10,6 +19,17 @@ import {
   ProvincialRegionMeta,
   quantizeChunkKey,
 } from './osmCore';
+import {
+  CachedOsmRegion,
+  CachedOsmTile,
+  getAllCachedOsmRegions,
+  getCachedOsmRegion,
+  getCachedOsmRegionsByIds,
+  getCachedOsmTile,
+  getCachedOsmTilesBatch,
+  putCachedOsmRegion,
+  putCachedOsmTile,
+} from './osmTileCache';
 
 export type { ProvincialRegionMeta };
 
@@ -561,6 +581,253 @@ export function buildStarterOsmFallback(
  * falling back directly to browser OSM 0.6 / Overpass API + starter grid when
  * deployed statically without an Express backend (e.g. Vercel).
  */
+export function parseChunkKeyCoords(chunkKey: string): { lat: number; lng: number } | null {
+  const parts = String(chunkKey).split('_');
+  if (parts.length !== 2) return null;
+  const lat = Number(parts[0]);
+  const lng = Number(parts[1]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return { lat, lng };
+}
+
+export function enumerateChunkKeysForBounds(bounds: {
+  minLat: number;
+  maxLat: number;
+  minLng: number;
+  maxLng: number;
+}, maxTiles = 16): Array<{ key: string; lat: number; lng: number }> {
+  const STEP = 1 / 300;
+  const startLat = Math.round(bounds.minLat * 300) / 300;
+  const endLat = Math.round(bounds.maxLat * 300) / 300;
+  const startLng = Math.round(bounds.minLng * 300) / 300;
+  const endLng = Math.round(bounds.maxLng * 300) / 300;
+  const centerLat = (bounds.minLat + bounds.maxLat) / 2;
+  const centerLng = (bounds.minLng + bounds.maxLng) / 2;
+
+  const list: Array<{ key: string; lat: number; lng: number; distSq: number }> = [];
+  for (let lat = startLat; lat <= endLat + 1e-6; lat += STEP) {
+    for (let lng = startLng; lng <= endLng + 1e-6; lng += STEP) {
+      const key = quantizeChunkKey(lat, lng);
+      const dLat = lat - centerLat;
+      const dLng = lng - centerLng;
+      list.push({ key, lat, lng, distSq: dLat * dLat + dLng * dLng });
+      if (list.length > 64) break;
+    }
+    if (list.length > 64) break;
+  }
+
+  list.sort((a, b) => a.distSq - b.distSq);
+  return list.slice(0, maxTiles).map(({ key, lat, lng }) => ({ key, lat, lng }));
+}
+
+export async function readCachedOsmTilesForKeys(
+  tileKeys: string[]
+): Promise<Map<string, CachedOsmTile>> {
+  return getCachedOsmTilesBatch(tileKeys);
+}
+
+function normalizeRegionNameForCache(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/특별자치도|특별자치시|특별시|광역시|자치도|자치시/g, '')
+    .replace(
+      /\b(special self-governing province|special self-governing city|metropolitan city|special city|city of|state of|province|state|prefecture|region|metropolis|do|si)\b/g,
+      ''
+    )
+    .replace(/(teukbyeolsi|gwangyeoksi|province|prefecture|state)$/g, '')
+    .replace(/[-_.,·\s]+/g, '')
+    .trim();
+}
+
+export function resolveCanonicalRegionCacheKey(
+  name: string,
+  lat: number,
+  lng: number,
+  regionId?: string
+): string | undefined {
+  if (regionId && regionId.startsWith('curated_')) {
+    return regionId.slice('curated_'.length);
+  }
+  const norm = normalizeRegionNameForCache(name);
+  if (!norm) return undefined;
+  const isKorea = lat >= 33.0 && lat <= 38.9 && lng >= 124.4 && lng <= 132.0;
+  if (isKorea) {
+    if (norm === '서울' || norm === 'seoul' || norm === 'seoulmetropolitan') return 'kr_seoul';
+    if (norm === '경기' || norm === '경기도' || norm === 'gyeonggi' || norm === 'gyeonggido') return 'kr_gyeonggi';
+    if (norm === '인천' || norm === 'incheon') return 'kr_incheon';
+    if (norm === '강원' || norm === '강원도' || norm === 'gangwon' || norm === 'gangwondo') return 'kr_gangwon';
+    if (norm === '충북' || norm === '충청북' || norm === '충청북도' || norm === 'chungbuk' || norm === 'chungcheongbuk' || norm === 'chungcheongbukdo' || norm === 'northchungcheong') return 'kr_chungbuk';
+    if (norm === '충남' || norm === '충청남' || norm === '충청남도' || norm === 'chungnam' || norm === 'chungcheongnam' || norm === 'chungcheongnamdo' || norm === 'southchungcheong') return 'kr_chungnam';
+    if (norm === '대전' || norm === 'daejeon') return 'kr_daejeon';
+    if (norm === '세종' || norm === 'sejong' || norm === 'sejongsi') return 'kr_sejong';
+    if (norm === '전북' || norm === '전라북' || norm === '전라북도' || norm === 'jeonbuk' || norm === 'jeollabuk' || norm === 'jeollabukdo' || norm === 'northjeolla') return 'kr_jeonbuk';
+    if (norm === '전남' || norm === '전라남' || norm === '전라남도' || norm === 'jeonnam' || norm === 'jeollanam' || norm === 'jeollanamdo' || norm === 'southjeolla') return 'kr_jeonnam';
+    if (norm === '광주' || norm === 'gwangju') return 'kr_gwangju';
+    if (norm === '경북' || norm === '경상북' || norm === '경상북도' || norm === 'gyeongbuk' || norm === 'gyeongsangbuk' || norm === 'gyeongsangbukdo' || norm === 'northgyeongsang') return 'kr_gyeongbuk';
+    if (norm === '경남' || norm === '경상남' || norm === '경상남도' || norm === 'gyeongnam' || norm === 'gyeongsangnam' || norm === 'gyeongsangnamdo' || norm === 'southgyeongsang') return 'kr_gyeongnam';
+    if (norm === '대구' || norm === 'daegu') return 'kr_daegu';
+    if (norm === '울산' || norm === 'ulsan') return 'kr_ulsan';
+    if (norm === '부산' || norm === 'busan') return 'kr_busan';
+    if (norm === '제주' || norm === '제주도' || norm === 'jeju' || norm === 'jejudo') return 'kr_jeju';
+  }
+  if (norm.includes('tokyo') || norm.includes('東京都')) return 'jp_tokyo';
+  if (norm.includes('kanagawa') || norm.includes('神奈川')) return 'jp_kanagawa';
+  if (norm.includes('chiba') || norm.includes('千葉')) return 'jp_chiba';
+  if (norm.includes('saitama') || norm.includes('埼玉')) return 'jp_saitama';
+  if (norm.includes('osaka') || norm.includes('大阪')) return 'jp_osaka';
+  if (norm.includes('kyoto') || norm.includes('京都')) return 'jp_kyoto';
+  if (norm.includes('hyogo') || norm.includes('兵庫')) return 'jp_hyogo';
+  if (norm.includes('aichi') || norm.includes('愛知')) return 'jp_aichi';
+  if (norm.includes('fukuoka') || norm.includes('福岡')) return 'jp_fukuoka';
+  if (norm.includes('hokkaido') || norm === '北海道') return 'jp_hokkaido';
+  if (norm.includes('okinawa') || norm.includes('沖縄')) return 'jp_okinawa';
+  if (norm === 'newyork' && lat > 40) return 'us_ny';
+  if (norm === 'newjersey') return 'us_nj';
+  if (norm === 'california') return 'us_ca';
+  if (norm === 'washington' && lng < -100) return 'us_wa';
+  if (norm === 'texas') return 'us_tx';
+  if (norm === 'illinois') return 'us_il';
+  if (norm === 'massachusetts') return 'us_ma';
+  if (norm === 'greaterlondon' || norm === 'london') return 'uk_london';
+  if (norm === 'southeastengland') return 'uk_southeast';
+  if (norm === 'scotland') return 'uk_scotland';
+  if (norm === 'iledefrance' || norm === 'îledefrance') return 'fr_idf';
+  if (norm === 'auvergnerhonealpes' || norm === 'auvergnerhônealpes') return 'fr_ara';
+  return undefined;
+}
+
+function cachedRecordMatchesRegion(rec: CachedOsmRegion, target: Pick<ProvincialRegion, 'regionId' | 'regionName' | 'centerLat' | 'centerLng'>): boolean {
+  if (!rec.boundaryGeoJson) return false;
+  if (
+    isCountryLevelOsmArea({
+      name: rec.regionName,
+      regionId: rec.regionId,
+      adminLevel: rec.adminLevel,
+      bbox: rec.bbox,
+    })
+  ) {
+    return false;
+  }
+  if (rec.regionId === target.regionId) return true;
+  const targetCanonical = resolveCanonicalRegionCacheKey(
+    target.regionName,
+    target.centerLat,
+    target.centerLng,
+    target.regionId
+  );
+  const recCanonical =
+    rec.canonicalKey ||
+    resolveCanonicalRegionCacheKey(rec.regionName, rec.centerLat, rec.centerLng, rec.regionId);
+  if (targetCanonical && recCanonical && targetCanonical === recCanonical) {
+    return true;
+  }
+  const nRec = normalizeRegionNameForCache(rec.regionName);
+  const nTarget = normalizeRegionNameForCache(target.regionName);
+  if (
+    nRec &&
+    nTarget &&
+    (nRec === nTarget || nRec.includes(nTarget) || nTarget.includes(nRec)) &&
+    haversineKm(rec.centerLat, rec.centerLng, target.centerLat, target.centerLng) <= 150
+  ) {
+    return true;
+  }
+  return false;
+}
+
+async function cacheValidRegionMeta(
+  meta: ProvincialRegionMeta,
+  aliasRegionId?: string,
+  totalNodeCount?: number
+): Promise<void> {
+  if (!meta.boundaryGeoJson) return;
+  if (
+    isCountryLevelOsmArea({
+      name: meta.regionName,
+      regionId: meta.regionId,
+      adminLevel: meta.adminLevel,
+      bbox: meta.bbox,
+    })
+  ) {
+    return;
+  }
+  const canonicalKey =
+    resolveCanonicalRegionCacheKey(meta.regionName, meta.centerLat, meta.centerLng, aliasRegionId) ||
+    resolveCanonicalRegionCacheKey(meta.regionName, meta.centerLat, meta.centerLng, meta.regionId);
+  const record: CachedOsmRegion = {
+    ...meta,
+    canonicalKey,
+    totalNodeCount,
+    updatedAt: Date.now(),
+  };
+  await putCachedOsmRegion(record);
+  if (aliasRegionId && aliasRegionId !== meta.regionId) {
+    await putCachedOsmRegion({
+      ...record,
+      regionId: aliasRegionId,
+      regionName: meta.regionName,
+    });
+  }
+}
+
+export async function hydrateProvincialRegionsFromCache(
+  regions: ProvincialRegion[]
+): Promise<Map<string, ProvincialRegionMeta>> {
+  const missingRegions = regions.filter((r) => !r.hasRealOsmBoundary || !r.boundaryGeoJson);
+  const result = new Map<string, ProvincialRegionMeta>();
+  if (missingRegions.length === 0) return result;
+
+  const idsToCheck = missingRegions.map((r) => r.regionId);
+  const cachedMap = await getCachedOsmRegionsByIds(idsToCheck);
+  for (const reg of missingRegions) {
+    const direct = cachedMap.get(reg.regionId);
+    if (
+      direct &&
+      direct.boundaryGeoJson &&
+      !isCountryLevelOsmArea({
+        name: direct.regionName,
+        regionId: direct.regionId,
+        adminLevel: direct.adminLevel,
+        bbox: direct.bbox,
+      })
+    ) {
+      result.set(reg.regionId, {
+        regionId: reg.regionId,
+        regionName: direct.regionName,
+        adminLevel: direct.adminLevel,
+        bbox: direct.bbox,
+        boundaryGeoJson: direct.boundaryGeoJson,
+        centerLat: direct.centerLat,
+        centerLng: direct.centerLng,
+      });
+    }
+  }
+
+  // Secondary pass: resolve curated_* <-> osm_rel_* aliases via canonicalKey or name + proximity
+  const stillMissing = missingRegions.filter((r) => !result.has(r.regionId));
+  if (stillMissing.length > 0) {
+    const allCached = await getAllCachedOsmRegions();
+    for (const reg of stillMissing) {
+      const aliasHit = allCached.find((rec) => cachedRecordMatchesRegion(rec, reg));
+      if (aliasHit && aliasHit.boundaryGeoJson) {
+        const meta: ProvincialRegionMeta = {
+          regionId: reg.regionId,
+          regionName: aliasHit.regionName || reg.regionName,
+          adminLevel: aliasHit.adminLevel || reg.adminLevel,
+          bbox: aliasHit.bbox,
+          boundaryGeoJson: aliasHit.boundaryGeoJson,
+          centerLat: aliasHit.centerLat,
+          centerLng: aliasHit.centerLng,
+        };
+        result.set(reg.regionId, meta);
+        void cacheValidRegionMeta(meta, reg.regionId, aliasHit.totalNodeCount);
+      }
+    }
+  }
+
+  return result;
+}
+
 export async function fetchOsmRoadChunk(
   lat: number,
   lng: number
@@ -572,6 +839,16 @@ export async function fetchOsmRoadChunk(
 }> {
   const chunkKey = quantizeChunkKey(lat, lng);
 
+  const idbHit = await getCachedOsmTile(chunkKey);
+  if (idbHit && idbHit.osmNodes.length > 0) {
+    return {
+      chunkKey: idbHit.tileKey,
+      osmNodes: idbHit.osmNodes,
+      osmEdges: idbHit.osmEdges,
+      usedLiveOverpass: idbHit.usedLiveOverpass,
+    };
+  }
+
   const json = await tryFetchBackendJson<{
     chunkKey?: string;
     osmNodes?: OsmNode[];
@@ -580,17 +857,37 @@ export async function fetchOsmRoadChunk(
   }>(`/api/osm-roads?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`, 9500);
 
   if (json && Array.isArray(json.osmNodes) && Array.isArray(json.osmEdges) && json.osmNodes.length > 0) {
+    const resolvedKey = json.chunkKey || chunkKey;
+    const usedLive = Boolean(json.usedLiveOverpass);
+    if (usedLive) {
+      void putCachedOsmTile({
+        tileKey: resolvedKey,
+        osmNodes: json.osmNodes,
+        osmEdges: json.osmEdges,
+        usedLiveOverpass: true,
+        updatedAt: Date.now(),
+      });
+    }
     return {
-      chunkKey: json.chunkKey || chunkKey,
+      chunkKey: resolvedKey,
       osmNodes: json.osmNodes,
       osmEdges: json.osmEdges,
-      usedLiveOverpass: Boolean(json.usedLiveOverpass),
+      usedLiveOverpass: usedLive,
     };
   }
 
   try {
     const direct = await loadOsmRoadChunkDirect(lat, lng);
     if (direct.osmNodes.length > 0) {
+      if (direct.usedLiveOverpass) {
+        void putCachedOsmTile({
+          tileKey: direct.chunkKey,
+          osmNodes: direct.osmNodes,
+          osmEdges: direct.osmEdges,
+          usedLiveOverpass: true,
+          updatedAt: Date.now(),
+        });
+      }
       return {
         chunkKey: direct.chunkKey,
         osmNodes: direct.osmNodes,
@@ -607,27 +904,106 @@ export async function fetchOsmRoadChunk(
 
 export async function fetchProvincialRegionInfo(
   lat: number,
-  lng: number
+  lng: number,
+  knownRegionId?: string,
+  expectedRegionName?: string
 ): Promise<ProvincialRegionMeta | null> {
+  if (knownRegionId) {
+    const idbRegion = await getCachedOsmRegion(knownRegionId);
+    if (
+      idbRegion &&
+      idbRegion.boundaryGeoJson &&
+      !isCountryLevelOsmArea({
+        name: idbRegion.regionName,
+        regionId: idbRegion.regionId,
+        adminLevel: idbRegion.adminLevel,
+        bbox: idbRegion.bbox,
+      })
+    ) {
+      return {
+        regionId: idbRegion.regionId,
+        regionName: idbRegion.regionName,
+        adminLevel: idbRegion.adminLevel,
+        bbox: idbRegion.bbox,
+        boundaryGeoJson: idbRegion.boundaryGeoJson,
+        centerLat: idbRegion.centerLat,
+        centerLng: idbRegion.centerLng,
+      };
+    }
+  }
+
+  if (knownRegionId || expectedRegionName) {
+    const allCached = await getAllCachedOsmRegions();
+    const aliasHit = allCached.find((rec) =>
+      cachedRecordMatchesRegion(rec, {
+        regionId: knownRegionId || '',
+        regionName: expectedRegionName || '',
+        centerLat: lat,
+        centerLng: lng,
+      })
+    );
+    if (aliasHit && aliasHit.boundaryGeoJson) {
+      return {
+        regionId: knownRegionId || aliasHit.regionId,
+        regionName: aliasHit.regionName || expectedRegionName || '도시 행정구역',
+        adminLevel: aliasHit.adminLevel,
+        bbox: aliasHit.bbox,
+        boundaryGeoJson: aliasHit.boundaryGeoJson,
+        centerLat: aliasHit.centerLat,
+        centerLng: aliasHit.centerLng,
+      };
+    }
+  }
+
+  const nameParam = expectedRegionName ? `&name=${encodeURIComponent(expectedRegionName)}` : '';
   const json = await tryFetchBackendJson<Partial<ProvincialRegionMeta>>(
-    `/api/osm-region-info?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`,
+    `/api/osm-region-info?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}${nameParam}`,
     8000
   );
 
   if (json && json.regionId && Array.isArray(json.bbox) && json.bbox.length === 4) {
-    return {
+    const meta: ProvincialRegionMeta = {
       regionId: json.regionId,
-      regionName: json.regionName || '도시 행정구역',
+      regionName: json.regionName || expectedRegionName || '도시 행정구역',
       adminLevel: json.adminLevel || '6',
       bbox: json.bbox as [number, number, number, number],
       boundaryGeoJson: json.boundaryGeoJson,
       centerLat: Number.isFinite(json.centerLat) ? Number(json.centerLat) : lat,
       centerLng: Number.isFinite(json.centerLng) ? Number(json.centerLng) : lng,
     };
+    if (
+      isCountryLevelOsmArea({
+        name: meta.regionName,
+        regionId: meta.regionId,
+        adminLevel: meta.adminLevel,
+        bbox: meta.bbox,
+      })
+    ) {
+      return null;
+    }
+    if (meta.boundaryGeoJson) {
+      void cacheValidRegionMeta(meta, knownRegionId);
+    }
+    return meta;
   }
 
   try {
-    return await loadOsmRegionInfoDirect(lat, lng);
+    const directMeta = await loadOsmRegionInfoDirect(lat, lng, expectedRegionName);
+    if (
+      !directMeta ||
+      isCountryLevelOsmArea({
+        name: directMeta.regionName,
+        regionId: directMeta.regionId,
+        adminLevel: directMeta.adminLevel,
+        bbox: directMeta.bbox,
+      })
+    ) {
+      return null;
+    }
+    if (directMeta.boundaryGeoJson) {
+      void cacheValidRegionMeta(directMeta, knownRegionId);
+    }
+    return directMeta;
   } catch {
     return null;
   }
@@ -643,11 +1019,28 @@ export async function fetchNearbyProvincialRegions(
   );
 
   if (json && Array.isArray(json.regions) && json.regions.length > 0) {
-    return json.regions;
+    return json.regions.filter(
+      (r) =>
+        !isCountryLevelOsmArea({
+          name: r.regionName,
+          regionId: r.regionId,
+          adminLevel: r.adminLevel,
+          bbox: r.bbox,
+        })
+    );
   }
 
   try {
-    return await loadNearbyProvincialRegionsDirect(lat, lng);
+    const direct = await loadNearbyProvincialRegionsDirect(lat, lng);
+    return direct.filter(
+      (r) =>
+        !isCountryLevelOsmArea({
+          name: r.regionName,
+          regionId: r.regionId,
+          adminLevel: r.adminLevel,
+          bbox: r.bbox,
+        })
+    );
   } catch {
     return [];
   }
@@ -658,7 +1051,9 @@ export async function fetchNearbyProvincialRegions(
  */
 export async function fetchOsmProvincialRegion(
   lat: number,
-  lng: number
+  lng: number,
+  expectedRegionName?: string,
+  knownRegionId?: string
 ): Promise<{
   regionId: string;
   regionName: string;
@@ -678,6 +1073,7 @@ export async function fetchOsmProvincialRegion(
     lat + 0.075,
     lng + 0.095,
   ];
+  const nameParam = expectedRegionName ? `&name=${encodeURIComponent(expectedRegionName)}` : '';
 
   const json = await tryFetchBackendJson<{
     regionId?: string;
@@ -690,19 +1086,46 @@ export async function fetchOsmProvincialRegion(
     osmNodes?: OsmNode[];
     osmEdges?: OsmEdge[];
     usedLiveOverpass?: boolean;
-  }>(`/api/osm-province?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`, 16000);
+  }>(`/api/osm-province?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}${nameParam}`, 16000);
 
   if (json && Array.isArray(json.osmNodes) && Array.isArray(json.osmEdges) && json.osmNodes.length > 0) {
+    const rawId = json.regionId || `osm_prov_${chunkKey}`;
+    const rawName = json.regionName || expectedRegionName || '도시 행정구역';
+    const rawBbox = Array.isArray(json.bbox) && json.bbox.length === 4 ? json.bbox : defaultBbox;
+    const isCountry = isCountryLevelOsmArea({
+      name: rawName,
+      regionId: rawId,
+      adminLevel: json.adminLevel,
+      bbox: rawBbox,
+    });
+    const resolvedRegionId = isCountry ? (knownRegionId || `osm_prov_${chunkKey}`) : rawId;
+    const resolvedBbox = isCountry ? defaultBbox : rawBbox;
+    const resolvedBoundary = isCountry ? undefined : json.boundaryGeoJson;
+    const resolvedName = isCountry ? (expectedRegionName || '도시 행정구역') : rawName;
+    const resolvedTotal =
+      typeof json.totalNodeCount === 'number' ? json.totalNodeCount : json.osmNodes.length;
+    if (resolvedBoundary) {
+      void cacheValidRegionMeta(
+        {
+          regionId: resolvedRegionId,
+          regionName: resolvedName,
+          adminLevel: isCountry ? '4' : json.adminLevel || '6',
+          bbox: resolvedBbox,
+          boundaryGeoJson: resolvedBoundary,
+          centerLat: (resolvedBbox[0] + resolvedBbox[2]) / 2,
+          centerLng: (resolvedBbox[1] + resolvedBbox[3]) / 2,
+        },
+        knownRegionId,
+        resolvedTotal
+      );
+    }
     return {
-      regionId: json.regionId || `osm_prov_${chunkKey}`,
-      regionName: json.regionName || '도시 행정구역',
-      adminLevel: json.adminLevel || '6',
-      bbox: Array.isArray(json.bbox) && json.bbox.length === 4 ? json.bbox : defaultBbox,
-      boundaryGeoJson: json.boundaryGeoJson,
-      totalNodeCount:
-        typeof json.totalNodeCount === 'number'
-          ? json.totalNodeCount
-          : json.osmNodes.length,
+      regionId: resolvedRegionId,
+      regionName: resolvedName,
+      adminLevel: isCountry ? '4' : json.adminLevel || '6',
+      bbox: resolvedBbox,
+      boundaryGeoJson: resolvedBoundary,
+      totalNodeCount: resolvedTotal,
       chunkKey: json.chunkKey || chunkKey,
       osmNodes: json.osmNodes,
       osmEdges: json.osmEdges,
@@ -711,14 +1134,40 @@ export async function fetchOsmProvincialRegion(
   }
 
   try {
-    const direct = await loadOsmProvinceDirect(lat, lng);
+    const direct = await loadOsmProvinceDirect(lat, lng, expectedRegionName);
     if (direct.osmNodes.length > 0) {
-      return {
+      const isCountry = isCountryLevelOsmArea({
+        name: direct.regionName,
         regionId: direct.regionId,
-        regionName: direct.regionName,
         adminLevel: direct.adminLevel,
         bbox: direct.bbox,
-        boundaryGeoJson: direct.boundaryGeoJson,
+      });
+      const resolvedRegionId = isCountry ? (knownRegionId || `osm_prov_${chunkKey}`) : direct.regionId;
+      const resolvedBbox = isCountry ? defaultBbox : direct.bbox;
+      const resolvedBoundary = isCountry ? undefined : direct.boundaryGeoJson;
+      const resolvedName = isCountry ? (expectedRegionName || '도시 행정구역') : direct.regionName;
+
+      if (resolvedBoundary) {
+        void cacheValidRegionMeta(
+          {
+            regionId: resolvedRegionId,
+            regionName: resolvedName,
+            adminLevel: isCountry ? '4' : direct.adminLevel,
+            bbox: resolvedBbox,
+            boundaryGeoJson: resolvedBoundary,
+            centerLat: (resolvedBbox[0] + resolvedBbox[2]) / 2,
+            centerLng: (resolvedBbox[1] + resolvedBbox[3]) / 2,
+          },
+          knownRegionId,
+          direct.totalNodeCount
+        );
+      }
+      return {
+        regionId: resolvedRegionId,
+        regionName: resolvedName,
+        adminLevel: isCountry ? '4' : direct.adminLevel,
+        bbox: resolvedBbox,
+        boundaryGeoJson: resolvedBoundary,
         totalNodeCount: direct.totalNodeCount,
         chunkKey: direct.chunkKey,
         osmNodes: direct.osmNodes,
@@ -732,8 +1181,8 @@ export async function fetchOsmProvincialRegion(
 
   const fb = buildFallbackStarterGrid(chunkKey, lat, lng);
   return {
-    regionId: `osm_prov_${chunkKey}`,
-    regionName: '도시 행정구역',
+    regionId: knownRegionId || `osm_prov_${chunkKey}`,
+    regionName: expectedRegionName || '도시 행정구역',
     adminLevel: '6',
     bbox: defaultBbox,
     totalNodeCount: fb.osmNodes.length,

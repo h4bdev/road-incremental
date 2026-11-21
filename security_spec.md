@@ -4,7 +4,7 @@
 1. **Strict Owner Isolation (PII & Game Saves)**: A document under `/users/{userId}` (including `slots/{slotId}`, `core/{docId}`, and `chunks/{chunkId}`) can ONLY be read, listed, created, updated, or deleted by `request.auth.uid == userId` with a verified email (`request.auth.token.email_verified == true`).
 2. **Bounded Slot Identifiers**: Save slot documents MUST have `slotId` matching `^slot_[1-5]$` and `slotIndex` between `1` and `5`.
 3. **Immutable Ownership & Creation Timestamps**: `uid` / `ownerUid` and `createdAt` cannot be modified after creation. All `createdAt` (on create) and `updatedAt` (on create & update) MUST equal `request.time`.
-4. **Master Gate Relational Sync**: `core/{docId}` (`docId == 'state'`) and `chunks/{chunkId}` (`^graph_[0-9]{1,2}$`) cannot exist without a valid parent `slots/{slotId}` owned by `request.auth.uid` (verified via `getAfter`).
+4. **Master Gate Relational Sync**: `core/{docId}` (`docId == 'state'`) and `chunks/{chunkId}` (`^graph_[0-9]{1,3}$`) cannot exist without a valid parent `slots/{slotId}` owned by `request.auth.uid` (verified via `getAfter`).
 5. **Volumetric & Schema Guarding**: No shadow/ghost keys allowed (`keys().hasOnly(...)` on create, `affectedKeys().hasOnly(...)` on update). All strings enforce `.size()` limits, and all arrays enforce bounded `.size()` limits plus first-element type validation.
 
 ## 2. The "Dirty Dozen" Payloads (Expected: PERMISSION_DENIED)

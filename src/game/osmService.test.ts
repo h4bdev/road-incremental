@@ -7,6 +7,7 @@ import {
   fetchProvincialRegionInfo,
   resetBackendApiProbeForTests,
 } from './osmService';
+import { buildDenseRealOsmGraph } from './osmCore';
 
 test('fetchOsmRoadChunk and fetchOsmProvincialRegion fall back when /api returns 404 (Vercel static deployment)', async () => {
   resetBackendApiProbeForTests();
@@ -106,3 +107,141 @@ test('fetchOsmRoadChunk falls back to starter grid when /api returns SPA HTML (2
     resetBackendApiProbeForTests();
   }
 });
+
+test('resolveOsmProvincialRegion stitches Overpass relation outer ways into GeoJSON boundary when Nominatim lookup returns 429', async () => {
+  const { resolveOsmProvincialRegion, stitchOverpassWaysToGeoJson } = await import('./osmCore');
+
+  const stitched = stitchOverpassWaysToGeoJson([
+    {
+      type: 'relation',
+      id: 2297418,
+      bounds: { minlat: 37.42, minlon: 126.76, maxlat: 37.71, maxlon: 127.19 },
+      members: [
+        {
+          type: 'way',
+          role: 'outer',
+          geometry: [
+            { lat: 37.42, lon: 126.76 },
+            { lat: 37.42, lon: 127.19 },
+          ],
+        },
+        {
+          type: 'way',
+          role: 'outer',
+          geometry: [
+            { lat: 37.71, lon: 126.76 },
+            { lat: 37.71, lon: 127.19 },
+            { lat: 37.42, lon: 127.19 },
+          ],
+        },
+        {
+          type: 'way',
+          role: 'outer',
+          geometry: [
+            { lat: 37.71, lon: 126.76 },
+            { lat: 37.42, lon: 126.76 },
+          ],
+        },
+      ],
+    },
+  ]);
+
+  assert.equal(stitched.boundaryGeoJson?.type, 'Polygon');
+  assert.ok(stitched.bbox && stitched.bbox[0] === 37.42);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes('nominatim.openstreetmap.org')) {
+      return new Response('Rate limited', { status: 429 });
+    }
+    if (url.includes('overpass')) {
+      const bodyStr = typeof init?.body === 'string' ? decodeURIComponent(init.body) : '';
+      if (bodyStr.includes('is_in(')) {
+        return new Response(
+          JSON.stringify({
+            elements: [
+              {
+                type: 'area',
+                id: 3602297418,
+                tags: { boundary: 'administrative', admin_level: '4', 'name:ko': '서울특별시' },
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (bodyStr.includes('relation(2297418)')) {
+        return new Response(
+          JSON.stringify({
+            elements: [
+              {
+                type: 'relation',
+                id: 2297418,
+                bounds: { minlat: 37.42, minlon: 126.76, maxlat: 37.71, maxlon: 127.19 },
+                members: [
+                  {
+                    type: 'way',
+                    role: 'outer',
+                    geometry: [
+                      { lat: 37.42, lon: 126.76 },
+                      { lat: 37.42, lon: 127.19 },
+                      { lat: 37.71, lon: 127.19 },
+                      { lat: 37.71, lon: 126.76 },
+                      { lat: 37.42, lon: 126.76 },
+                    ],
+                  },
+                ],
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+    }
+    return new Response('Not found', { status: 404 });
+  }) as typeof fetch;
+
+  try {
+    const resolved = await resolveOsmProvincialRegion(37.5665, 126.978);
+    assert.ok(resolved);
+    assert.equal(resolved.regionId, 'osm_rel_2297418');
+    assert.equal(resolved.boundaryGeoJson?.type, 'Polygon');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('buildDenseRealOsmGraph retains cross-clip bridge vertices so roads are never severed at chunk seams', () => {
+  const centerLat = 37.5665;
+  const centerLng = 126.978;
+  const raw = {
+    elements: [
+      { type: 'node' as const, id: 101, lat: centerLat, lon: centerLng },
+      { type: 'node' as const, id: 102, lat: centerLat + 0.0025, lon: centerLng },
+      { type: 'node' as const, id: 103, lat: centerLat + 0.0062, lon: centerLng }, // outside clipLat=0.0048, inside 1.45*clipLat
+      { type: 'node' as const, id: 104, lat: centerLat + 0.015, lon: centerLng },  // far outside
+      {
+        type: 'way' as const,
+        id: 5001,
+        tags: { highway: 'primary', name: '세종대로 연장선' },
+        nodes: [101, 102, 103, 104],
+      },
+    ],
+  };
+
+  const graph = buildDenseRealOsmGraph(raw, '37.5665_126.9780', centerLat, centerLng, {
+    clipLat: 0.0048,
+    clipLng: 0.006,
+  });
+
+  // Must include inner edge 101->102 AND boundary crossing edge 102->103
+  assert.ok(graph.osmNodes.length >= 3, `Expected boundary bridge node retained, got ${graph.osmNodes.length}`);
+  assert.ok(graph.osmEdges.length >= 2, `Expected crossing edge retained, got ${graph.osmEdges.length}`);
+  assert.ok(
+    graph.osmNodes.some((n) => n.lat > centerLat + 0.0048),
+    'Boundary bridge vertex slightly past clipLat must remain in graph so adjacent chunks share an anchor'
+  );
+});
+
+

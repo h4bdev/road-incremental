@@ -95,11 +95,13 @@ interface TownArcadePanelProps {
 
 function formatNum(value: number, decimals = 0): string {
   if (!Number.isFinite(value)) return '0';
-  if (value >= 1_000_000_000) {
-    return `${(value / 1_000_000_000).toFixed(2)}B`;
-  }
-  if (value >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(2)}M`;
+  const suffixes = ['', 'K', 'M', 'B', 'T', 'Qa', 'Qi', 'Sx', 'Sp', 'Oc'];
+  if (Math.abs(value) >= 1_000_000) {
+    const tier = Math.floor(Math.log10(Math.abs(value)) / 3);
+    if (tier < suffixes.length) {
+      return `${(value / Math.pow(10, tier * 3)).toFixed(2)}${suffixes[tier]}`;
+    }
+    return value.toExponential(2).replace('+', '');
   }
   if (decimals > 0 && value < 1000) {
     return value.toFixed(decimals);

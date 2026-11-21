@@ -27,6 +27,7 @@ import {
   slotIndexFromId,
 } from '../game/saveSlots';
 import { AccountViewInfo, formatSlotTime } from './SaveSlotsModal';
+import { formatMoneyCompact } from '../game/format';
 
 interface TitleScreenProps {
   account: AccountViewInfo | null;
@@ -36,6 +37,7 @@ interface TitleScreenProps {
   activeSlotId: SaveSlotId;
   slots: Record<SaveSlotId, SaveSlotSummary | null>;
   busySlotId: SaveSlotId | null;
+  loadingProgress?: { active: boolean; percent: number; label: string } | null;
   onSignIn: () => Promise<void>;
   onSignOut: () => Promise<void>;
   onRefreshCloud: () => Promise<void>;
@@ -54,6 +56,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   activeSlotId,
   slots,
   busySlotId,
+  loadingProgress,
   onSignIn,
   onSignOut,
   onRefreshCloud,
@@ -270,14 +273,21 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                 data-start="true"
                 disabled={busySlotId === preferredResumeSlot.slotId}
                 onClick={() => void onLoadSlot(preferredResumeSlot.slotId)}
-                className="min-h-[38px] px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+                className="min-h-[38px] px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap tabular-nums"
               >
                 {busySlotId === preferredResumeSlot.slotId ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    {loadingProgress?.active
+                      ? `${loadingProgress.label} · ${loadingProgress.percent}%`
+                      : `슬롯 ${preferredResumeSlot.slotIndex} 불러오는 중...`}
+                  </>
                 ) : (
-                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <>
+                    <Play className="w-3.5 h-3.5 fill-current" />
+                    최근 슬롯 {preferredResumeSlot.slotIndex} 바로 이어하기
+                  </>
                 )}
-                최근 슬롯 {preferredResumeSlot.slotIndex} 바로 이어하기
               </button>
             )}
           </div>
@@ -393,8 +403,8 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                           </div>
                         )}
                         <div className="text-[11px] text-slate-300 font-mono-numbers mt-0.5 truncate">
-                          {summary.cityName} · {summary.mapped1to1Km.toLocaleString()}km · $
-                          {Math.floor(summary.capital).toLocaleString()}
+                          {summary.cityName} · {summary.mapped1to1Km.toLocaleString()}km ·{' '}
+                          {formatMoneyCompact(summary.capital)}
                         </div>
                         <div className="text-[10px] text-slate-500">
                           노드 {summary.connectedOsmNodes.toLocaleString()} · {summary.tierLabel} ·{' '}
@@ -415,14 +425,21 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                         type="button"
                         disabled={isBusy}
                         onClick={() => void onLoadSlot(slotId)}
-                        className="flex-1 min-h-[32px] px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-[11px] font-semibold flex items-center justify-center gap-1 cursor-pointer"
+                        className="flex-1 min-h-[32px] px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-[11px] font-semibold flex items-center justify-center gap-1 cursor-pointer tabular-nums"
                       >
                         {isBusy ? (
-                          <Loader2 className="w-3 h-3 animate-spin" />
+                          <>
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            <span>
+                              {loadingProgress?.active ? `${loadingProgress.percent}%` : '불러오는 중'}
+                            </span>
+                          </>
                         ) : (
-                          <Play className="w-3 h-3 fill-current" />
+                          <>
+                            <Play className="w-3 h-3 fill-current" />
+                            <span>이어하기</span>
+                          </>
                         )}
-                        이어하기
                       </button>
 
                       {account && summary.hasNewerLocal && (
@@ -593,12 +610,14 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
               data-start={hasAnySavedGame ? undefined : 'true'}
               disabled={isStarting}
               onClick={handleLaunch}
-              className="w-full sm:w-auto min-h-[48px] px-6 py-3 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-semibold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer whitespace-nowrap"
+              className="w-full sm:w-auto min-h-[48px] px-6 py-3 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-semibold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer whitespace-nowrap tabular-nums"
             >
               {isStarting ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  1:1 지도 데이터 불러오는 중...
+                  {loadingProgress?.active
+                    ? `${loadingProgress.label} · ${loadingProgress.percent}%`
+                    : '1:1 지도 준비 중...'}
                 </>
               ) : (
                 <>
@@ -610,6 +629,28 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
               )}
             </button>
           </div>
+          {loadingProgress?.active && (isStarting || Boolean(busySlotId)) && (
+            <div
+              data-testid="title-loading-progress"
+              className="w-full pt-1 space-y-1.5"
+              aria-live="polite"
+            >
+              <div className="flex items-center justify-between text-[11px] text-slate-300 tabular-nums">
+                <span>{loadingProgress.label}</span>
+                <span className="font-mono font-semibold text-sky-300">
+                  {loadingProgress.percent}%
+                </span>
+              </div>
+              <div className="w-full h-1.5 rounded-full bg-slate-800/90 overflow-hidden">
+                <div
+                  className="h-full w-full origin-left bg-sky-400 transition-transform duration-200 ease-out"
+                  style={{
+                    transform: `scaleX(${Math.max(0.02, Math.min(1, loadingProgress.percent / 100))})`,
+                  }}
+                />
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

@@ -27,7 +27,7 @@
         "photoURL": {
           "type": "string",
           "description": "Avatar URL",
-          "maxLength": 512
+          "maxLength": 1024
         },
         "activeSlotId": {
           "type": "string",
@@ -260,7 +260,7 @@
     },
     "SaveSlotGraphChunk": {
       "title": "SaveSlotGraphChunk",
-      "description": "Bounded chunk of connected OSM node IDs and built edge IDs (max 2000 each per chunk doc).",
+      "description": "Byte-bounded chunk of connected OSM node IDs and built edge IDs (max 2000 each per chunk doc, up to 500 chunks).",
       "type": "object",
       "properties": {
         "ownerUid": {
@@ -327,7 +327,7 @@
       "schema": {
         "$ref": "#/entities/SaveSlotGraphChunk"
       },
-      "description": "Chunked lists of connected OSM node IDs and built edge IDs (chunkId == 'graph_0'..'graph_99')."
+      "description": "Chunked lists of connected OSM node IDs and built edge IDs (chunkId == 'graph_0'..'graph_499')."
     }
   }
 }

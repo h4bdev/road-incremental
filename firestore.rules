@@ -37,7 +37,7 @@ service cloud.firestore {
     }
 
     function isValidChunkId(chunkId) {
-      return chunkId is string && chunkId.size() >= 7 && chunkId.size() <= 8 && chunkId.matches('^graph_[0-9]{1,2}$');
+      return chunkId is string && chunkId.size() >= 7 && chunkId.size() <= 9 && chunkId.matches('^graph_[0-9]{1,3}$');
     }
 
     function isStringArrayBounded(arr, maxLen) {
@@ -100,7 +100,7 @@ service cloud.firestore {
         data.connectedOsmNodes is number && data.connectedOsmNodes >= 0 &&
         data.totalOsmEdgesBuilt is number && data.totalOsmEdgesBuilt >= 0 &&
         data.tierLabel is string && data.tierLabel.size() >= 1 && data.tierLabel.size() <= 40 &&
-        data.graphChunkCount is number && data.graphChunkCount >= 0 && data.graphChunkCount <= 100 &&
+        data.graphChunkCount is number && data.graphChunkCount >= 0 && data.graphChunkCount <= 500 &&
         data.clientSavedAt is number && data.clientSavedAt >= 0 &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -152,7 +152,7 @@ service cloud.firestore {
         data.ownerUid == request.auth.uid &&
         isValidSlotId(data.slotId) &&
         data.slotId == slotId &&
-        data.chunkIndex is number && data.chunkIndex >= 0 && data.chunkIndex <= 99 &&
+        data.chunkIndex is number && data.chunkIndex >= 0 && data.chunkIndex <= 499 &&
         isStringArrayBounded(data.nodeIds, 2000) &&
         isStringArrayBounded(data.edgeIds, 2000) &&
         data.createdAt is timestamp &&

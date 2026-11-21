@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { CheckCircle2, MapPin, Route, TrainTrack, Truck, X } from 'lucide-react';
 import { GameState } from '../game/types';
 import { calculateMultipliers, CUSTOM_BRIDGE_WAY_NAMES } from '../game/rules';
+import { formatIncomeRateCompact } from '../game/format';
 
 interface LinesPanelProps {
   gameState: GameState;
@@ -207,8 +208,8 @@ export const LinesPanel: React.FC<LinesPanelProps> = ({
                           )}
                         </div>
                         <div className="text-[11px] text-slate-400 font-mono-numbers mt-0.5">
-                          {isRail ? '철도' : '도로'} · {way.totalMeters.toLocaleString()}m · +$
-                          {way.incomePerSec.toLocaleString()}/s
+                          {isRail ? '철도' : '도로'} · {way.totalMeters.toLocaleString()}m ·{' '}
+                          {formatIncomeRateCompact(way.incomePerSec)}
                         </div>
                       </div>
 

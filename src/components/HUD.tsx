@@ -4,6 +4,7 @@ import {
   Cloud,
   Gamepad2,
   Globe,
+  HelpCircle,
   MousePointerClick,
   RotateCcw,
   Route,
@@ -18,6 +19,7 @@ import {
   calculateTotalIncomePerSec,
   getNodeTierRank,
 } from '../game/rules';
+import { formatIncomeRateCompact, formatMoneyCompact } from '../game/format';
 import { getMinigameIncomeBoost } from '../game/minigames';
 
 export type ModalTab =
@@ -36,9 +38,11 @@ interface HUDProps {
   activeSlotIndex: number;
   isSignedIn: boolean;
   isSyncing?: boolean;
+  tutorialOpen?: boolean;
   onSelectModal: (tab: ModalTab) => void;
   onDispatchClick: () => void;
   onToggleSound: () => void;
+  onToggleTutorial?: () => void;
   onOpenCityReset: () => void;
 }
 
@@ -49,9 +53,11 @@ export const HUD: React.FC<HUDProps> = ({
   activeSlotIndex,
   isSignedIn,
   isSyncing = false,
+  tutorialOpen = false,
   onSelectModal,
   onDispatchClick,
   onToggleSound,
+  onToggleTutorial,
   onOpenCityReset,
 }) => {
   const incomePerSec = calculateTotalIncomePerSec(gameState);
@@ -59,6 +65,7 @@ export const HUD: React.FC<HUDProps> = ({
   const unlockedAchCount = gameState.achievements.filter((a) => a.unlocked).length;
   const mgBoost = getMinigameIncomeBoost(gameState.minigames);
   const rank = getNodeTierRank(gameState.stats.connectedOsmNodes);
+  const hasLegacyInflatedCapital = gameState.capital >= 1e13;
 
   const toggleTab = (tab: Exclude<ModalTab, null>) => {
     onSelectModal(activeModal === tab ? null : tab);
@@ -70,21 +77,25 @@ export const HUD: React.FC<HUDProps> = ({
       <header className="fixed top-0 left-0 right-0 z-30 pointer-events-none px-1.5 pt-1.5 sm:p-3 flex items-center justify-between gap-1.5 sm:gap-2">
         {/* Core Metrics */}
         <div className="pointer-events-auto flex-1 sm:flex-initial flex items-center justify-between sm:justify-start gap-2 sm:gap-4 bg-slate-950/95 border border-slate-800 rounded-xl px-2.5 sm:px-4 py-1.5 sm:py-2 shadow-xl min-w-0">
-          <div className="flex flex-col min-w-0">
+          <div className="flex flex-col min-w-0 shrink-0">
             <span className="text-[10px] sm:text-[11px] text-slate-400 font-medium leading-tight">
               보유 자금
             </span>
-            <div className="flex items-baseline gap-1 font-mono-numbers">
-              <span className="text-xs sm:text-base md:text-lg font-bold text-emerald-400 truncate">
-                ${Math.floor(gameState.capital).toLocaleString()}
-              </span>
-              <span className="text-[10px] sm:text-xs text-emerald-500 font-semibold shrink-0">
-                +${incomePerSec.toLocaleString()}/s
-              </span>
-            </div>
+            <span
+              data-testid="hud-capital"
+              className="text-xs sm:text-base md:text-lg font-bold text-emerald-400 font-mono-numbers leading-tight whitespace-nowrap"
+            >
+              {formatMoneyCompact(gameState.capital)}
+            </span>
+            <span
+              data-testid="hud-income-rate"
+              className="text-[10px] sm:text-xs text-emerald-500 font-semibold font-mono-numbers leading-tight whitespace-nowrap"
+            >
+              {formatIncomeRateCompact(incomePerSec)}
+            </span>
           </div>
 
-          <div className="hidden sm:block w-px h-7 bg-slate-800 shrink-0" />
+          <div className="hidden sm:block w-px h-8 bg-slate-800 shrink-0" />
 
           <div className="hidden sm:flex flex-col shrink-0">
             <span className="text-[11px] text-slate-400 font-medium">1:1 네트워크</span>
@@ -95,7 +106,7 @@ export const HUD: React.FC<HUDProps> = ({
             </div>
           </div>
 
-          <div className="w-px h-6 sm:h-7 bg-slate-800 shrink-0" />
+          <div className="w-px h-7 sm:h-8 bg-slate-800 shrink-0" />
 
           <div className="flex flex-col shrink-0">
             <span className="text-[10px] sm:text-[11px] text-slate-400 font-medium leading-tight">
@@ -104,14 +115,14 @@ export const HUD: React.FC<HUDProps> = ({
             <div className="flex items-baseline gap-1 font-mono-numbers">
               <span
                 data-testid="hud-connected-nodes"
-                className="text-xs sm:text-sm md:text-base font-bold text-indigo-300 tabular-nums"
+                className="text-xs sm:text-sm md:text-base font-bold text-indigo-300 tabular-nums whitespace-nowrap"
               >
                 {gameState.stats.connectedOsmNodes.toLocaleString()}
               </span>
             </div>
           </div>
 
-          <div className="w-px h-6 sm:h-7 bg-slate-800 shrink-0" />
+          <div className="w-px h-7 sm:h-8 bg-slate-800 shrink-0" />
 
           <div className="flex flex-col shrink-0">
             <span className="text-[10px] sm:text-[11px] text-slate-400 font-medium leading-tight">
@@ -131,7 +142,7 @@ export const HUD: React.FC<HUDProps> = ({
             className="hidden sm:flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 active:scale-95 text-slate-950 text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0"
           >
             <MousePointerClick className="w-3.5 h-3.5" />
-            <span>운행 배차 +${clickReward.toLocaleString()}</span>
+            <span>운행 배차 +{formatMoneyCompact(clickReward)}</span>
           </button>
         </div>
 
@@ -141,8 +152,8 @@ export const HUD: React.FC<HUDProps> = ({
             data-testid="hud-save-slots-button"
             onClick={() => toggleTab('saves')}
             aria-label="저장 슬롯 및 계정"
-            title="저장 슬롯 (1~5) 및 클라우드 동기화"
-            className={`min-w-[38px] min-h-[38px] sm:min-w-0 sm:min-h-0 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
+            title="저장 슬롯 (1~5) · 자금 조정 · 클라우드 동기화"
+            className={`relative min-w-[36px] min-h-[36px] sm:min-w-0 sm:min-h-0 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
               activeModal === 'saves'
                 ? 'bg-sky-600 text-white'
                 : 'text-slate-200 hover:text-white hover:bg-slate-800'
@@ -154,12 +165,33 @@ export const HUD: React.FC<HUDProps> = ({
               <Save className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-sky-400" />
             )}
             <span className="hidden md:inline">슬롯 {activeSlotIndex}</span>
+            {hasLegacyInflatedCapital && (
+              <span
+                aria-hidden="true"
+                className="w-2 h-2 rounded-full bg-amber-400 absolute top-1 right-1"
+              />
+            )}
           </button>
+          {onToggleTutorial && (
+            <button
+              data-testid="hud-tutorial-button"
+              onClick={onToggleTutorial}
+              aria-label="초보자 가이드"
+              title="플레이 튜토리얼 보기"
+              className={`min-w-[36px] min-h-[36px] sm:min-w-0 sm:min-h-0 p-1.5 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+                tutorialOpen
+                  ? 'bg-sky-600 text-white'
+                  : 'text-slate-300 hover:text-white hover:bg-slate-800'
+              }`}
+            >
+              <HelpCircle className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-sky-400" />
+            </button>
+          )}
           <button
             onClick={onOpenCityReset}
             aria-label="메인 메뉴 · 시작 도시 변경"
             title="메인 메뉴 및 시작 도시 변경"
-            className="min-w-[38px] min-h-[38px] sm:min-w-0 sm:min-h-0 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-300 hover:text-white hover:bg-slate-800 flex items-center justify-center gap-1 transition-colors cursor-pointer whitespace-nowrap"
+            className="min-w-[36px] min-h-[36px] sm:min-w-0 sm:min-h-0 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-300 hover:text-white hover:bg-slate-800 flex items-center justify-center gap-1 transition-colors cursor-pointer whitespace-nowrap"
           >
             <RotateCcw className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-sky-400" />
             <span className="hidden lg:inline">메인 메뉴</span>
@@ -167,7 +199,7 @@ export const HUD: React.FC<HUDProps> = ({
           <button
             onClick={onToggleSound}
             aria-label={gameState.settings.soundEnabled ? '음소거' : '사운드 켜기'}
-            className="min-w-[38px] min-h-[38px] sm:min-w-0 sm:min-h-0 p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 flex items-center justify-center transition-colors cursor-pointer"
+            className="min-w-[36px] min-h-[36px] sm:min-w-0 sm:min-h-0 p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 flex items-center justify-center transition-colors cursor-pointer"
           >
             {gameState.settings.soundEnabled ? (
               <Volume2 className="w-4 h-4 text-sky-400" />
@@ -186,7 +218,7 @@ export const HUD: React.FC<HUDProps> = ({
           className="sm:hidden fixed bottom-[76px] right-2.5 z-20 min-h-[44px] flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-500 active:scale-95 text-slate-950 text-xs font-bold shadow-xl cursor-pointer"
         >
           <MousePointerClick className="w-4 h-4" />
-          <span>배차 +${clickReward.toLocaleString()}</span>
+          <span>배차 +{formatMoneyCompact(clickReward)}</span>
         </button>
       )}
 

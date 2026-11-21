@@ -1,5 +1,14 @@
+import { BuiltSkeletonTuple } from './osmOverview';
+import {
+  CachedSlotGraphSnapshot,
+  deleteCachedSlotGraph,
+  getCachedSlotGraph,
+  hasIndexedDb,
+  putCachedSlotGraph,
+} from './osmTileCache';
 import {
   createInitialGameState,
+  evaluateLinesAndAchievements,
   getNodeTierRank,
   scopeGameStateToStartingCity,
 } from './rules';
@@ -17,12 +26,52 @@ export const MAX_SAVE_SLOTS = SAVE_SLOT_IDS.length;
 
 export const LEGACY_SAVE_KEY = 'TERRALINE_SAVE_V4';
 export const SLOT_STORAGE_PREFIX = 'ROAD_INC_SAVE_SLOT_V1_';
+export const SLOT_CORE_V2_PREFIX = 'ROAD_INC_SAVE_SLOT_CORE_V2_';
+export const SLOT_GRAPH_V2_PREFIX = 'ROAD_INC_SAVE_SLOT_GRAPH_V2_';
 export const SLOT_META_MAP_KEY = 'ROAD_INC_SAVE_SLOTS_META_V1';
 export const ACTIVE_SLOT_STORAGE_KEY = 'ROAD_INC_ACTIVE_SLOT_V1';
 export const LEGACY_MIGRATED_KEY = 'ROAD_INC_LEGACY_MIGRATED_V1';
 
 export const GRAPH_CHUNK_ITEM_LIMIT = 1500;
-export const MAX_GRAPH_CHUNKS = 100;
+export const MAX_GRAPH_CHUNKS = 500;
+export const MAX_CORE_DOC_BYTES = 750 * 1024;
+export const MAX_CHUNK_DOC_BYTES = 400 * 1024;
+
+const utf8Encoder = new TextEncoder();
+
+export function utf8ByteLength(text: string): number {
+  return utf8Encoder.encode(text).length;
+}
+
+export function estimateFirestoreValueBytes(value: unknown): number {
+  if (value === null || value === undefined) return 1;
+  if (typeof value === 'boolean') return 1;
+  if (typeof value === 'number') return 8;
+  if (typeof value === 'string') return utf8ByteLength(value) + 1;
+  if (Array.isArray(value)) {
+    let total = 0;
+    for (let i = 0; i < value.length; i++) {
+      total += estimateFirestoreValueBytes(value[i]);
+    }
+    return total;
+  }
+  if (typeof value === 'object') {
+    let total = 32;
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (v === undefined) continue;
+      total += utf8ByteLength(k) + 1 + estimateFirestoreValueBytes(v);
+    }
+    return total;
+  }
+  return 8;
+}
+
+export function estimateFirestoreDocBytes(
+  data: Record<string, unknown>,
+  extraOverheadBytes = 256
+): number {
+  return extraOverheadBytes + estimateFirestoreValueBytes(data);
+}
 
 export interface SaveSlotSummary {
   slotId: SaveSlotId;
@@ -79,6 +128,10 @@ export interface CompactRegionRecord {
   isKnownIsland: boolean;
   totalNodeCount: number;
 }
+
+type LocalCompactRegionRecord = CompactRegionRecord & {
+  hasRealOsmBoundary?: boolean;
+};
 
 export interface DehydratedCloudSlot {
   metaFields: {
@@ -155,41 +208,47 @@ export function defaultSlotName(slotId: SaveSlotId, cityName?: string): string {
   return cityName ? `슬롯 ${idx} · ${cityName}`.slice(0, 60) : `슬롯 ${idx}`;
 }
 
-export function hydrateRawGameState(parsed: GameState): GameState | null {
+export function hydrateRawGameState(
+  parsed: GameState,
+  options?: { trustedV2?: boolean }
+): GameState | null {
   if (!parsed || !parsed.startingCity || typeof parsed.startingCity.lat !== 'number') {
     return null;
   }
-  return scopeGameStateToStartingCity({
-    ...parsed,
-    osmNodes: Array.isArray(parsed.osmNodes) ? parsed.osmNodes : [],
-    osmEdges: Array.isArray(parsed.osmEdges) ? parsed.osmEdges : [],
-    loadedOsmChunks: Array.isArray(parsed.loadedOsmChunks) ? parsed.loadedOsmChunks : [],
-    loadedOsmRegions: Array.isArray(parsed.loadedOsmRegions) ? parsed.loadedOsmRegions : [],
-    provincialRegions: Array.isArray(parsed.provincialRegions) ? parsed.provincialRegions : [],
-    pendingSeedRegionIds: Array.isArray(parsed.pendingSeedRegionIds)
-      ? parsed.pendingSeedRegionIds
-      : [],
-    completedOsmWays: Array.isArray(parsed.completedOsmWays) ? parsed.completedOsmWays : [],
-    skills: Array.isArray(parsed.skills) ? parsed.skills : [],
-    upgrades: [],
-    minigames: backfillMinigamesState(parsed.minigames),
-    stats: {
-      totalSegmentsBuilt: parsed.stats?.totalSegmentsBuilt || 0,
-      totalOsmEdgesBuilt: parsed.stats?.totalOsmEdgesBuilt || 0,
-      connectedOsmNodes: parsed.stats?.connectedOsmNodes || 0,
-      totalScaledNodes: parsed.stats?.totalScaledNodes || 0,
-      totalLinesCompleted: 0,
-      totalTownsCompleted: 0,
-      totalClicks: parsed.stats?.totalClicks || 0,
-      mapped1to1Km: parsed.stats?.mapped1to1Km || 0,
-      totalNetworkKm: parsed.stats?.totalNetworkKm || 0,
-      prestigeCount: 0,
+  return scopeGameStateToStartingCity(
+    {
+      ...parsed,
+      osmNodes: Array.isArray(parsed.osmNodes) ? parsed.osmNodes : [],
+      osmEdges: Array.isArray(parsed.osmEdges) ? parsed.osmEdges : [],
+      loadedOsmChunks: Array.isArray(parsed.loadedOsmChunks) ? parsed.loadedOsmChunks : [],
+      loadedOsmRegions: Array.isArray(parsed.loadedOsmRegions) ? parsed.loadedOsmRegions : [],
+      provincialRegions: Array.isArray(parsed.provincialRegions) ? parsed.provincialRegions : [],
+      pendingSeedRegionIds: Array.isArray(parsed.pendingSeedRegionIds)
+        ? parsed.pendingSeedRegionIds
+        : [],
+      completedOsmWays: Array.isArray(parsed.completedOsmWays) ? parsed.completedOsmWays : [],
+      skills: Array.isArray(parsed.skills) ? parsed.skills : [],
+      upgrades: [],
+      minigames: backfillMinigamesState(parsed.minigames),
+      stats: {
+        totalSegmentsBuilt: parsed.stats?.totalSegmentsBuilt || 0,
+        totalOsmEdgesBuilt: parsed.stats?.totalOsmEdgesBuilt || 0,
+        connectedOsmNodes: parsed.stats?.connectedOsmNodes || 0,
+        totalScaledNodes: parsed.stats?.totalScaledNodes || 0,
+        totalLinesCompleted: 0,
+        totalTownsCompleted: 0,
+        totalClicks: parsed.stats?.totalClicks || 0,
+        mapped1to1Km: parsed.stats?.mapped1to1Km || 0,
+        totalNetworkKm: parsed.stats?.totalNetworkKm || 0,
+        prestigeCount: 0,
+      },
+      settings: {
+        soundEnabled: parsed.settings?.soundEnabled ?? true,
+        mapTileLayer: parsed.settings?.mapTileLayer || 'dark',
+      },
     },
-    settings: {
-      soundEnabled: parsed.settings?.soundEnabled ?? true,
-      mapTileLayer: parsed.settings?.mapTileLayer || 'dark',
-    },
-  });
+    { trustedV2: options?.trustedV2 }
+  );
 }
 
 export function buildSummaryFromState(
@@ -203,12 +262,15 @@ export function buildSummaryFromState(
   }
 ): SaveSlotSummary {
   const rank = getNodeTierRank(state.stats?.connectedOsmNodes || 0);
-  const cityName = (state.startingCity.name || '도시').slice(0, 120);
+  const cityName = ((state.startingCity.name || '').trim() || '도시').slice(0, 120);
+  const cityId = ((state.startingCity.id || '').trim() || 'custom').slice(0, 100);
+  const rawSlotName = typeof options?.slotName === 'string' ? options.slotName.trim() : '';
+  const tierLabel = (rank.label.trim() || 'Bronze I').slice(0, 40);
   return {
     slotId,
     slotIndex: slotIndexFromId(slotId),
-    slotName: (options?.slotName || defaultSlotName(slotId, cityName)).slice(0, 60),
-    cityId: (state.startingCity.id || 'custom').slice(0, 100),
+    slotName: (rawSlotName || defaultSlotName(slotId, cityName)).slice(0, 60),
+    cityId,
     cityName,
     cityCountry: (state.startingCity.country || '').slice(0, 80),
     cityLat: Number.isFinite(state.startingCity.lat) ? state.startingCity.lat : 37.5665,
@@ -220,7 +282,7 @@ export function buildSummaryFromState(
     mapped1to1Km: Math.max(0, Number(state.stats?.mapped1to1Km) || 0),
     connectedOsmNodes: Math.max(0, Math.floor(state.stats?.connectedOsmNodes || 0)),
     totalOsmEdgesBuilt: Math.max(0, Math.floor(state.stats?.totalOsmEdgesBuilt || 0)),
-    tierLabel: rank.label.slice(0, 40),
+    tierLabel,
     clientSavedAt: Math.max(0, Math.floor(options?.clientSavedAt ?? state.lastTickTimestamp ?? Date.now())),
     source: options?.source || 'local',
     cloudSavedAt: options?.cloudSavedAt,
@@ -265,13 +327,435 @@ function writeMetaMap(
   }
 }
 
+// Compact V2 split local storage (CORE ~15-100KB written cleanly + GRAPH tuple cache written only on structure change)
+type CompactNodeTuple = [string, number, number, 0 | 1 | 2, number, string?];
+type CompactEdgeTuple = [
+  string,
+  number,
+  number,
+  0 | 1,
+  string,
+  string,
+  number,
+  number,
+  number,
+  number,
+  Array<[number, number]> | 0,
+];
+
+interface CompactLocalCoreV2 {
+  v: 2;
+  capital: number;
+  totalLifetimeEarnings: number;
+  lastTickTimestamp: number;
+  startingCity: StartingCity;
+  stats: GameState['stats'];
+  settings: GameState['settings'];
+  skillsMap: Record<string, number>;
+  unlockedAchievementIds: string[];
+  loadedOsmChunks: string[];
+  loadedOsmRegions: string[];
+  pendingSeedRegionIds: string[];
+  completedOsmWays: string[];
+  regions: LocalCompactRegionRecord[];
+  minigames: GameState['minigames'];
+  connectedNodeIds: string[];
+  builtEdgeIds: string[];
+  customBridgeEdges: OsmEdge[];
+  builtSkeleton?: BuiltSkeletonTuple[];
+}
+
+interface CompactLocalGraphV2 {
+  v: 2;
+  wayNames: string[];
+  hwTypes: string[];
+  regionIds: string[];
+  nodes: CompactNodeTuple[];
+  edges: CompactEdgeTuple[];
+  regionBoundaries: Array<[string, ProvincialRegion['boundaryGeoJson'], boolean | undefined]>;
+}
+
+const lastSavedGraphSigByStorage = new WeakMap<Storage, Map<SaveSlotId, string>>();
+const lastIdbGraphSigBySlot = new Map<SaveSlotId, string>();
+
+function computeLocalGraphStructureSig(state: GameState): string {
+  const nodes = state.osmNodes || [];
+  const edges = state.osmEdges || [];
+  const regions = state.provincialRegions || [];
+  let boundaryCount = 0;
+  for (let i = 0; i < regions.length; i++) {
+    if (regions[i].boundaryGeoJson) boundaryCount++;
+  }
+  const nLen = nodes.length;
+  const eLen = edges.length;
+  return `${nLen}:${eLen}:${boundaryCount}:${(state.loadedOsmRegions || []).length}:${
+    nLen > 0 ? nodes[0].id : ''
+  }:${nLen > 0 ? nodes[nLen - 1].id : ''}:${eLen > 0 ? edges[eLen - 1].id : ''}`;
+}
+
+function quantizeChunkKeyForSave(lat: number, lng: number): string {
+  const qLat = (Math.round(lat * 40) / 40).toFixed(3);
+  const qLng = (Math.round(lng * 40) / 40).toFixed(3);
+  return `${qLat}_${qLng}`;
+}
+
+export function countUnhydratedGraphMarks(
+  state: GameState,
+  marks: RestoredGraphMarks | null | undefined
+): { unhydratedNodes: number; unhydratedEdges: number } {
+  if (!marks) return { unhydratedNodes: 0, unhydratedEdges: 0 };
+  const existingConnected = new Set<string>();
+  const existingBuilt = new Set<string>();
+  for (const n of state.osmNodes || []) {
+    if (n.connected) existingConnected.add(n.id);
+  }
+  for (const e of state.osmEdges || []) {
+    if (e.built) existingBuilt.add(e.id);
+  }
+  let unhydratedNodes = 0;
+  for (const id of marks.connectedNodeIds) {
+    if (!existingConnected.has(id)) unhydratedNodes++;
+  }
+  let unhydratedEdges = 0;
+  for (const id of marks.builtEdgeIds) {
+    if (!existingBuilt.has(id)) unhydratedEdges++;
+  }
+  return { unhydratedNodes, unhydratedEdges };
+}
+
+function packLocalCoreV2(
+  state: GameState,
+  pendingMarks?: RestoredGraphMarks | null
+): CompactLocalCoreV2 {
+  const skillsMap: Record<string, number> = {};
+  for (let i = 0; i < (state.skills || []).length; i++) {
+    const sk = state.skills[i];
+    if (sk.level > 0) skillsMap[sk.id] = Math.floor(sk.level);
+  }
+
+  const unlockedAchievementIds: string[] = [];
+  for (let i = 0; i < (state.achievements || []).length; i++) {
+    if (state.achievements[i].unlocked) unlockedAchievementIds.push(state.achievements[i].id);
+  }
+
+  const regions: LocalCompactRegionRecord[] = (state.provincialRegions || []).map((r) => ({
+    regionId: r.regionId,
+    regionName: r.regionName,
+    adminLevel: r.adminLevel || '6',
+    bbox: r.bbox,
+    centerLat: r.centerLat,
+    centerLng: r.centerLng,
+    unlocked: Boolean(r.unlocked),
+    isStartingRegion: Boolean(r.isStartingRegion),
+    isIsolated: Boolean(r.isIsolated),
+    isKnownIsland: Boolean(r.isKnownIsland),
+    totalNodeCount: Math.max(0, Math.floor(r.totalNodeCount || 0)),
+    ...(r.hasRealOsmBoundary ? { hasRealOsmBoundary: true } : {}),
+  }));
+
+  const connectedSet = new Set<string>();
+  const osmNodes = state.osmNodes || [];
+  for (let i = 0; i < osmNodes.length; i++) {
+    if (osmNodes[i].connected) connectedSet.add(osmNodes[i].id);
+  }
+  if (pendingMarks) {
+    for (const id of pendingMarks.connectedNodeIds) connectedSet.add(id);
+  }
+  const connectedNodeIds = Array.from(connectedSet);
+
+  const builtSet = new Set<string>();
+  const customBridgeById = new Map<string, OsmEdge>();
+  const builtSkeleton: BuiltSkeletonTuple[] = [];
+  const osmEdges = state.osmEdges || [];
+  for (let i = 0; i < osmEdges.length; i++) {
+    const e = osmEdges[i];
+    if (e.built) {
+      builtSet.add(e.id);
+      if (builtSkeleton.length < 1500 && e.coordinates.length >= 2) {
+        const c0 = e.coordinates[0];
+        const c1 = e.coordinates[e.coordinates.length - 1];
+        builtSkeleton.push([
+          Math.round(c0[0] * 1e5) / 1e5,
+          Math.round(c0[1] * 1e5) / 1e5,
+          Math.round(c1[0] * 1e5) / 1e5,
+          Math.round(c1[1] * 1e5) / 1e5,
+          e.mode === 'rail' ? 1 : 0,
+        ]);
+      }
+    }
+    if (e.id.startsWith('oe_custom_')) customBridgeById.set(e.id, e);
+  }
+  if (pendingMarks) {
+    for (const id of pendingMarks.builtEdgeIds) builtSet.add(id);
+    for (const ce of pendingMarks.customBridgeEdges) {
+      if (!customBridgeById.has(ce.id)) customBridgeById.set(ce.id, ce);
+      if (ce.built) builtSet.add(ce.id);
+    }
+  }
+  const builtEdgeIds = Array.from(builtSet);
+  const customBridgeEdges = Array.from(customBridgeById.values());
+
+  const stats: GameState['stats'] = {
+    ...state.stats,
+    connectedOsmNodes: Math.max(state.stats?.connectedOsmNodes || 0, connectedNodeIds.length),
+    totalOsmEdgesBuilt: Math.max(state.stats?.totalOsmEdgesBuilt || 0, builtEdgeIds.length),
+  };
+
+  return {
+    v: 2,
+    capital: clampFinite(state.capital, 1200, 0),
+    totalLifetimeEarnings: clampFinite(state.totalLifetimeEarnings, 0, 0),
+    lastTickTimestamp: Math.max(0, Math.floor(state.lastTickTimestamp || Date.now())),
+    startingCity: state.startingCity,
+    stats,
+    settings: state.settings,
+    skillsMap,
+    unlockedAchievementIds,
+    loadedOsmChunks: state.loadedOsmChunks || [],
+    loadedOsmRegions: state.loadedOsmRegions || [],
+    pendingSeedRegionIds: state.pendingSeedRegionIds || [],
+    completedOsmWays: state.completedOsmWays || [],
+    regions,
+    minigames: backfillMinigamesState(state.minigames),
+    connectedNodeIds,
+    builtEdgeIds,
+    customBridgeEdges,
+    builtSkeleton,
+  };
+}
+
+function packLocalGraphV2(state: GameState): CompactLocalGraphV2 {
+  const wayNames: string[] = [];
+  const wayIndex = new Map<string, number>();
+  const hwTypes: string[] = [];
+  const hwIndex = new Map<string, number>();
+  const regionIds: string[] = [];
+  const regIndex = new Map<string, number>();
+
+  const intern = (arr: string[], map: Map<string, number>, val?: string): number => {
+    if (!val) return -1;
+    const hit = map.get(val);
+    if (hit !== undefined) return hit;
+    const idx = arr.length;
+    arr.push(val);
+    map.set(val, idx);
+    return idx;
+  };
+
+  const osmNodes = state.osmNodes || [];
+  const nodeMap = new Map<string, GameState['osmNodes'][number]>();
+  const packedNodes: CompactNodeTuple[] = new Array(osmNodes.length);
+  for (let i = 0; i < osmNodes.length; i++) {
+    const n = osmNodes[i];
+    nodeMap.set(n.id, n);
+    const mCode: 0 | 1 | 2 = n.mode === 'rail' ? 1 : n.mode === 'mixed' ? 2 : 0;
+    const rIdx = intern(regionIds, regIndex, n.regionId);
+    packedNodes[i] = n.label
+      ? [n.id, n.lat, n.lng, mCode, rIdx, n.label]
+      : [n.id, n.lat, n.lng, mCode, rIdx];
+  }
+
+  const osmEdges = state.osmEdges || [];
+  const packedEdges: CompactEdgeTuple[] = [];
+  for (let i = 0; i < osmEdges.length; i++) {
+    const e = osmEdges[i];
+    if (e.id.startsWith('oe_custom_')) continue; // Stored in CORE so player-built links always survive
+    const wIdx = intern(wayNames, wayIndex, e.wayName);
+    const hIdx = intern(hwTypes, hwIndex, e.highwayType);
+    const rIdx = intern(regionIds, regIndex, e.regionId);
+    const nFrom = nodeMap.get(e.fromNodeId);
+    const nTo = nodeMap.get(e.toNodeId);
+    const matchesEndpoints =
+      nFrom &&
+      nTo &&
+      e.coordinates.length === 2 &&
+      e.coordinates[0][0] === nFrom.lat &&
+      e.coordinates[0][1] === nFrom.lng &&
+      e.coordinates[1][0] === nTo.lat &&
+      e.coordinates[1][1] === nTo.lng;
+    packedEdges.push([
+      e.id,
+      wIdx,
+      hIdx,
+      e.mode === 'rail' ? 1 : 0,
+      e.fromNodeId,
+      e.toNodeId,
+      e.distanceKm,
+      e.buildCost,
+      e.baseIncomePerSec,
+      rIdx,
+      matchesEndpoints ? 0 : e.coordinates,
+    ]);
+  }
+
+  const regionBoundaries: CompactLocalGraphV2['regionBoundaries'] = [];
+  for (let i = 0; i < (state.provincialRegions || []).length; i++) {
+    const r = state.provincialRegions[i];
+    if (r.boundaryGeoJson) {
+      regionBoundaries.push([r.regionId, r.boundaryGeoJson, r.hasRealOsmBoundary]);
+    }
+  }
+
+  return {
+    v: 2,
+    wayNames,
+    hwTypes,
+    regionIds,
+    nodes: packedNodes,
+    edges: packedEdges,
+    regionBoundaries,
+  };
+}
+
+function unpackLocalV2ToRawGameState(
+  core: CompactLocalCoreV2,
+  graph: CompactLocalGraphV2 | null
+): GameState {
+  const initial = createInitialGameState(core.startingCity);
+  const achSet = new Set(core.unlockedAchievementIds || []);
+  const skillsMap = core.skillsMap || {};
+  const connectedSet = new Set(core.connectedNodeIds || []);
+  const builtSet = new Set(core.builtEdgeIds || []);
+
+  const boundaryByRegionId = new Map<
+    string,
+    { boundaryGeoJson: ProvincialRegion['boundaryGeoJson']; hasRealOsmBoundary?: boolean }
+  >();
+  if (graph?.regionBoundaries) {
+    for (let i = 0; i < graph.regionBoundaries.length; i++) {
+      const [rid, geo, hasReal] = graph.regionBoundaries[i];
+      boundaryByRegionId.set(rid, { boundaryGeoJson: geo, hasRealOsmBoundary: hasReal });
+    }
+  }
+
+  const provincialRegions: ProvincialRegion[] = (core.regions || []).map((r) => {
+    const b = boundaryByRegionId.get(r.regionId);
+    const hasReal = b?.hasRealOsmBoundary ?? r.hasRealOsmBoundary;
+    return {
+      regionId: r.regionId,
+      regionName: r.regionName,
+      adminLevel: r.adminLevel,
+      bbox: r.bbox,
+      centerLat: r.centerLat,
+      centerLng: r.centerLng,
+      unlocked: Boolean(r.unlocked),
+      isStartingRegion: Boolean(r.isStartingRegion),
+      isIsolated: Boolean(r.isIsolated),
+      isKnownIsland: Boolean(r.isKnownIsland),
+      totalNodeCount: r.totalNodeCount || undefined,
+      boundaryGeoJson: b?.boundaryGeoJson,
+      hasRealOsmBoundary: hasReal,
+    };
+  });
+
+  const osmNodes: GameState['osmNodes'] = [];
+  const nodeById = new Map<string, GameState['osmNodes'][number]>();
+  if (graph?.nodes) {
+    const rIds = graph.regionIds || [];
+    for (let i = 0; i < graph.nodes.length; i++) {
+      const tuple = graph.nodes[i];
+      const mode: 'road' | 'rail' | 'mixed' =
+        tuple[3] === 1 ? 'rail' : tuple[3] === 2 ? 'mixed' : 'road';
+      const node: GameState['osmNodes'][number] = {
+        id: tuple[0],
+        lat: tuple[1],
+        lng: tuple[2],
+        connected: connectedSet.has(tuple[0]),
+        mode,
+        regionId: tuple[4] >= 0 ? rIds[tuple[4]] : undefined,
+        label: tuple[5],
+      };
+      osmNodes.push(node);
+      nodeById.set(node.id, node);
+    }
+  }
+
+  const osmEdges: OsmEdge[] = [];
+  const seenEdgeIds = new Set<string>();
+  if (graph?.edges) {
+    const wNames = graph.wayNames || [];
+    const hTypes = graph.hwTypes || [];
+    const rIds = graph.regionIds || [];
+    for (let i = 0; i < graph.edges.length; i++) {
+      const t = graph.edges[i];
+      const nFrom = nodeById.get(t[4]);
+      const nTo = nodeById.get(t[5]);
+      const coords: OsmEdge['coordinates'] =
+        t[10] !== 0 && Array.isArray(t[10]) && t[10].length >= 2
+          ? (t[10] as OsmEdge['coordinates'])
+          : nFrom && nTo
+          ? [
+              [nFrom.lat, nFrom.lng],
+              [nTo.lat, nTo.lng],
+            ]
+          : [
+              [0, 0],
+              [0, 0],
+            ];
+      seenEdgeIds.add(t[0]);
+      osmEdges.push({
+        id: t[0],
+        wayName: t[1] >= 0 ? wNames[t[1]] || '' : '',
+        highwayType: t[2] >= 0 ? hTypes[t[2]] || 'unclassified' : 'unclassified',
+        mode: t[3] === 1 ? 'rail' : 'road',
+        fromNodeId: t[4],
+        toNodeId: t[5],
+        coordinates: coords,
+        distanceKm: t[6],
+        buildCost: t[7],
+        baseIncomePerSec: t[8],
+        built: builtSet.has(t[0]),
+        regionId: t[9] >= 0 ? rIds[t[9]] : undefined,
+      });
+    }
+  }
+
+  for (let i = 0; i < (core.customBridgeEdges || []).length; i++) {
+    const ce = core.customBridgeEdges[i];
+    if (!seenEdgeIds.has(ce.id)) {
+      osmEdges.push({
+        ...ce,
+        built: ce.built || builtSet.has(ce.id),
+      });
+    }
+  }
+
+  return {
+    ...initial,
+    capital: core.capital,
+    totalLifetimeEarnings: core.totalLifetimeEarnings,
+    lastTickTimestamp: core.lastTickTimestamp,
+    startingCity: core.startingCity,
+    skills: initial.skills.map((sk) => ({
+      ...sk,
+      level: Math.min(sk.maxLevel, Math.max(0, Math.floor(skillsMap[sk.id] || 0))),
+    })),
+    achievements: initial.achievements.map((ach) => ({
+      ...ach,
+      unlocked: achSet.has(ach.id),
+    })),
+    provincialRegions:
+      provincialRegions.length > 0 ? provincialRegions : initial.provincialRegions,
+    loadedOsmChunks: core.loadedOsmChunks || [],
+    loadedOsmRegions: core.loadedOsmRegions || [],
+    pendingSeedRegionIds: core.pendingSeedRegionIds || [],
+    completedOsmWays: core.completedOsmWays || [],
+    osmNodes,
+    osmEdges,
+    minigames: backfillMinigamesState(core.minigames),
+    stats: core.stats || initial.stats,
+    settings: core.settings || initial.settings,
+  };
+}
+
 export function migrateLegacySaveIfNeeded(storage?: Storage): void {
   const st = getSafeStorage(storage);
   if (!st) return;
   try {
     if (st.getItem(LEGACY_MIGRATED_KEY) === '1') return;
     const slot1Key = `${SLOT_STORAGE_PREFIX}slot_1`;
-    if (st.getItem(slot1Key)) {
+    const slot1V2Key = `${SLOT_CORE_V2_PREFIX}slot_1`;
+    if (st.getItem(slot1V2Key) || st.getItem(slot1Key)) {
       st.setItem(LEGACY_MIGRATED_KEY, '1');
       return;
     }
@@ -283,13 +767,10 @@ export function migrateLegacySaveIfNeeded(storage?: Storage): void {
     const parsed = JSON.parse(legacyRaw) as GameState;
     const hydrated = hydrateRawGameState(parsed);
     if (!hydrated) return;
-    st.setItem(slot1Key, JSON.stringify(hydrated));
-    const metaMap = readMetaMap(st);
-    metaMap.slot_1 = buildSummaryFromState('slot_1', hydrated, {
-      clientSavedAt: hydrated.lastTickTimestamp || Date.now(),
-      source: 'local',
+    saveLocalSlotGameState('slot_1', hydrated, {
+      storage: st,
+      savedAt: hydrated.lastTickTimestamp || Date.now(),
     });
-    writeMetaMap(metaMap, st);
     if (!st.getItem(ACTIVE_SLOT_STORAGE_KEY)) {
       st.setItem(ACTIVE_SLOT_STORAGE_KEY, 'slot_1');
     }
@@ -325,8 +806,9 @@ export function listLocalSlotSummaries(storage?: Storage): Partial<Record<SaveSl
   let dirty = false;
 
   for (const slotId of SAVE_SLOT_IDS) {
-    const rawSlot = st.getItem(`${SLOT_STORAGE_PREFIX}${slotId}`);
-    if (!rawSlot) {
+    const rawCoreV2 = st.getItem(`${SLOT_CORE_V2_PREFIX}${slotId}`);
+    const rawSlotV1 = rawCoreV2 ? null : st.getItem(`${SLOT_STORAGE_PREFIX}${slotId}`);
+    if (!rawCoreV2 && !rawSlotV1) {
       if (metaMap[slotId]) {
         delete metaMap[slotId];
         dirty = true;
@@ -338,7 +820,9 @@ export function listLocalSlotSummaries(storage?: Storage): Partial<Record<SaveSl
       continue;
     }
     try {
-      const parsed = JSON.parse(rawSlot) as GameState;
+      const parsed = rawCoreV2
+        ? unpackLocalV2ToRawGameState(JSON.parse(rawCoreV2) as CompactLocalCoreV2, null)
+        : (JSON.parse(rawSlotV1!) as GameState);
       const summary = buildSummaryFromState(slotId, parsed, {
         clientSavedAt: parsed.lastTickTimestamp || Date.now(),
         source: 'local',
@@ -357,11 +841,56 @@ export function listLocalSlotSummaries(storage?: Storage): Partial<Record<SaveSl
   return result;
 }
 
+export function getLocalSlotBuiltSkeleton(
+  slotId: SaveSlotId,
+  storage?: Storage
+): BuiltSkeletonTuple[] {
+  const st = getSafeStorage(storage);
+  if (!st) return [];
+  try {
+    const rawCoreV2 = st.getItem(`${SLOT_CORE_V2_PREFIX}${slotId}`);
+    if (!rawCoreV2) return [];
+    const core = JSON.parse(rawCoreV2) as CompactLocalCoreV2;
+    return Array.isArray(core.builtSkeleton) ? core.builtSkeleton : [];
+  } catch {
+    return [];
+  }
+}
+
+export function getLocalSlotGraphMarks(
+  slotId: SaveSlotId,
+  storage?: Storage
+): RestoredGraphMarks | null {
+  const st = getSafeStorage(storage);
+  if (!st) return null;
+  try {
+    const rawCoreV2 = st.getItem(`${SLOT_CORE_V2_PREFIX}${slotId}`);
+    if (!rawCoreV2) return null;
+    const core = JSON.parse(rawCoreV2) as CompactLocalCoreV2;
+    return {
+      connectedNodeIds: new Set(core.connectedNodeIds || []),
+      builtEdgeIds: new Set(core.builtEdgeIds || []),
+      customBridgeEdges: Array.isArray(core.customBridgeEdges) ? core.customBridgeEdges : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function loadLocalSlotGameState(slotId: SaveSlotId, storage?: Storage): GameState | null {
   const st = getSafeStorage(storage);
   if (!st) return null;
   migrateLegacySaveIfNeeded(st);
   try {
+    const rawCoreV2 = st.getItem(`${SLOT_CORE_V2_PREFIX}${slotId}`);
+    if (rawCoreV2) {
+      const core = JSON.parse(rawCoreV2) as CompactLocalCoreV2;
+      const rawGraphV2 = st.getItem(`${SLOT_GRAPH_V2_PREFIX}${slotId}`);
+      const graph = rawGraphV2 ? (JSON.parse(rawGraphV2) as CompactLocalGraphV2) : null;
+      const rawState = unpackLocalV2ToRawGameState(core, graph);
+      return hydrateRawGameState(rawState, { trustedV2: true });
+    }
+
     const raw = st.getItem(`${SLOT_STORAGE_PREFIX}${slotId}`);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as GameState;
@@ -371,10 +900,60 @@ export function loadLocalSlotGameState(slotId: SaveSlotId, storage?: Storage): G
   }
 }
 
+export async function hydrateLocalSlotGraphFromIndexedDb(
+  slotId: SaveSlotId,
+  currentState: GameState,
+  storage?: Storage
+): Promise<GameState | null> {
+  if (!hasIndexedDb()) return null;
+  const snapshot = await getCachedSlotGraph(slotId);
+  if (!snapshot || snapshot.cityId !== currentState.startingCity.id) return null;
+
+  const st = getSafeStorage(storage);
+  let core: CompactLocalCoreV2;
+  try {
+    const rawCoreV2 = st?.getItem(`${SLOT_CORE_V2_PREFIX}${slotId}`);
+    core = rawCoreV2
+      ? (JSON.parse(rawCoreV2) as CompactLocalCoreV2)
+      : packLocalCoreV2(currentState);
+  } catch {
+    core = packLocalCoreV2(currentState);
+  }
+
+  const graphV2: CompactLocalGraphV2 = {
+    v: 2,
+    wayNames: snapshot.wayNames || [],
+    hwTypes: snapshot.hwTypes || [],
+    regionIds: snapshot.regionIds || [],
+    nodes: snapshot.nodes || [],
+    edges: snapshot.edges || [],
+    regionBoundaries: snapshot.regionBoundaries || [],
+  };
+
+  const unpacked = unpackLocalV2ToRawGameState(core, graphV2);
+  if (snapshot.loadedOsmChunks?.length) {
+    unpacked.loadedOsmChunks = Array.from(
+      new Set([...(unpacked.loadedOsmChunks || []), ...snapshot.loadedOsmChunks])
+    );
+  }
+  if (snapshot.loadedOsmRegions?.length) {
+    unpacked.loadedOsmRegions = Array.from(
+      new Set([...(unpacked.loadedOsmRegions || []), ...snapshot.loadedOsmRegions])
+    );
+  }
+  return hydrateRawGameState(unpacked, { trustedV2: true });
+}
+
 export function saveLocalSlotGameState(
   slotId: SaveSlotId,
   state: GameState,
-  options?: { slotName?: string; storage?: Storage; savedAt?: number }
+  options?: {
+    slotName?: string;
+    storage?: Storage;
+    savedAt?: number;
+    forceGraphWrite?: boolean;
+    pendingMarks?: RestoredGraphMarks | null;
+  }
 ): SaveSlotSummary {
   const st = getSafeStorage(options?.storage);
   const metaMap = readMetaMap(st || undefined);
@@ -382,7 +961,13 @@ export function saveLocalSlotGameState(
   const resolvedName =
     options?.slotName ||
     (existingName && metaMap[slotId]?.cityId === state.startingCity.id ? existingName : undefined);
-  const summary = buildSummaryFromState(slotId, state, {
+  const coreV2 = packLocalCoreV2(state, options?.pendingMarks);
+  const stateForSummary: GameState =
+    coreV2.stats.connectedOsmNodes > (state.stats?.connectedOsmNodes || 0) ||
+    coreV2.stats.totalOsmEdgesBuilt > (state.stats?.totalOsmEdgesBuilt || 0)
+      ? { ...state, stats: coreV2.stats }
+      : state;
+  const summary = buildSummaryFromState(slotId, stateForSummary, {
     slotName: resolvedName,
     clientSavedAt: options?.savedAt ?? Date.now(),
     source: 'local',
@@ -390,7 +975,62 @@ export function saveLocalSlotGameState(
 
   if (st) {
     try {
-      st.setItem(`${SLOT_STORAGE_PREFIX}${slotId}`, JSON.stringify(state));
+      st.setItem(`${SLOT_CORE_V2_PREFIX}${slotId}`, JSON.stringify(coreV2));
+
+      const graphSig = computeLocalGraphStructureSig(state);
+      const graphKey = `${SLOT_GRAPH_V2_PREFIX}${slotId}`;
+      const useIndexedDb = !options?.storage && hasIndexedDb();
+
+      if (useIndexedDb) {
+        // Offload bulky graph JSON to asynchronous IndexedDB & free 5MB localStorage quota
+        if (options?.forceGraphWrite || lastIdbGraphSigBySlot.get(slotId) !== graphSig) {
+          lastIdbGraphSigBySlot.set(slotId, graphSig);
+          const packed = packLocalGraphV2(state);
+          const snapshot: CachedSlotGraphSnapshot = {
+            slotId,
+            version: 3,
+            cityId: state.startingCity.id,
+            wayNames: packed.wayNames,
+            hwTypes: packed.hwTypes,
+            regionIds: packed.regionIds,
+            nodes: packed.nodes,
+            edges: packed.edges,
+            regionBoundaries: packed.regionBoundaries,
+            loadedOsmChunks: state.loadedOsmChunks || [],
+            loadedOsmRegions: state.loadedOsmRegions || [],
+            updatedAt: Date.now(),
+          };
+          void putCachedSlotGraph(snapshot).then(() => {
+            try {
+              if (st.getItem(graphKey)) {
+                st.removeItem(graphKey);
+              }
+            } catch {
+              // Ignore storage cleanup errors
+            }
+          });
+        }
+      } else {
+        let sigMap = lastSavedGraphSigByStorage.get(st);
+        if (!sigMap) {
+          sigMap = new Map();
+          lastSavedGraphSigByStorage.set(st, sigMap);
+        }
+        if (options?.forceGraphWrite || sigMap.get(slotId) !== graphSig || !st.getItem(graphKey)) {
+          try {
+            st.setItem(graphKey, JSON.stringify(packLocalGraphV2(state)));
+            sigMap.set(slotId, graphSig);
+          } catch {
+            // If graph cache exceeds storage quota, CORE_V2 + OSM refetch preserves all progress safely
+          }
+        }
+      }
+
+      // Free legacy duplicate V1 key once V2 core is safely persisted
+      if (st.getItem(`${SLOT_STORAGE_PREFIX}${slotId}`)) {
+        st.removeItem(`${SLOT_STORAGE_PREFIX}${slotId}`);
+      }
+
       metaMap[slotId] = summary;
       writeMetaMap(metaMap, st);
     } catch {
@@ -419,15 +1059,26 @@ export function renameLocalSlot(
 
 export function deleteLocalSlotGameState(slotId: SaveSlotId, storage?: Storage): void {
   const st = getSafeStorage(storage);
+  if (!optionsStoragePresent(storage) && hasIndexedDb()) {
+    lastIdbGraphSigBySlot.delete(slotId);
+    void deleteCachedSlotGraph(slotId);
+  }
   if (!st) return;
   try {
     st.removeItem(`${SLOT_STORAGE_PREFIX}${slotId}`);
+    st.removeItem(`${SLOT_CORE_V2_PREFIX}${slotId}`);
+    st.removeItem(`${SLOT_GRAPH_V2_PREFIX}${slotId}`);
+    lastSavedGraphSigByStorage.get(st)?.delete(slotId);
     const metaMap = readMetaMap(st);
     delete metaMap[slotId];
     writeMetaMap(metaMap, st);
   } catch {
     // Ignore storage errors
   }
+}
+
+function optionsStoragePresent(storage?: Storage): boolean {
+  return Boolean(storage);
 }
 
 function clampFinite(val: unknown, fallback = 0, min = 0): number {
@@ -462,10 +1113,88 @@ function sanitizePlainObject(obj: Record<string, unknown>): Record<string, unkno
 export function dehydrateGameStateForCloud(
   slotId: SaveSlotId,
   state: GameState,
-  options?: { slotName?: string; clientSavedAt?: number }
+  options?: { slotName?: string; clientSavedAt?: number; pendingMarks?: RestoredGraphMarks | null }
 ): DehydratedCloudSlot {
+  const pendingMarks = options?.pendingMarks;
+  const connectedSet = new Set<string>();
+  const connectedChunkKeys = new Set<string>();
+  for (const n of state.osmNodes || []) {
+    if (n.connected) {
+      connectedSet.add(String(n.id).slice(0, 180));
+      connectedChunkKeys.add(quantizeChunkKeyForSave(n.lat, n.lng));
+    }
+  }
+  if (pendingMarks) {
+    for (const id of pendingMarks.connectedNodeIds) {
+      connectedSet.add(String(id).slice(0, 180));
+    }
+  }
+  const connectedNodeIds = Array.from(connectedSet);
+
+  const builtSet = new Set<string>();
+  const customBridgeMap = new Map<string, CompactBridgeEdge>();
+  for (const e of state.osmEdges || []) {
+    if (e.built) builtSet.add(String(e.id).slice(0, 180));
+    if (e.id.startsWith('oe_custom_') && customBridgeMap.size < 500) {
+      customBridgeMap.set(e.id, {
+        id: String(e.id).slice(0, 180),
+        wayName: String(e.wayName || '연결 링크').slice(0, 120),
+        highwayType: String(e.highwayType || 'unclassified').slice(0, 60),
+        mode: e.mode === 'rail' ? 'rail' : 'road',
+        fromNodeId: String(e.fromNodeId).slice(0, 120),
+        toNodeId: String(e.toNodeId).slice(0, 120),
+        fromLat: Number(e.coordinates?.[0]?.[0]) || 0,
+        fromLng: Number(e.coordinates?.[0]?.[1]) || 0,
+        toLat: Number(e.coordinates?.[1]?.[0]) || 0,
+        toLng: Number(e.coordinates?.[1]?.[1]) || 0,
+        distanceKm: clampFinite(e.distanceKm, 0.05, 0),
+        buildCost: Math.max(0, Math.round(e.buildCost || 0)),
+        baseIncomePerSec: clampFinite(e.baseIncomePerSec, 0, 0),
+        built: Boolean(e.built),
+        regionId: String(e.regionId || '').slice(0, 120),
+      });
+    }
+  }
+  if (pendingMarks) {
+    for (const id of pendingMarks.builtEdgeIds) {
+      builtSet.add(String(id).slice(0, 180));
+    }
+    for (const e of pendingMarks.customBridgeEdges) {
+      if (e.built) builtSet.add(String(e.id).slice(0, 180));
+      if (!customBridgeMap.has(e.id) && customBridgeMap.size < 500) {
+        customBridgeMap.set(e.id, {
+          id: String(e.id).slice(0, 180),
+          wayName: String(e.wayName || '연결 링크').slice(0, 120),
+          highwayType: String(e.highwayType || 'unclassified').slice(0, 60),
+          mode: e.mode === 'rail' ? 'rail' : 'road',
+          fromNodeId: String(e.fromNodeId).slice(0, 120),
+          toNodeId: String(e.toNodeId).slice(0, 120),
+          fromLat: Number(e.coordinates?.[0]?.[0]) || 0,
+          fromLng: Number(e.coordinates?.[0]?.[1]) || 0,
+          toLat: Number(e.coordinates?.[1]?.[0]) || 0,
+          toLng: Number(e.coordinates?.[1]?.[1]) || 0,
+          distanceKm: clampFinite(e.distanceKm, 0.05, 0),
+          buildCost: Math.max(0, Math.round(e.buildCost || 0)),
+          baseIncomePerSec: clampFinite(e.baseIncomePerSec, 0, 0),
+          built: Boolean(e.built),
+          regionId: String(e.regionId || '').slice(0, 120),
+        });
+      }
+    }
+  }
+  const builtEdgeIds = Array.from(builtSet);
+  const customBridgeEdges = Array.from(customBridgeMap.values());
+
   const nowMs = Math.max(0, Math.floor(options?.clientSavedAt ?? Date.now()));
-  const summary = buildSummaryFromState(slotId, state, {
+  const stateForSummary: GameState = {
+    ...state,
+    stats: {
+      ...state.stats,
+      connectedOsmNodes: Math.max(state.stats?.connectedOsmNodes || 0, connectedNodeIds.length),
+      totalOsmEdgesBuilt: Math.max(state.stats?.totalOsmEdgesBuilt || 0, builtEdgeIds.length),
+    },
+  };
+  const summary = buildSummaryFromState(slotId, stateForSummary, {
     slotName: options?.slotName,
     clientSavedAt: nowMs,
     source: 'synced',
@@ -483,9 +1212,13 @@ export function dehydrateGameStateForCloud(
     .map((a) => String(a.id).slice(0, 120))
     .slice(0, 100);
 
-  const loadedOsmChunks = (state.loadedOsmChunks || [])
-    .map((c) => String(c).slice(0, 120))
-    .slice(-500);
+  // Prioritize chunks that contain connected nodes at the end so .slice(-500) preserves all built chunks
+  const rawChunks = Array.from(
+    new Set([...(state.loadedOsmChunks || []), ...Array.from(connectedChunkKeys)])
+  ).map((c) => String(c).slice(0, 120));
+  const nonConnectedChunks = rawChunks.filter((c) => !connectedChunkKeys.has(c));
+  const prioritizedConnectedChunks = rawChunks.filter((c) => connectedChunkKeys.has(c));
+  const loadedOsmChunks = [...nonConnectedChunks, ...prioritizedConnectedChunks].slice(-500);
 
   const loadedOsmRegions = (state.loadedOsmRegions || [])
     .map((r) => String(r).slice(0, 120))
@@ -520,56 +1253,136 @@ export function dehydrateGameStateForCloud(
       totalNodeCount: Math.max(0, Math.floor(r.totalNodeCount || 0)),
     }));
 
-  const customBridgeEdges: CompactBridgeEdge[] = (state.osmEdges || [])
-    .filter((e) => e.id.startsWith('oe_custom_'))
-    .slice(0, 500)
-    .map((e) => ({
-      id: String(e.id).slice(0, 180),
-      wayName: String(e.wayName || '연결 링크').slice(0, 120),
-      highwayType: String(e.highwayType || 'unclassified').slice(0, 60),
-      mode: e.mode === 'rail' ? 'rail' : 'road',
-      fromNodeId: String(e.fromNodeId).slice(0, 120),
-      toNodeId: String(e.toNodeId).slice(0, 120),
-      fromLat: Number(e.coordinates?.[0]?.[0]) || 0,
-      fromLng: Number(e.coordinates?.[0]?.[1]) || 0,
-      toLat: Number(e.coordinates?.[1]?.[0]) || 0,
-      toLng: Number(e.coordinates?.[1]?.[1]) || 0,
-      distanceKm: clampFinite(e.distanceKm, 0.05, 0),
-      buildCost: Math.max(0, Math.round(e.buildCost || 0)),
-      baseIncomePerSec: clampFinite(e.baseIncomePerSec, 0, 0),
-      built: Boolean(e.built),
-      regionId: String(e.regionId || '').slice(0, 120),
-    }));
-
-  const connectedNodeIds = (state.osmNodes || [])
-    .filter((n) => n.connected)
-    .map((n) => String(n.id).slice(0, 180));
-  const builtEdgeIds = (state.osmEdges || [])
-    .filter((e) => e.built)
-    .map((e) => String(e.id).slice(0, 180));
-
-  const chunkCount = Math.min(
-    MAX_GRAPH_CHUNKS,
-    Math.max(
-      Math.ceil(connectedNodeIds.length / GRAPH_CHUNK_ITEM_LIMIT),
-      Math.ceil(builtEdgeIds.length / GRAPH_CHUNK_ITEM_LIMIT)
-    )
-  );
-
   const graphChunks: DehydratedCloudSlot['graphChunks'] = [];
-  for (let i = 0; i < chunkCount; i++) {
-    const start = i * GRAPH_CHUNK_ITEM_LIMIT;
-    const end = start + GRAPH_CHUNK_ITEM_LIMIT;
+  let nodeCursor = 0;
+  let edgeCursor = 0;
+  const CHUNK_DOC_BASE_BYTES = 320; // ownerUid, slotId, chunkIndex, timestamps, doc path
+
+  while (
+    (nodeCursor < connectedNodeIds.length || edgeCursor < builtEdgeIds.length) &&
+    graphChunks.length < MAX_GRAPH_CHUNKS
+  ) {
+    const chunkNodes: string[] = [];
+    const chunkEdges: string[] = [];
+    let chunkBytes = CHUNK_DOC_BASE_BYTES;
+
+    while (nodeCursor < connectedNodeIds.length || edgeCursor < builtEdgeIds.length) {
+      let addedAny = false;
+
+      if (nodeCursor < connectedNodeIds.length && chunkNodes.length < GRAPH_CHUNK_ITEM_LIMIT) {
+        const nid = connectedNodeIds[nodeCursor];
+        const nidBytes = utf8ByteLength(nid) + 1;
+        if (chunkBytes + nidBytes <= MAX_CHUNK_DOC_BYTES || (chunkNodes.length === 0 && chunkEdges.length === 0)) {
+          chunkNodes.push(nid);
+          chunkBytes += nidBytes;
+          nodeCursor++;
+          addedAny = true;
+        }
+      }
+
+      if (edgeCursor < builtEdgeIds.length && chunkEdges.length < GRAPH_CHUNK_ITEM_LIMIT) {
+        const eid = builtEdgeIds[edgeCursor];
+        const eidBytes = utf8ByteLength(eid) + 1;
+        if (chunkBytes + eidBytes <= MAX_CHUNK_DOC_BYTES || (chunkNodes.length === 0 && chunkEdges.length === 0)) {
+          chunkEdges.push(eid);
+          chunkBytes += eidBytes;
+          edgeCursor++;
+          addedAny = true;
+        }
+      }
+
+      if (!addedAny) break;
+    }
+
+    if (chunkNodes.length === 0 && chunkEdges.length === 0) break;
     graphChunks.push({
-      chunkIndex: i,
-      nodeIds: connectedNodeIds.slice(start, end),
-      edgeIds: builtEdgeIds.slice(start, end),
+      chunkIndex: graphChunks.length,
+      nodeIds: chunkNodes,
+      edgeIds: chunkEdges,
     });
   }
 
   const sanitizedMinigames = sanitizePlainObject(
     backfillMinigamesState(state.minigames) as unknown as Record<string, unknown>
   ) as unknown as GameState['minigames'];
+
+  const coreFields: DehydratedCloudSlot['coreFields'] = {
+    version: 1,
+    capital: clampFinite(state.capital, 1200, 0),
+    totalLifetimeEarnings: clampFinite(state.totalLifetimeEarnings, 0, 0),
+    lastTickTimestamp: Math.max(0, Math.floor(state.lastTickTimestamp || nowMs)),
+    startingCity: {
+      id: summary.cityId,
+      name: summary.cityName,
+      country: summary.cityCountry,
+      lat: summary.cityLat,
+      lng: summary.cityLng,
+      zoom: summary.cityZoom,
+      description: summary.cityDescription,
+      isCustom: summary.cityIsCustom,
+    },
+    stats: {
+      totalSegmentsBuilt: Math.max(0, Math.floor(state.stats?.totalSegmentsBuilt || 0)),
+      totalOsmEdgesBuilt: Math.max(0, Math.floor(state.stats?.totalOsmEdgesBuilt || 0), builtEdgeIds.length),
+      connectedOsmNodes: Math.max(0, Math.floor(state.stats?.connectedOsmNodes || 0), connectedNodeIds.length),
+      totalScaledNodes: Math.max(0, Math.floor(state.stats?.totalScaledNodes || 0)),
+      totalLinesCompleted: 0,
+      totalTownsCompleted: 0,
+      totalClicks: Math.max(0, Math.floor(state.stats?.totalClicks || 0)),
+      mapped1to1Km: clampFinite(state.stats?.mapped1to1Km, 0, 0),
+      totalNetworkKm: clampFinite(state.stats?.totalNetworkKm, 0, 0),
+      prestigeCount: 0,
+    },
+    settings: {
+      soundEnabled: Boolean(state.settings?.soundEnabled ?? true),
+      mapTileLayer:
+        state.settings?.mapTileLayer === 'osm' || state.settings?.mapTileLayer === 'satellite'
+          ? state.settings.mapTileLayer
+          : 'dark',
+    },
+    skillsMap,
+    unlockedAchievementIds,
+    loadedOsmChunks,
+    loadedOsmRegions,
+    pendingSeedRegionIds,
+    completedOsmWays,
+    regions,
+    customBridgeEdges,
+    minigames: sanitizedMinigames,
+  };
+
+  // Enforce strict Firestore document byte budget (< 750 KiB so it never approaches 1 MiB limit)
+  const estimateCoreBytes = () =>
+    estimateFirestoreDocBytes(coreFields as unknown as Record<string, unknown>, 320);
+
+  if (estimateCoreBytes() > MAX_CORE_DOC_BYTES && coreFields.completedOsmWays.length > 0) {
+    // Re-evaluated cleanly from loaded OSM chunks on restore, so trim oldest completedOsmWays first
+    while (coreFields.completedOsmWays.length > 0 && estimateCoreBytes() > MAX_CORE_DOC_BYTES) {
+      const dropCount = Math.max(1, Math.ceil(coreFields.completedOsmWays.length * 0.25));
+      coreFields.completedOsmWays = coreFields.completedOsmWays.slice(dropCount);
+    }
+  }
+
+  if (estimateCoreBytes() > MAX_CORE_DOC_BYTES && coreFields.loadedOsmChunks.length > 0) {
+    while (coreFields.loadedOsmChunks.length > 0 && estimateCoreBytes() > MAX_CORE_DOC_BYTES) {
+      const dropCount = Math.max(1, Math.ceil(coreFields.loadedOsmChunks.length * 0.25));
+      coreFields.loadedOsmChunks = coreFields.loadedOsmChunks.slice(dropCount);
+    }
+  }
+
+  if (estimateCoreBytes() > MAX_CORE_DOC_BYTES && coreFields.customBridgeEdges.length > 0) {
+    // Drop unbuilt custom bridges first before touching built ones
+    coreFields.customBridgeEdges = coreFields.customBridgeEdges.filter((e) => e.built);
+    while (coreFields.customBridgeEdges.length > 0 && estimateCoreBytes() > MAX_CORE_DOC_BYTES) {
+      const dropCount = Math.max(1, Math.ceil(coreFields.customBridgeEdges.length * 0.2));
+      coreFields.customBridgeEdges = coreFields.customBridgeEdges.slice(dropCount);
+    }
+  }
+
+  if (estimateCoreBytes() > MAX_CORE_DOC_BYTES && coreFields.regions.length > 1) {
+    const essentialRegions = coreFields.regions.filter((r) => r.unlocked || r.isStartingRegion);
+    coreFields.regions = essentialRegions.length > 0 ? essentialRegions : coreFields.regions.slice(0, 1);
+  }
 
   return {
     metaFields: {
@@ -592,50 +1405,7 @@ export function dehydrateGameStateForCloud(
       graphChunkCount: graphChunks.length,
       clientSavedAt: nowMs,
     },
-    coreFields: {
-      version: 1,
-      capital: clampFinite(state.capital, 1200, 0),
-      totalLifetimeEarnings: clampFinite(state.totalLifetimeEarnings, 0, 0),
-      lastTickTimestamp: Math.max(0, Math.floor(state.lastTickTimestamp || nowMs)),
-      startingCity: {
-        id: summary.cityId,
-        name: summary.cityName,
-        country: summary.cityCountry,
-        lat: summary.cityLat,
-        lng: summary.cityLng,
-        zoom: summary.cityZoom,
-        description: summary.cityDescription,
-        isCustom: summary.cityIsCustom,
-      },
-      stats: {
-        totalSegmentsBuilt: Math.max(0, Math.floor(state.stats?.totalSegmentsBuilt || 0)),
-        totalOsmEdgesBuilt: Math.max(0, Math.floor(state.stats?.totalOsmEdgesBuilt || 0)),
-        connectedOsmNodes: Math.max(0, Math.floor(state.stats?.connectedOsmNodes || 0)),
-        totalScaledNodes: Math.max(0, Math.floor(state.stats?.totalScaledNodes || 0)),
-        totalLinesCompleted: 0,
-        totalTownsCompleted: 0,
-        totalClicks: Math.max(0, Math.floor(state.stats?.totalClicks || 0)),
-        mapped1to1Km: clampFinite(state.stats?.mapped1to1Km, 0, 0),
-        totalNetworkKm: clampFinite(state.stats?.totalNetworkKm, 0, 0),
-        prestigeCount: 0,
-      },
-      settings: {
-        soundEnabled: Boolean(state.settings?.soundEnabled ?? true),
-        mapTileLayer:
-          state.settings?.mapTileLayer === 'osm' || state.settings?.mapTileLayer === 'satellite'
-            ? state.settings.mapTileLayer
-            : 'dark',
-      },
-      skillsMap,
-      unlockedAchievementIds,
-      loadedOsmChunks,
-      loadedOsmRegions,
-      pendingSeedRegionIds,
-      completedOsmWays,
-      regions,
-      customBridgeEdges,
-      minigames: sanitizedMinigames,
-    },
+    coreFields,
     graphChunks,
   };
 }
@@ -674,6 +1444,7 @@ export function rehydrateGameStateFromCloudPayload(
     isIsolated: Boolean(r.isIsolated),
     isKnownIsland: Boolean(r.isKnownIsland),
     totalNodeCount: r.totalNodeCount || undefined,
+    hasRealOsmBoundary: false,
   }));
 
   const customBridgeEdges: OsmEdge[] = (core.customBridgeEdges || []).map((e) => ({
@@ -779,14 +1550,44 @@ export function applyRestoredGraphMarks(
   });
 
   if (!nodesChanged && !edgesChanged) {
+    const minNodes = Math.max(state.stats.connectedOsmNodes, connectedNodeIds.size);
+    const minEdges = Math.max(state.stats.totalOsmEdgesBuilt, builtEdgeIds.size);
+    if (minNodes !== state.stats.connectedOsmNodes || minEdges !== state.stats.totalOsmEdgesBuilt) {
+      return {
+        ...state,
+        stats: {
+          ...state.stats,
+          connectedOsmNodes: minNodes,
+          totalOsmEdgesBuilt: minEdges,
+        },
+      };
+    }
     return state;
   }
 
-  return scopeGameStateToStartingCity({
+  const nextState: GameState = {
     ...state,
     osmNodes: nextNodes,
     osmEdges: nextEdges,
-  });
+  };
+
+  const evaluated =
+    state.skills.length > 0 && state.provincialRegions.length > 0
+      ? evaluateLinesAndAchievements(nextState).newState
+      : scopeGameStateToStartingCity(nextState);
+
+  const { unhydratedNodes, unhydratedEdges } = countUnhydratedGraphMarks(evaluated, marks);
+  if (unhydratedNodes > 0 || unhydratedEdges > 0) {
+    return {
+      ...evaluated,
+      stats: {
+        ...evaluated.stats,
+        connectedOsmNodes: Math.max(evaluated.stats.connectedOsmNodes, connectedNodeIds.size),
+        totalOsmEdgesBuilt: Math.max(evaluated.stats.totalOsmEdgesBuilt, builtEdgeIds.size),
+      },
+    };
+  }
+  return evaluated;
 }
 
 export function mergeSlotSummaries(

@@ -7,6 +7,7 @@ import {
   getRegionProgressStats,
   getRegionUnlockCost,
 } from '../game/rules';
+import { formatMoneyCompact } from '../game/format';
 
 interface PrestigePanelProps {
   gameState: GameState;
@@ -161,7 +162,7 @@ export const PrestigePanel: React.FC<PrestigePanelProps> = ({
                 {unlockedRegions.length} / {regions.length}
               </div>
               <div className="text-[11px] text-slate-500 mt-0.5 font-mono-numbers tabular-nums">
-                보유 자금 ${Math.floor(gameState.capital).toLocaleString()}
+                보유 자금 {formatMoneyCompact(gameState.capital)}
               </div>
             </div>
           </div>
@@ -325,7 +326,7 @@ export const PrestigePanel: React.FC<PrestigePanelProps> = ({
                           ) : (
                             <>
                               <Unlock className="w-3.5 h-3.5" />
-                              <span>잠금 해제 (${cost.toLocaleString()})</span>
+                              <span>잠금 해제 ({formatMoneyCompact(cost)})</span>
                             </>
                           )}
                         </button>

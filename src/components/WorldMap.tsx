@@ -17,7 +17,7 @@ import {
   Unlock,
   X,
 } from 'lucide-react';
-import { GameState, ProvincialRegion } from '../game/types';
+import { GameState, OsmEdge, ProvincialRegion } from '../game/types';
 import {
   calculateMultipliers,
   computeOsmFrontierDistancesForState,
@@ -34,18 +34,34 @@ import {
   getOsmNodeMode,
   getReachableOsmNodeSet,
   getRegionUnlockCost,
+  getUnseededIslandNodeIds,
   isNodeInUnlockedRegion,
-  isNodeInUnseededModeInUnlockedRegion,
+  isPointInRegionBoundary,
+  MAX_OSM_FRONTIER_DISTANCE,
   resolveCompatibleOsmMode,
   resolveProximityBridgeInfo,
 } from '../game/rules';
 import { haversineKm } from '../game/osmService';
+import { formatMoneyCompact } from '../game/format';
+import {
+  buildSimplifiedOverviewCurves,
+  buildSkeletonGeoJsonFeatures,
+  BuiltSkeletonTuple,
+  isEdgeInViewport,
+  isNodeInViewport,
+  OVERVIEW_ZOOM_THRESHOLD,
+  ViewportBounds,
+} from '../game/osmOverview';
 
 interface WorldMapProps {
   gameState: GameState;
   flyToTarget: { lat: number; lng: number; zoom: number; ts: number } | null;
+  builtSkeleton?: BuiltSkeletonTuple[];
+  loadingProgress?: { active: boolean; percent: number; label: string } | null;
   isLoadingOsm?: boolean;
   onReloadOsm?: () => void;
+  onLoadOsmChunk?: (lat: number, lng: number) => void;
+  onViewportChange?: (bounds: ViewportBounds, zoom: number) => void;
   onConnectOsmPath: (fromId: string, toId: string) => void;
   onSelectIsolatedSeed?: (nodeId: string) => void;
   onUnlockRegion?: (regionId: string) => void;
@@ -70,12 +86,29 @@ function toGlobeZoom(leafletZoom: number): number {
   return Math.max(1.2, Math.min(18.5, leafletZoom - 1));
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+const edgeLonLatCache = new WeakMap<OsmEdge, number[][]>();
+
+function getEdgeLonLatCoords(edge: OsmEdge): number[][] {
+  let cached = edgeLonLatCache.get(edge);
+  if (!cached) {
+    cached = edge.coordinates.map(([lat, lng]) => [lng, lat]);
+    edgeLonLatCache.set(edge, cached);
+  }
+  return cached;
+}
+
+function countAffordableAtOrBelow(sortedCosts: number[], capital: number): number {
+  let lo = 0;
+  let hi = sortedCosts.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (sortedCosts[mid] <= capital) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
 }
 
 function buildRegionPolygonGeometry(
@@ -145,8 +178,12 @@ function getSafeRegionLabelAnchor(
 export const WorldMap: React.FC<WorldMapProps> = ({
   gameState,
   flyToTarget,
+  builtSkeleton,
+  loadingProgress,
   isLoadingOsm = false,
   onReloadOsm,
+  onLoadOsmChunk,
+  onViewportChange,
   onConnectOsmPath,
   onSelectIsolatedSeed,
   onUnlockRegion,
@@ -157,15 +194,18 @@ export const WorldMap: React.FC<WorldMapProps> = ({
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<maplibregl.Map | null>(null);
   const styleReadyRef = useRef(false);
-  const popupRef = useRef<maplibregl.Popup | null>(null);
   const regionMarkersRef = useRef<maplibregl.Marker[]>([]);
 
   const regionsGeoJsonRef = useRef<GeoJsonData>(EMPTY_FC);
+  const overviewEdgesGeoJsonRef = useRef<GeoJsonData>(EMPTY_FC);
   const builtEdgesGeoJsonRef = useRef<GeoJsonData>(EMPTY_FC);
   const frontierEdgesGeoJsonRef = useRef<GeoJsonData>(EMPTY_FC);
   const previewGeoJsonRef = useRef<GeoJsonData>(EMPTY_FC);
   const nodesGeoJsonRef = useRef<GeoJsonData>(EMPTY_FC);
   const hoverNodeGeoJsonRef = useRef<GeoJsonData>(EMPTY_FC);
+
+  const [viewportBounds, setViewportBounds] = useState<ViewportBounds | null>(null);
+  const [isOverviewZoom, setIsOverviewZoom] = useState(false);
 
   const [tileType, setTileType] = useState<'dark' | 'osm' | 'satellite'>('dark');
   const tileTypeRef = useRef<'dark' | 'osm' | 'satellite'>('dark');
@@ -187,12 +227,24 @@ export const WorldMap: React.FC<WorldMapProps> = ({
 
   const osmNodeIndex = useMemo(() => {
     const byId = new Map<string, (typeof gameState.osmNodes)[number]>();
-    let hasAnyConnected = false;
-    for (const n of gameState.osmNodes || []) {
+    let connectedCount = 0;
+    let connectedHash = 0;
+    const nodes = gameState.osmNodes || [];
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
       byId.set(n.id, n);
-      if (n.connected) hasAnyConnected = true;
+      if (n.connected) {
+        connectedCount++;
+        for (let j = 0; j < n.id.length; j++) {
+          connectedHash = (connectedHash * 31 + n.id.charCodeAt(j)) | 0;
+        }
+      }
     }
-    return { byId, hasAnyConnected };
+    return {
+      byId,
+      hasAnyConnected: connectedCount > 0,
+      connectedSig: `${connectedCount}:${connectedHash}`,
+    };
   }, [gameState.osmNodes]);
 
   const osmNodeIndexRef = useRef(osmNodeIndex);
@@ -212,11 +264,15 @@ export const WorldMap: React.FC<WorldMapProps> = ({
   );
 
   const callbacksRef = useRef({
+    onLoadOsmChunk,
+    onViewportChange,
     onConnectOsmPath,
     onSelectIsolatedSeed,
     onUnlockRegion,
   });
   callbacksRef.current = {
+    onLoadOsmChunk,
+    onViewportChange,
     onConnectOsmPath,
     onSelectIsolatedSeed,
     onUnlockRegion,
@@ -228,7 +284,6 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     if (pendingSeedCount > prevPendingCountRef.current) {
       setSelectedOsmNodeId(null);
       setHoverOsmNodeId(null);
-      popupRef.current?.remove();
     }
     prevPendingCountRef.current = pendingSeedCount;
   }, [pendingSeedCount]);
@@ -253,7 +308,6 @@ export const WorldMap: React.FC<WorldMapProps> = ({
   const syncSourceData = (sourceId: string, data: GeoJsonData) => {
     const map = mapInstanceRef.current;
     if (!map) return;
-    if (!styleReadyRef.current && !map.isStyleLoaded()) return;
     const src = map.getSource(sourceId) as maplibregl.GeoJSONSource | undefined;
     if (src) {
       src.setData(data);
@@ -317,6 +371,10 @@ export const WorldMap: React.FC<WorldMapProps> = ({
             attribution: 'Tiles &copy; Esri World Imagery',
           },
           'regions-overlay': {
+            type: 'geojson',
+            data: EMPTY_FC,
+          },
+          'osm-edges-overview': {
             type: 'geojson',
             data: EMPTY_FC,
           },
@@ -403,10 +461,65 @@ export const WorldMap: React.FC<WorldMapProps> = ({
               'line-dasharray': [4, 3],
             },
           },
+          // Overview Zoom (< 11.5): simplified smooth curved polylines (no sub-pixel dot clutter)
+          {
+            id: 'osm-overview-unbuilt-road',
+            type: 'line',
+            source: 'osm-edges-overview',
+            maxzoom: OVERVIEW_ZOOM_THRESHOLD,
+            filter: ['all', ['==', ['get', 'built'], false], ['==', ['get', 'mode'], 'road']],
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+            paint: {
+              'line-color': '#f59e0b',
+              'line-width': ['interpolate', ['linear'], ['zoom'], 2, 1.0, 8, 1.7, 11.4, 2.5],
+              'line-opacity': ['case', ['==', ['get', 'tier'], 'major'], 0.58, 0.34],
+            },
+          },
+          {
+            id: 'osm-overview-unbuilt-rail',
+            type: 'line',
+            source: 'osm-edges-overview',
+            maxzoom: OVERVIEW_ZOOM_THRESHOLD,
+            filter: ['all', ['==', ['get', 'built'], false], ['==', ['get', 'mode'], 'rail']],
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+            paint: {
+              'line-color': '#22d3ee',
+              'line-width': ['interpolate', ['linear'], ['zoom'], 2, 1.1, 8, 2.0, 11.4, 2.7],
+              'line-opacity': 0.65,
+            },
+          },
+          {
+            id: 'osm-overview-built-casing',
+            type: 'line',
+            source: 'osm-edges-overview',
+            maxzoom: OVERVIEW_ZOOM_THRESHOLD,
+            filter: ['==', ['get', 'built'], true],
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+            paint: {
+              'line-color': ['case', ['==', ['get', 'mode'], 'rail'], '#082f49', '#291a05'],
+              'line-width': ['interpolate', ['linear'], ['zoom'], 2, 2.8, 8, 4.4, 11.4, 6.2],
+              'line-opacity': 0.9,
+            },
+          },
+          {
+            id: 'osm-overview-built-surface',
+            type: 'line',
+            source: 'osm-edges-overview',
+            maxzoom: OVERVIEW_ZOOM_THRESHOLD,
+            filter: ['==', ['get', 'built'], true],
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+            paint: {
+              'line-color': ['case', ['==', ['get', 'mode'], 'rail'], '#22d3ee', '#f59e0b'],
+              'line-width': ['interpolate', ['linear'], ['zoom'], 2, 1.6, 8, 2.7, 11.4, 3.8],
+              'line-opacity': 0.98,
+            },
+          },
+          // Street Zoom (>= 11.5): detailed clickable nodes & frontier edges
           {
             id: 'osm-edges-unbuilt-road',
             type: 'line',
             source: 'osm-edges-frontier',
+            minzoom: OVERVIEW_ZOOM_THRESHOLD,
             filter: ['==', ['get', 'mode'], 'road'],
             layout: { 'line-cap': 'butt', 'line-join': 'round' },
             paint: {
@@ -420,6 +533,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
             id: 'osm-edges-unbuilt-rail',
             type: 'line',
             source: 'osm-edges-frontier',
+            minzoom: OVERVIEW_ZOOM_THRESHOLD,
             filter: ['==', ['get', 'mode'], 'rail'],
             layout: { 'line-cap': 'butt', 'line-join': 'round' },
             paint: {
@@ -433,6 +547,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
             id: 'osm-edges-built-casing',
             type: 'line',
             source: 'osm-edges-built',
+            minzoom: OVERVIEW_ZOOM_THRESHOLD,
             layout: { 'line-cap': 'round', 'line-join': 'round' },
             paint: {
               'line-color': ['case', ['==', ['get', 'mode'], 'rail'], '#082f49', '#291a05'],
@@ -444,6 +559,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
             id: 'osm-edges-built-surface',
             type: 'line',
             source: 'osm-edges-built',
+            minzoom: OVERVIEW_ZOOM_THRESHOLD,
             layout: { 'line-cap': 'round', 'line-join': 'round' },
             paint: {
               'line-color': ['case', ['==', ['get', 'mode'], 'rail'], '#22d3ee', '#f59e0b'],
@@ -455,6 +571,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
             id: 'osm-preview-solid',
             type: 'line',
             source: 'osm-preview',
+            minzoom: OVERVIEW_ZOOM_THRESHOLD,
             filter: ['==', ['get', 'dashed'], false],
             layout: { 'line-cap': 'round', 'line-join': 'round' },
             paint: {
@@ -467,6 +584,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
             id: 'osm-preview-dashed',
             type: 'line',
             source: 'osm-preview',
+            minzoom: OVERVIEW_ZOOM_THRESHOLD,
             filter: ['==', ['get', 'dashed'], true],
             layout: { 'line-cap': 'butt', 'line-join': 'round' },
             paint: {
@@ -480,6 +598,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
             id: 'osm-nodes-halo',
             type: 'circle',
             source: 'osm-nodes',
+            minzoom: OVERVIEW_ZOOM_THRESHOLD,
             filter: ['all', ['==', ['get', 'hideDot'], false], ['!=', ['get', 'mode'], 'road']],
             paint: {
               'circle-radius': ['get', 'haloRadius'],
@@ -495,6 +614,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
             id: 'osm-nodes-circle',
             type: 'circle',
             source: 'osm-nodes',
+            minzoom: OVERVIEW_ZOOM_THRESHOLD,
             paint: {
               'circle-radius': ['get', 'radius'],
               'circle-color': ['get', 'fillColor'],
@@ -509,6 +629,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
             id: 'osm-nodes-hover-halo',
             type: 'circle',
             source: 'osm-hover-node',
+            minzoom: OVERVIEW_ZOOM_THRESHOLD,
             filter: ['!=', ['get', 'mode'], 'road'],
             paint: {
               'circle-radius': ['get', 'haloRadius'],
@@ -524,6 +645,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
             id: 'osm-nodes-hover-circle',
             type: 'circle',
             source: 'osm-hover-node',
+            minzoom: OVERVIEW_ZOOM_THRESHOLD,
             paint: {
               'circle-radius': ['get', 'radius'],
               'circle-color': ['get', 'fillColor'],
@@ -549,16 +671,14 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     );
     map.addControl(new maplibregl.GlobeControl(), 'bottom-right');
 
-    const popup = new maplibregl.Popup({
-      closeButton: false,
-      closeOnClick: false,
-      offset: 12,
-      className: 'terraline-popup',
-    });
-    popupRef.current = popup;
-
     const queryNearestOsmNode = (point: maplibregl.Point) => {
-      if (!styleReadyRef.current || !map.getLayer('osm-nodes-circle')) return null;
+      if (
+        !styleReadyRef.current ||
+        !map.getLayer('osm-nodes-circle') ||
+        map.getZoom() < OVERVIEW_ZOOM_THRESHOLD
+      ) {
+        return null;
+      }
       const tol = isTouchRef.current ? 16 : 7;
       const bbox: [maplibregl.PointLike, maplibregl.PointLike] = [
         [point.x - tol, point.y - tol],
@@ -584,65 +704,51 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       return best;
     };
 
-    const buildNodeTooltipHtml = (props: Record<string, unknown>) => {
-      const mode = String(props.mode || 'road');
-      const label = escapeHtml(String(props.label || 'OSM 노드'));
-      const connected = Boolean(props.connected);
-      const frontierDist = Number(props.frontierDist || 0);
-      const isPendingSeed = Boolean(props.isPendingSeed);
-      const isSelected = Boolean(props.isSelected);
-      const isCompatible = Boolean(props.isCompatible);
-      const isReachable = Boolean(props.isReachable);
-      const activeAnchor = selectedOsmNodeIdRef.current;
-      const nodeIdx = osmNodeIndexRef.current;
-      const hasAnyConnected = nodeIdx.hasAnyConnected;
-      const anchorConnected = activeAnchor
-        ? Boolean(nodeIdx.byId.get(activeAnchor)?.connected)
-        : false;
-      const bothUnconnected = Boolean(
-        activeAnchor && !isSelected && hasAnyConnected && !anchorConnected && !connected
-      );
-
-      const modeBadge = isPendingSeed
-        ? mode === 'mixed'
-          ? '<span style="color:#c084fc;font-weight:700;">[환승 출발 후보]</span>'
-          : mode === 'rail'
-          ? '<span style="color:#22d3ee;font-weight:700;">[철도 출발 후보]</span>'
-          : '<span style="color:#fbbf24;font-weight:700;">[도로 출발 후보]</span>'
-        : mode === 'mixed'
-        ? '<span style="color:#c084fc;font-weight:700;">[도로·철도 환승]</span>'
-        : mode === 'rail'
-        ? '<span style="color:#22d3ee;font-weight:700;">[철도 노드]</span>'
-        : '<span style="color:#fbbf24;font-weight:700;">[도로 노드]</span>';
-
-      const distTag =
-        !connected && !isPendingSeed && frontierDist > 0
-          ? ` <span style="color:#94a3b8;">(개척 거리 d=${frontierDist})</span>`
-          : '';
-
-      const hint = isPendingSeed
-        ? `${isTouchRef.current ? '터치' : '클릭'}하여 이 지점을 첫 출발 노드로 지정하세요`
-        : isSelected
-        ? '시점 노드 선택됨 · 연결할 노드를 클릭하세요'
-        : bothUnconnected
-        ? '클릭하여 시점 변경 (연결된 노선과만 이어집니다)'
-        : activeAnchor && !isCompatible
-        ? '<span style="color:#fb7185;font-weight:700;">도로 ↔ 철도 연결 불가</span> (같은 유형 노드를 선택하세요)'
-        : activeAnchor && !isReachable
-        ? '<span style="color:#fb7185;font-weight:700;">별개 레인·거리 초과</span> (직접 교차 연결 불가)'
-        : activeAnchor
-        ? '클릭 시 실제 노선을 따라 여기까지 한 번에 연결'
-        : connected
-        ? '연결 완료 지점 · 클릭하여 미연결 지선 이어가기'
-        : '클릭하여 시점 선택';
-
-      return `<div style="font-size:11px;line-height:1.4;">${modeBadge} <strong>${label}</strong>${distTag}<br/>${hint}</div>`;
+    const computePaddedViewportBounds = (): ViewportBounds => {
+      const b = map.getBounds();
+      const sw = b.getSouthWest();
+      const ne = b.getNorthEast();
+      const pad = 0.008;
+      const spanLng = Math.abs(ne.lng - sw.lng);
+      const minLng = spanLng > 340 ? -180 : Math.max(-180, sw.lng - pad);
+      const maxLng = spanLng > 340 ? 180 : Math.min(180, ne.lng + pad);
+      return {
+        minLat: Math.max(-85, sw.lat - pad),
+        maxLat: Math.min(85, ne.lat + pad),
+        minLng,
+        maxLng,
+      };
     };
 
     const syncGlobeOverviewAttr = () => {
+      const z = map.getZoom();
       if (mapContainerRef.current) {
-        mapContainerRef.current.dataset.globeOverview = map.getZoom() < 8.5 ? 'true' : 'false';
+        mapContainerRef.current.dataset.globeOverview = z < 8.5 ? 'true' : 'false';
+        mapContainerRef.current.dataset.lodOverview =
+          z < OVERVIEW_ZOOM_THRESHOLD ? 'true' : 'false';
       }
+      setIsOverviewZoom((prev) => {
+        const next = z < OVERVIEW_ZOOM_THRESHOLD;
+        return prev === next ? prev : next;
+      });
+    };
+
+    const syncViewportState = () => {
+      const bounds = computePaddedViewportBounds();
+      const z = map.getZoom();
+      setViewportBounds((prev) => {
+        if (
+          prev &&
+          Math.abs(prev.minLat - bounds.minLat) < 0.0015 &&
+          Math.abs(prev.maxLat - bounds.maxLat) < 0.0015 &&
+          Math.abs(prev.minLng - bounds.minLng) < 0.0015 &&
+          Math.abs(prev.maxLng - bounds.maxLng) < 0.0015
+        ) {
+          return prev;
+        }
+        return bounds;
+      });
+      callbacksRef.current.onViewportChange?.(bounds, z);
     };
 
     const syncAllSources = () => {
@@ -650,9 +756,15 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       map.setProjection({ type: 'globe' });
       applyTileVisibility(map, tileTypeRef.current);
       syncGlobeOverviewAttr();
+      syncViewportState();
 
       const regionsSrc = map.getSource('regions-overlay') as maplibregl.GeoJSONSource | undefined;
       regionsSrc?.setData(regionsGeoJsonRef.current);
+
+      const overviewEdgesSrc = map.getSource('osm-edges-overview') as
+        | maplibregl.GeoJSONSource
+        | undefined;
+      overviewEdgesSrc?.setData(overviewEdgesGeoJsonRef.current);
 
       const builtEdgesSrc = map.getSource('osm-edges-built') as maplibregl.GeoJSONSource | undefined;
       builtEdgesSrc?.setData(builtEdgesGeoJsonRef.current);
@@ -671,7 +783,8 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     };
 
     map.on('style.load', syncAllSources);
-    if (map.isStyleLoaded()) {
+    map.on('load', syncAllSources);
+    if (map.isStyleLoaded() || Boolean(map.getSource('osm-edges-built'))) {
       syncAllSources();
     }
 
@@ -701,7 +814,6 @@ export const WorldMap: React.FC<WorldMapProps> = ({
           if (hoverOsmNodeIdRef.current !== null) {
             setHoverOsmNodeId(null);
           }
-          popup.remove();
           return;
         }
 
@@ -713,8 +825,6 @@ export const WorldMap: React.FC<WorldMapProps> = ({
         if (hoverOsmNodeIdRef.current !== nodeId) {
           setHoverOsmNodeId(nodeId);
         }
-        const coords = hit.geometry.coordinates as [number, number];
-        popup.setLngLat(coords).setHTML(buildNodeTooltipHtml(props)).addTo(map);
       });
     });
 
@@ -729,7 +839,6 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       if (hoverOsmNodeIdRef.current !== null) {
         setHoverOsmNodeId(null);
       }
-      popup.remove();
     });
 
     map.on('click', (ev) => {
@@ -757,7 +866,6 @@ export const WorldMap: React.FC<WorldMapProps> = ({
         callbacksRef.current.onSelectIsolatedSeed?.(nodeId);
         setSelectedOsmNodeId(null);
         setHoverOsmNodeId(null);
-        popup.remove();
         return;
       }
 
@@ -767,7 +875,6 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       } else if (currentStart === nodeId) {
         setSelectedOsmNodeId(null);
         setHoverOsmNodeId(null);
-        popup.remove();
       } else {
         const nodeIdx = osmNodeIndexRef.current;
         const startNode = nodeIdx.byId.get(currentStart);
@@ -795,13 +902,49 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       if (selectedOsmNodeIdRef.current) {
         setSelectedOsmNodeId(null);
         setHoverOsmNodeId(null);
-        popup.remove();
       }
     });
+
+    let moveEndTimer: ReturnType<typeof setTimeout> | null = null;
+    const onMoveEnd = () => {
+      syncGlobeOverviewAttr();
+      if (moveEndTimer) clearTimeout(moveEndTimer);
+      moveEndTimer = setTimeout(() => {
+        const curMap = mapInstanceRef.current;
+        if (!curMap) return;
+        syncViewportState();
+        if (!callbacksRef.current.onLoadOsmChunk) return;
+        if (curMap.getZoom() < OVERVIEW_ZOOM_THRESHOLD) return;
+        const center = curMap.getCenter();
+        const gs = gameStateRef.current;
+        const inUnlocked = (gs.provincialRegions || []).some(
+          (r) => r.unlocked && isPointInRegionBoundary(center.lat, center.lng, r, 0.002)
+        );
+        if (!inUnlocked) return;
+        let nearbyCount = 0;
+        for (const n of gs.osmNodes || []) {
+          if (
+            Math.abs(n.lat - center.lat) <= 0.008 &&
+            Math.abs(n.lng - center.lng) <= 0.008
+          ) {
+            nearbyCount++;
+            if (nearbyCount >= 6) break;
+          }
+        }
+        if (nearbyCount < 6) {
+          callbacksRef.current.onLoadOsmChunk(center.lat, center.lng);
+        }
+      }, 160);
+    };
+    map.on('moveend', onMoveEnd);
 
     mapInstanceRef.current = map;
 
     return () => {
+      if (moveEndTimer) {
+        clearTimeout(moveEndTimer);
+        moveEndTimer = null;
+      }
       if (hoverRafId !== 0) {
         cancelAnimationFrame(hoverRafId);
         hoverRafId = 0;
@@ -809,7 +952,6 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       styleReadyRef.current = false;
       regionMarkersRef.current.forEach((m) => m.remove());
       regionMarkersRef.current = [];
-      popup.remove();
       map.remove();
       mapInstanceRef.current = null;
     };
@@ -821,7 +963,6 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       if (e.key === 'Escape') {
         setSelectedOsmNodeId(null);
         setHoverOsmNodeId(null);
-        popupRef.current?.remove();
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -857,14 +998,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     [gameState.provincialRegions, pendingSeedSet]
   );
 
-  const connectedOsmNodeKey = useMemo(
-    () =>
-      (gameState.osmNodes || [])
-        .filter((n) => n.connected)
-        .map((n) => n.id)
-        .join('|'),
-    [gameState.osmNodes]
-  );
+  const connectedOsmNodeKey = osmNodeIndex.connectedSig;
 
   const edgeTopologyKey = `${(gameState.osmEdges || []).length}:${gameState.stats.totalOsmEdgesBuilt}`;
 
@@ -874,6 +1008,18 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       connectedOsmNodeKey,
       edgeTopologyKey,
       gameState.skills,
+      gameState.provincialRegions,
+      gameState.pendingSeedRegionIds,
+    ]
+  );
+
+  const unseededIslandNodeIds = useMemo(
+    () => getUnseededIslandNodeIds(gameState),
+    [
+      connectedOsmNodeKey,
+      edgeTopologyKey,
+      gameState.osmNodes,
+      gameState.osmEdges,
       gameState.provincialRegions,
       gameState.pendingSeedRegionIds,
     ]
@@ -1024,7 +1170,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
             properties: { dashed: false, color: previewColor, width: 6.5 },
             geometry: {
               type: 'LineString',
-              coordinates: edge.coordinates.map(([lat, lng]) => [lng, lat]),
+              coordinates: getEdgeLonLatCoords(edge),
             },
           });
         });
@@ -1055,7 +1201,17 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     syncSourceData('osm-preview', fc);
   }, [previewResult, previewAffordable, osmEdgeById]);
 
-  // Update Built OSM Road/Rail Edges GeoJSON (never triggered by capital ticks or hover)
+  // Update Built OSM Road/Rail Edges + Overview Zoom Simplified Curves GeoJSON (never triggered by capital ticks or hover)
+  const unlockedRegionsKey = useMemo(
+    () =>
+      (gameState.provincialRegions || [])
+        .filter((r) => r.unlocked)
+        .map((r) => r.regionId)
+        .sort()
+        .join(','),
+    [gameState.provincialRegions]
+  );
+
   useEffect(() => {
     const builtEdges = getBuiltOsmEdgesForState(gameState);
     const features: Array<Record<string, unknown>> = [];
@@ -1080,24 +1236,76 @@ export const WorldMap: React.FC<WorldMapProps> = ({
         },
         geometry: {
           type: 'LineString',
-          coordinates: edge.coordinates.map(([lat, lng]) => [lng, lat]),
+          coordinates: getEdgeLonLatCoords(edge),
         },
       });
+    }
+
+    // Immediate Built-First Skeleton render before full OSM graph hydrates from IndexedDB/Overpass
+    if (features.length === 0 && (gameState.osmEdges || []).length === 0 && builtSkeleton && builtSkeleton.length > 0) {
+      const skFeatures = buildSkeletonGeoJsonFeatures(builtSkeleton);
+      const fcSk = { type: 'FeatureCollection', features: skFeatures } as unknown as GeoJsonData;
+      builtEdgesGeoJsonRef.current = fcSk;
+      overviewEdgesGeoJsonRef.current = fcSk;
+      syncSourceData('osm-edges-built', fcSk);
+      syncSourceData('osm-edges-overview', fcSk);
+      return;
     }
 
     const fc = { type: 'FeatureCollection', features } as unknown as GeoJsonData;
     builtEdgesGeoJsonRef.current = fc;
     syncSourceData('osm-edges-built', fc);
+
+    // Build simplified continuous curves for Overview Zoom (< 11.5)
+    const unlockedEdges = (gameState.osmEdges || []).filter((edge) => {
+      if (edge.coordinates.length < 2) return false;
+      if (edge.built) return true;
+      const nFrom = osmNodeIndex.byId.get(edge.fromNodeId);
+      const nTo = osmNodeIndex.byId.get(edge.toNodeId);
+      return Boolean(
+        nFrom &&
+          nTo &&
+          isNodeInUnlockedRegion(gameState, nFrom) &&
+          isNodeInUnlockedRegion(gameState, nTo)
+      );
+    });
+
+    const curves = buildSimplifiedOverviewCurves(unlockedEdges, {
+      epsilonDeg: 0.00042,
+      maxUnbuiltCurves: 650,
+    });
+    const overviewFeatures = curves.map((curve) => ({
+      type: 'Feature',
+      properties: {
+        id: curve.id,
+        mode: curve.mode,
+        built: curve.built,
+        tier: curve.tier,
+      },
+      geometry: {
+        type: 'LineString',
+        coordinates: curve.coordinates,
+      },
+    }));
+
+    const fcOverview = {
+      type: 'FeatureCollection',
+      features: overviewFeatures,
+    } as unknown as GeoJsonData;
+    overviewEdgesGeoJsonRef.current = fcOverview;
+    syncSourceData('osm-edges-overview', fcOverview);
   }, [
     edgeTopologyKey,
+    unlockedRegionsKey,
     osmNodeIndex,
+    builtSkeleton,
     gameState.osmNodes,
     gameState.osmEdges,
     gameState.provincialRegions,
   ]);
 
   // Pre-slice visible unbuilt frontier edges so capital ticks never touch all 15,000 edges
-  const frontierEdgeEntries = useMemo(() => {
+  const frontierEdgePack = useMemo(() => {
     const mults = calculateMultipliers(gameState);
     const hasAnyConnected = osmNodeIndex.hasAnyConnected;
     const rawEdges =
@@ -1126,7 +1334,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
             return true;
           });
 
-    return rawEdges.map((edge) => {
+    const entries = rawEdges.map((edge) => {
       const nFrom = osmNodeIndex.byId.get(edge.fromNodeId);
       const nTo = osmNodeIndex.byId.get(edge.toNodeId);
       const inPendingRegion = Boolean(
@@ -1136,10 +1344,15 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       const dFrom = frontierDistances.get(edge.fromNodeId);
       const dTo = frontierDistances.get(edge.toNodeId);
       const maxDist =
-        dFrom !== undefined && dTo !== undefined ? Math.max(dFrom, dTo, 1) : 1;
+        dFrom !== undefined && dTo !== undefined
+          ? Math.max(dFrom, dTo, 1)
+          : MAX_OSM_FRONTIER_DISTANCE;
       const cost = getOsmEdgeBuildCost(edge, mults);
       return { edge, inPendingRegion, maxDist, cost };
     });
+
+    const sortedCosts = entries.map((e) => e.cost).sort((a, b) => a - b);
+    return { entries, sortedCosts };
   }, [
     osmNodeIndex,
     frontierDistances,
@@ -1151,19 +1364,24 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     gameState.provincialRegions,
   ]);
 
-  const frontierAffordSig = frontierEdgeEntries
-    .map((entry) => (gameState.capital >= entry.cost ? '1' : '0'))
-    .join('');
+  const frontierAffordableCount = countAffordableAtOrBelow(
+    frontierEdgePack.sortedCosts,
+    gameState.capital
+  );
+  const frontierAffordSig = `${frontierEdgePack.entries.length}:${frontierAffordableCount}`;
 
-  // Update Unbuilt Frontier Edges GeoJSON ONLY when visible frontier topology or edge affordability actually changes
+  // Update Unbuilt Frontier Edges GeoJSON (viewport-culled in Street Zoom; skipped while Overview Zoom curves handle display)
   useEffect(() => {
+    if (isOverviewZoom) return;
     const hasAnyConnected = osmNodeIndex.hasAnyConnected;
     const features: Array<Record<string, unknown>> = [];
+    const curCapital = gameStateRef.current.capital;
 
-    for (const entry of frontierEdgeEntries) {
+    for (const entry of frontierEdgePack.entries) {
       const { edge, inPendingRegion, maxDist, cost } = entry;
       if (edge.coordinates.length < 2) continue;
-      const canAfford = gameState.capital >= cost;
+      if (viewportBounds && !isEdgeInViewport(edge, viewportBounds)) continue;
+      const canAfford = curCapital >= cost;
       const edgeOpacity =
         hasAnyConnected && !inPendingRegion
           ? getFrontierEdgeOpacity(maxDist, canAfford)
@@ -1180,7 +1398,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
         },
         geometry: {
           type: 'LineString',
-          coordinates: edge.coordinates.map(([lat, lng]) => [lng, lat]),
+          coordinates: getEdgeLonLatCoords(edge),
         },
       });
     }
@@ -1188,10 +1406,11 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     const fc = { type: 'FeatureCollection', features } as unknown as GeoJsonData;
     frontierEdgesGeoJsonRef.current = fc;
     syncSourceData('osm-edges-frontier', fc);
-  }, [frontierEdgeEntries, frontierAffordSig, osmNodeIndex.hasAnyConnected]);
+  }, [frontierEdgePack, frontierAffordSig, osmNodeIndex.hasAnyConnected, viewportBounds, isOverviewZoom]);
 
-  // Update Atomic OpenStreetMap Nodes GeoJSON (only iterates frontier d<=5 when active; never triggered by hover)
+  // Update Atomic OpenStreetMap Nodes GeoJSON (viewport-culled when zoomed into Street Zoom >= 11.5)
   useEffect(() => {
+    if (isOverviewZoom) return;
     const hasAnyConnected = osmNodeIndex.hasAnyConnected;
     const hasStartingPending = pendingRegionList.some((r) => r.isStartingRegion);
 
@@ -1203,6 +1422,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       connected: boolean;
     }) => {
       if (n.connected) return false;
+      if (n.id && unseededIslandNodeIds.has(n.id)) return true;
       if (pendingSeedSet.size > 0) {
         if (n.regionId && pendingSeedSet.has(n.regionId)) return true;
         if (!n.regionId && !hasAnyConnected && hasStartingPending) {
@@ -1220,7 +1440,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
           return true;
         }
       }
-      return Boolean(n.id && isNodeInUnseededModeInUnlockedRegion(gameState, n as any));
+      return false;
     };
 
     const touchBoost = isTouchRef.current ? 1.2 : 0;
@@ -1228,6 +1448,17 @@ export const WorldMap: React.FC<WorldMapProps> = ({
 
     const processNode = (node: (typeof gameState.osmNodes)[number]) => {
       if (!isNodeInUnlockedRegion(gameState, node)) return;
+
+      const isSelected = node.id === selectedOsmNodeId;
+      const keepOutsideViewport =
+        isSelected || Boolean(reachableOsmNodeSet?.has(node.id));
+      if (
+        viewportBounds &&
+        !keepOutsideViewport &&
+        !isNodeInViewport(node.lat, node.lng, viewportBounds)
+      ) {
+        return;
+      }
 
       const isPendingSeed = isPendingSeedNode(node);
       const fDist = frontierDistances.get(node.id);
@@ -1237,7 +1468,6 @@ export const WorldMap: React.FC<WorldMapProps> = ({
 
       const mode = getOsmNodeMode(gameState, node.id);
       const isRail = mode === 'rail';
-      const isSelected = node.id === selectedOsmNodeId;
       const { hasBuiltEdge, hasUnbuiltEdge } = getOsmNodeConnectionFlags(
         gameState,
         node.id,
@@ -1262,7 +1492,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       const dimForSelection =
         !isPendingSeed && Boolean(selectedOsmNodeId) && !isSelected && !canTarget;
 
-      const resolvedDist = node.connected ? 0 : isPendingSeed ? 1 : fDist ?? 1;
+      const resolvedDist = node.connected ? 0 : isPendingSeed ? 1 : fDist ?? MAX_OSM_FRONTIER_DISTANCE;
       const visual = getFrontierVisualStyle(resolvedDist, mode, {
         isSelected,
         isHovered: false,
@@ -1332,16 +1562,18 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     };
 
     if (hasAnyConnected && pendingSeedSet.size === 0) {
-      const processedNodeIds = new Set<string>();
+      const seenNodeIds = new Set<string>();
       for (const nodeId of frontierDistances.keys()) {
         const node = osmNodeIndex.byId.get(nodeId);
         if (node) {
+          seenNodeIds.add(nodeId);
           processNode(node);
-          processedNodeIds.add(node.id);
         }
       }
-      for (const node of gameState.osmNodes || []) {
-        if (!processedNodeIds.has(node.id) && isNodeInUnseededModeInUnlockedRegion(gameState, node)) {
+      for (const nodeId of unseededIslandNodeIds) {
+        if (seenNodeIds.has(nodeId)) continue;
+        const node = osmNodeIndex.byId.get(nodeId);
+        if (node) {
           processNode(node);
         }
       }
@@ -1359,11 +1591,14 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     connectedOsmNodeKey,
     edgeTopologyKey,
     frontierDistances,
+    unseededIslandNodeIds,
     reachableOsmNodeSet,
     selectedOsmNodeId,
     pendingSeedSet,
     pendingRegionList,
     gameState.provincialRegions,
+    viewportBounds,
+    isOverviewZoom,
   ]);
 
   // Update lightweight 0-or-1 feature hover highlight without touching the main osm-nodes source
@@ -1378,22 +1613,22 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     const hasAnyConnected = osmNodeIndex.hasAnyConnected;
     const isPendingSeed =
       !node.connected &&
-      ((pendingSeedSet.size > 0 &&
-        (Boolean(node.regionId && pendingSeedSet.has(node.regionId)) ||
-          (!node.regionId && !hasAnyConnected && pendingRegionList.some((r) => r.isStartingRegion)) ||
-          pendingRegionList.some(
-            (r) =>
-              node.lat >= r.bbox[0] &&
-              node.lat <= r.bbox[2] &&
-              node.lng >= r.bbox[1] &&
-              node.lng <= r.bbox[3]
-          ))) ||
-        isNodeInUnseededModeInUnlockedRegion(gameState, node));
+      (unseededIslandNodeIds.has(node.id) ||
+        (pendingSeedSet.size > 0 &&
+          (Boolean(node.regionId && pendingSeedSet.has(node.regionId)) ||
+            (!node.regionId && !hasAnyConnected && pendingRegionList.some((r) => r.isStartingRegion)) ||
+            pendingRegionList.some(
+              (r) =>
+                node.lat >= r.bbox[0] &&
+                node.lat <= r.bbox[2] &&
+                node.lng >= r.bbox[1] &&
+                node.lng <= r.bbox[3]
+            ))));
 
     const mode = getOsmNodeMode(gameState, node.id);
     const isSelected = node.id === selectedOsmNodeId;
     const fDist = frontierDistances.get(node.id);
-    const resolvedDist = node.connected ? 0 : isPendingSeed ? 1 : fDist ?? 1;
+    const resolvedDist = node.connected ? 0 : isPendingSeed ? 1 : fDist ?? MAX_OSM_FRONTIER_DISTANCE;
     const visual = getFrontierVisualStyle(resolvedDist, mode, {
       isSelected,
       isHovered: true,
@@ -1437,6 +1672,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     selectedOsmNodeId,
     osmNodeIndex,
     frontierDistances,
+    unseededIslandNodeIds,
     pendingSeedSet,
     pendingRegionList,
     gameState.osmNodes,
@@ -1542,7 +1778,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       textSpan.style.fontWeight = '700';
       textSpan.style.fontVariantNumeric = 'tabular-nums';
       textSpan.style.color = canAfford ? '#e0f2fe' : '#fde68a';
-      textSpan.textContent = `${region.regionName} · $${cost.toLocaleString()}`;
+      textSpan.textContent = `${region.regionName} · ${formatMoneyCompact(cost)}`;
       wrapper.appendChild(textSpan);
 
       if (callbacksRef.current.onUnlockRegion) {
@@ -1829,7 +2065,6 @@ export const WorldMap: React.FC<WorldMapProps> = ({
               onClick={() => {
                 setSelectedOsmNodeId(null);
                 setHoverOsmNodeId(null);
-                popupRef.current?.remove();
               }}
               aria-label="노드 선택 취소"
               className="min-h-[38px] px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-slate-200 cursor-pointer shrink-0 flex items-center gap-1"
@@ -1840,8 +2075,8 @@ export const WorldMap: React.FC<WorldMapProps> = ({
           </div>
 
           {previewResult ? (
-            <div className="px-2.5 py-2 rounded-xl bg-slate-900/90 border border-slate-800 flex items-center justify-between text-[11px] font-mono-numbers">
-              <span className="text-slate-300">
+            <div className="px-2.5 py-2 rounded-xl bg-slate-900/90 border border-slate-800 flex items-center justify-between gap-2 text-[11px] font-mono-numbers">
+              <span className="text-slate-300 truncate">
                 {previewResult.kind === 'transfer'
                   ? '특수 환승 직결'
                   : previewResult.kind === 'cross_border'
@@ -1856,13 +2091,13 @@ export const WorldMap: React.FC<WorldMapProps> = ({
                 {previewResult.unbuiltCount}구간
               </span>
               <span
-                className={
+                className={`shrink-0 ${
                   gameState.capital >= previewResult.cost
                     ? 'text-emerald-400 font-bold'
                     : 'text-rose-400 font-bold'
-                }
+                }`}
               >
-                ${previewResult.cost.toLocaleString()}
+                {formatMoneyCompact(previewResult.cost)}
               </span>
             </div>
           ) : (
@@ -1964,15 +2199,42 @@ export const WorldMap: React.FC<WorldMapProps> = ({
             ) : (
               <>
                 <Unlock className="w-3.5 h-3.5" />
-                <span>잠금 해제 (${nextLockedEntry.cost.toLocaleString()})</span>
+                <span>잠금 해제 ({formatMoneyCompact(nextLockedEntry.cost)})</span>
               </>
             )}
           </button>
         </div>
       )}
 
+      {/* Non-blocking Background Streaming Progress Overlay (0% ~ 100%) */}
+      {loadingProgress?.active && (
+        <div
+          data-testid="loading-progress-indicator"
+          aria-live="polite"
+          className="fixed top-[134px] left-1.5 md:top-[118px] md:left-3 z-30 pointer-events-none px-3 py-1.5 rounded-xl bg-slate-950/92 border border-sky-500/40 shadow-lg flex flex-col gap-1 min-w-[168px] max-w-[78vw]"
+        >
+          <div className="flex items-center justify-between gap-2.5 text-[11px] text-slate-200 tabular-nums">
+            <span className="flex items-center gap-1.5 truncate">
+              <Loader2 className="w-3 h-3 text-sky-400 animate-spin shrink-0" />
+              <span className="truncate">{loadingProgress.label}</span>
+            </span>
+            <span className="font-mono font-bold text-sky-300 shrink-0">
+              {loadingProgress.percent}%
+            </span>
+          </div>
+          <div className="w-full h-1 rounded-full bg-slate-800 overflow-hidden">
+            <div
+              className="h-full w-full origin-left bg-sky-400 transition-transform duration-200 ease-out"
+              style={{
+                transform: `scaleX(${Math.max(0.02, Math.min(1, loadingProgress.percent / 100))})`,
+              }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Fallback / Loading Banner when OSM nodes are not yet loaded */}
-      {(gameState.osmNodes || []).length === 0 && (
+      {(gameState.osmNodes || []).length === 0 && !loadingProgress?.active && (
         <div
           data-testid="osm-empty-banner"
           className="fixed bottom-[82px] left-1/2 -translate-x-1/2 z-30 px-4 py-2.5 rounded-2xl bg-slate-950/95 border border-sky-500/50 shadow-2xl flex items-center gap-3 max-w-[92vw]"

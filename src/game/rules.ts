@@ -34,7 +34,7 @@ import {
 } from './minigames';
 
 export const GLOBAL_OSM_NODE_TARGET = 450_000_000;
-export const MAX_OSM_FRONTIER_DISTANCE = 5;
+export const MAX_OSM_FRONTIER_DISTANCE = 10;
 export const ISOLATED_ROUTE_BRIDGE_MAX_KM = 0.4; // 400m search radius to locate the single nearest bridgeable node from an isolated/dead-end route
 export const ISOLATED_ROUTE_BRIDGE_FRONTIER_CAP = 3; // Frontier horizon cap (d <= 3 around the single nearest bridge target)
 export const CROSS_BORDER_BRIDGE_MAX_KM = 0.45; // 450m radius across unlocked adjacent city borders
@@ -3207,7 +3207,7 @@ export function getProximityAdjacentChunksToLoad(
       activeNodes.push(n);
     } else {
       const d = frontierMap.get(n.id);
-      if (d !== undefined && d <= 3) {
+      if (d !== undefined && d <= 5) {
         activeNodes.push(n);
       }
     }
@@ -3269,10 +3269,10 @@ export function getProximityAdjacentChunksToLoad(
     .slice(0, maxChunks);
 }
 
-const FRONTIER_BRIGHTNESS_BY_DIST = [1, 1.0, 0.76, 0.54, 0.36, 0.20];
-const FRONTIER_OPACITY_BY_DIST = [1, 0.96, 0.78, 0.60, 0.42, 0.26];
-const FRONTIER_RADIUS_SCALE_BY_DIST = [1, 1.06, 0.97, 0.89, 0.81, 0.73];
-const FRONTIER_EDGE_OPACITY_BY_DIST = [0.95, 0.76, 0.58, 0.40, 0.26, 0.14];
+const FRONTIER_BRIGHTNESS_BY_DIST = [1, 1.0, 0.86, 0.74, 0.62, 0.52, 0.42, 0.34, 0.26, 0.20, 0.15];
+const FRONTIER_OPACITY_BY_DIST = [1, 0.96, 0.88, 0.80, 0.72, 0.64, 0.56, 0.48, 0.40, 0.32, 0.24];
+const FRONTIER_RADIUS_SCALE_BY_DIST = [1, 1.06, 1.01, 0.96, 0.91, 0.86, 0.81, 0.76, 0.71, 0.66, 0.61];
+const FRONTIER_EDGE_OPACITY_BY_DIST = [0.95, 0.82, 0.72, 0.62, 0.52, 0.43, 0.35, 0.27, 0.20, 0.14, 0.09];
 
 function dimHexColor(hex: string, brightness: number): string {
   const clean = hex.replace('#', '');
@@ -3348,9 +3348,9 @@ export function getFrontierVisualStyle(
       ? '#c084fc'
       : '#22d3ee';
 
-  const brightness = isSelected || isHovered ? 1 : FRONTIER_BRIGHTNESS_BY_DIST[d] ?? 0.2;
-  const distOpacity = isSelected || isHovered ? 1 : FRONTIER_OPACITY_BY_DIST[d] ?? 0.26;
-  const radiusScale = isSelected || isHovered ? 1 : FRONTIER_RADIUS_SCALE_BY_DIST[d] ?? 0.73;
+  const brightness = isSelected || isHovered ? 1 : FRONTIER_BRIGHTNESS_BY_DIST[d] ?? 0.15;
+  const distOpacity = isSelected || isHovered ? 1 : FRONTIER_OPACITY_BY_DIST[d] ?? 0.24;
+  const radiusScale = isSelected || isHovered ? 1 : FRONTIER_RADIUS_SCALE_BY_DIST[d] ?? 0.61;
 
   const selectionFactor = dimForSelection ? 0.35 : 1;
   const fillOpacity = hideDot ? 0 : Number((distOpacity * selectionFactor).toFixed(3));
@@ -3371,7 +3371,7 @@ export function getFrontierVisualStyle(
 
 export function getFrontierEdgeOpacity(maxEndpointDist: number, canAfford: boolean): number {
   const d = Math.max(1, Math.min(MAX_OSM_FRONTIER_DISTANCE, Math.round(maxEndpointDist)));
-  const base = FRONTIER_EDGE_OPACITY_BY_DIST[d] ?? 0.14;
+  const base = FRONTIER_EDGE_OPACITY_BY_DIST[d] ?? 0.09;
   return Number((canAfford ? base : base * 0.58).toFixed(3));
 }
 

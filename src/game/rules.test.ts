@@ -207,29 +207,29 @@ test('linking OSM nodes completes real way and OSM junction achievements without
   state = unlockSkill(state, 'sk_speed_1').newState;
   assert.equal(state.skillPoints, 0);
 
-  const { nodes, edges } = makeLongOsmGrid('세종대로', 'road', 13);
+  const { nodes, edges } = makeLongOsmGrid('세종대로', 'road', 18);
   state = mergeOsmChunk(state, '37.566_126.978', nodes, edges, 'curated_kr_seoul', {
     totalNodeCount: 50,
   });
   assert.ok(state.loadedOsmRegions?.includes('curated_kr_seoul'));
 
-  // Jumping past d=5 is blocked
-  const blockedFar = connectOsmPath(state, 'n1', 'n13');
+  // Jumping past d=10 is blocked
+  const blockedFar = connectOsmPath(state, 'n1', 'n18');
   assert.equal(blockedFar.success, false);
 
-  // Connect outward within d <= 5 increments
+  // Connect outward within d <= 10 increments
   const r1 = connectOsmPath(state, 'n1', 'n6');
   assert.equal(r1.success, true);
   assert.equal(r1.builtCount, 5);
-  const r2 = connectOsmPath(r1.newState, 'n6', 'n11');
+  const r2 = connectOsmPath(r1.newState, 'n6', 'n16');
   assert.equal(r2.success, true);
-  assert.equal(r2.builtCount, 5);
-  const res = connectOsmPath(r2.newState, 'n11', 'n13');
+  assert.equal(r2.builtCount, 10);
+  const res = connectOsmPath(r2.newState, 'n16', 'n18');
   assert.equal(res.success, true);
   assert.equal(res.builtCount, 2);
-  assert.equal(res.newState.stats.totalOsmEdgesBuilt, 12);
-  assert.equal(res.newState.stats.connectedOsmNodes, 13);
-  assert.equal(res.newState.stats.totalScaledNodes, 13);
+  assert.equal(res.newState.stats.totalOsmEdgesBuilt, 17);
+  assert.equal(res.newState.stats.connectedOsmNodes, 18);
+  assert.equal(res.newState.stats.totalScaledNodes, 18);
   assert.equal(res.newState.stats.totalNetworkKm, res.newState.stats.mapped1to1Km);
   assert.ok(calculateTotalIncomePerSec(res.newState) > 0);
 
@@ -243,29 +243,29 @@ test('linking OSM nodes completes real way and OSM junction achievements without
 
   // City progress tracking reports connectedCount / totalNodes / percentage
   const prog = getRegionProgressStats(res.newState, 'curated_kr_seoul');
-  assert.equal(prog.connectedCount, 13);
+  assert.equal(prog.connectedCount, 18);
   assert.equal(prog.totalNodes, 50);
-  assert.equal(prog.pct, 26);
+  assert.equal(prog.pct, 36);
 });
 
-test('frontier distance fog-of-war enforces d <= 5 visibility, constructability, and monotonic brightness falloff', () => {
+test('frontier distance fog-of-war enforces d <= 10 visibility, constructability, and monotonic brightness falloff', () => {
   const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
   let state = createInitialGameState(seoul);
   state = { ...state, capital: 50000 };
 
-  const { nodes, edges } = makeLongOsmGrid('종로', 'road', 10, 37.5665, 126.978, 'f');
+  const { nodes, edges } = makeLongOsmGrid('종로', 'road', 15, 37.5665, 126.978, 'f');
   state = mergeOsmChunk(state, '37.566_126.978', nodes, edges);
 
   assert.equal(state.osmNodes.find((n) => n.id === 'f1')?.connected, true);
 
   const dists = computeOsmFrontierDistancesForState(state);
-  assert.equal(MAX_OSM_FRONTIER_DISTANCE, 5);
+  assert.equal(MAX_OSM_FRONTIER_DISTANCE, 10);
   assert.equal(dists.get('f1'), 0);
-  assert.equal(dists.get('f6'), 5);
-  assert.equal(dists.get('f7'), undefined);
-  assert.equal(dists.get('f10'), undefined);
+  assert.equal(dists.get('f11'), 10);
+  assert.equal(dists.get('f12'), undefined);
+  assert.equal(dists.get('f15'), undefined);
 
-  const styles = [1, 2, 3, 4, 5].map((d) => getFrontierVisualStyle(d, 'road'));
+  const styles = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((d) => getFrontierVisualStyle(d, 'road'));
   for (let i = 0; i < styles.length - 1; i++) {
     assert.ok(styles[i].brightness > styles[i + 1].brightness);
     assert.ok(styles[i].fillOpacity > styles[i + 1].fillOpacity);
@@ -274,19 +274,19 @@ test('frontier distance fog-of-war enforces d <= 5 visibility, constructability,
     assert.ok(getFrontierEdgeOpacity(i + 1, true) > getFrontierEdgeOpacity(i + 2, true));
   }
 
-  const blocked = connectOsmPath(state, 'f1', 'f7');
+  const blocked = connectOsmPath(state, 'f1', 'f12');
   assert.equal(blocked.success, false);
-  const blockedEdge = connectOsmEdge(state, 'e_f_6_7');
+  const blockedEdge = connectOsmEdge(state, 'e_f_11_12');
   assert.equal(blockedEdge.success, false);
 
-  const ok5 = connectOsmPath(state, 'f1', 'f6');
-  assert.equal(ok5.success, true);
-  assert.equal(ok5.builtCount, 5);
+  const ok10 = connectOsmPath(state, 'f1', 'f11');
+  assert.equal(ok10.success, true);
+  assert.equal(ok10.builtCount, 10);
 
-  const updatedDists = computeOsmFrontierDistances(ok5.newState.osmNodes, ok5.newState.osmEdges);
-  assert.equal(updatedDists.get('f6'), 0);
-  assert.equal(updatedDists.get('f7'), 1);
-  assert.equal(updatedDists.get('f10'), 4);
+  const updatedDists = computeOsmFrontierDistances(ok10.newState.osmNodes, ok10.newState.osmEdges);
+  assert.equal(updatedDists.get('f11'), 0);
+  assert.equal(updatedDists.get('f12'), 1);
+  assert.equal(updatedDists.get('f15'), 4);
 });
 
 test('road nodes and rail nodes cannot connect directly except with transfer study [71] sk_infra_4', () => {
@@ -1089,7 +1089,7 @@ test('Manual starting-node selection skips auto-seeding until player picks a sta
     pendingSeedRegionIds: [startRegion.regionId],
   };
 
-  const { nodes, edges } = makeLongOsmGrid('종로', 'road', 10, 37.5665, 126.978, 's');
+  const { nodes, edges } = makeLongOsmGrid('종로', 'road', 16, 37.5665, 126.978, 's');
   state = mergeOsmChunk(state, '37.566_126.978', nodes, edges, startRegion.regionId);
 
   // Zero nodes are auto-connected while awaiting starting node choice
@@ -1109,11 +1109,12 @@ test('Manual starting-node selection skips auto-seeding until player picks a sta
   assert.equal(picked.newState.osmNodes.find((n) => n.id === 's4')?.connected, true);
   assert.deepEqual(picked.newState.pendingSeedRegionIds, []);
 
-  // Frontier opens outward from chosen starting node 's4'
+  // Frontier opens outward from chosen starting node 's4' up to d=10
   const dists = computeOsmFrontierDistancesForState(picked.newState);
   assert.equal(dists.get('s4'), 0);
-  assert.equal(dists.get('s9'), 5);
-  assert.equal(dists.get('s10'), undefined);
+  assert.equal(dists.get('s14'), 10);
+  assert.equal(dists.get('s15'), undefined);
+  assert.equal(dists.get('s16'), undefined);
 
   const buildRes = connectOsmPath(picked.newState, 's4', 's6');
   assert.equal(buildRes.success, true);
@@ -1253,8 +1254,8 @@ test('Large 3,000+ node OSM graph operations (frontier, reachable, preview, batc
   const t0 = performance.now();
   const frontier = computeOsmFrontierDistancesForState(state);
   const frontierEdges = getFrontierOsmEdgesForState(state, frontier);
-  assert.ok(frontier.size > 0 && frontier.size < 100);
-  assert.ok(frontierEdges.length > 0 && frontierEdges.length < 200);
+  assert.ok(frontier.size > 0 && frontier.size < 400);
+  assert.ok(frontierEdges.length > 0 && frontierEdges.length < 800);
 
   const reachable = getReachableOsmNodeSet(state, 'g_27_27');
   assert.equal(reachable.has('g_27_31'), true);

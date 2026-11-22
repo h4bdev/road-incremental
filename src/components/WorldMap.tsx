@@ -20,6 +20,7 @@ import {
 import { GameState, OsmEdge, ProvincialRegion } from '../game/types';
 import {
   calculateMultipliers,
+  canConnectIsolatedRoutePair,
   computeOsmFrontierDistancesForState,
   findOsmRoadPath,
   getBuiltOsmEdgesForState,
@@ -175,7 +176,7 @@ function getSafeRegionLabelAnchor(
   return [lng, lat];
 }
 
-export const WorldMap: React.FC<WorldMapProps> = ({
+const WorldMapComponent: React.FC<WorldMapProps> = ({
   gameState,
   flyToTarget,
   builtSkeleton,
@@ -305,12 +306,36 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     }
   };
 
+  const isOverviewZoomRef = useRef(isOverviewZoom);
+  isOverviewZoomRef.current = isOverviewZoom;
+  const overviewDataVersionRef = useRef(0);
+  const overviewSyncedVersionRef = useRef(-1);
+
+  const pendingSourceSyncRef = useRef<Map<string, GeoJsonData>>(new Map());
+  const sourceSyncRafRef = useRef(0);
+
+  const flushPendingSourceSync = () => {
+    sourceSyncRafRef.current = 0;
+    const map = mapInstanceRef.current;
+    if (!map) {
+      pendingSourceSyncRef.current.clear();
+      return;
+    }
+    pendingSourceSyncRef.current.forEach((data, sourceId) => {
+      const src = map.getSource(sourceId) as maplibregl.GeoJSONSource | undefined;
+      if (src) {
+        src.setData(data);
+      }
+    });
+    pendingSourceSyncRef.current.clear();
+  };
+
   const syncSourceData = (sourceId: string, data: GeoJsonData) => {
     const map = mapInstanceRef.current;
     if (!map) return;
-    const src = map.getSource(sourceId) as maplibregl.GeoJSONSource | undefined;
-    if (src) {
-      src.setData(data);
+    pendingSourceSyncRef.current.set(sourceId, data);
+    if (sourceSyncRafRef.current === 0) {
+      sourceSyncRafRef.current = requestAnimationFrame(flushPendingSourceSync);
     }
   };
 
@@ -757,6 +782,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       applyTileVisibility(map, tileTypeRef.current);
       syncGlobeOverviewAttr();
       syncViewportState();
+      pendingSourceSyncRef.current.clear();
 
       const regionsSrc = map.getSource('regions-overlay') as maplibregl.GeoJSONSource | undefined;
       regionsSrc?.setData(regionsGeoJsonRef.current);
@@ -879,7 +905,12 @@ export const WorldMap: React.FC<WorldMapProps> = ({
         const nodeIdx = osmNodeIndexRef.current;
         const startNode = nodeIdx.byId.get(currentStart);
         const targetNode = nodeIdx.byId.get(nodeId);
-        if (nodeIdx.hasAnyConnected && !startNode?.connected && !targetNode?.connected) {
+        if (
+          nodeIdx.hasAnyConnected &&
+          !startNode?.connected &&
+          !targetNode?.connected &&
+          !canConnectIsolatedRoutePair(gameStateRef.current, currentStart, nodeId)
+        ) {
           setSelectedOsmNodeId(nodeId);
           return;
         }
@@ -949,6 +980,11 @@ export const WorldMap: React.FC<WorldMapProps> = ({
         cancelAnimationFrame(hoverRafId);
         hoverRafId = 0;
       }
+      if (sourceSyncRafRef.current !== 0) {
+        cancelAnimationFrame(sourceSyncRafRef.current);
+        sourceSyncRafRef.current = 0;
+      }
+      pendingSourceSyncRef.current.clear();
       styleReadyRef.current = false;
       regionMarkersRef.current.forEach((m) => m.remove());
       regionMarkersRef.current = [];
@@ -1080,7 +1116,12 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     const nA = osmNodeIndex.byId.get(selectedOsmNodeId);
     const nB = osmNodeIndex.byId.get(hoverOsmNodeId);
     if (!nA || !nB) return null;
-    if (osmNodeIndex.hasAnyConnected && !nA.connected && !nB.connected) {
+    if (
+      osmNodeIndex.hasAnyConnected &&
+      !nA.connected &&
+      !nB.connected &&
+      !canConnectIsolatedRoutePair(gameState, selectedOsmNodeId, hoverOsmNodeId)
+    ) {
       return null;
     }
 
@@ -1247,6 +1288,8 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       const fcSk = { type: 'FeatureCollection', features: skFeatures } as unknown as GeoJsonData;
       builtEdgesGeoJsonRef.current = fcSk;
       overviewEdgesGeoJsonRef.current = fcSk;
+      overviewDataVersionRef.current += 1;
+      overviewSyncedVersionRef.current = overviewDataVersionRef.current;
       syncSourceData('osm-edges-built', fcSk);
       syncSourceData('osm-edges-overview', fcSk);
       return;
@@ -1255,9 +1298,29 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     const fc = { type: 'FeatureCollection', features } as unknown as GeoJsonData;
     builtEdgesGeoJsonRef.current = fc;
     syncSourceData('osm-edges-built', fc);
+    overviewDataVersionRef.current += 1;
+  }, [
+    edgeTopologyKey,
+    unlockedRegionsKey,
+    osmNodeIndex,
+    builtSkeleton,
+    gameState.osmNodes,
+    gameState.osmEdges,
+    gameState.provincialRegions,
+  ]);
 
-    // Build simplified continuous curves for Overview Zoom (< 11.5)
-    const unlockedEdges = (gameState.osmEdges || []).filter((edge) => {
+  // Lazy Overview Zoom (< 11.5) curve builder: skipped completely during Street Zoom node connections
+  useEffect(() => {
+    if (!isOverviewZoom) return;
+    if (overviewSyncedVersionRef.current === overviewDataVersionRef.current) return;
+    overviewSyncedVersionRef.current = overviewDataVersionRef.current;
+
+    const osmEdges = gameState.osmEdges || [];
+    if (osmEdges.length === 0 && builtSkeleton && builtSkeleton.length > 0) {
+      return;
+    }
+
+    const unlockedEdges = osmEdges.filter((edge) => {
       if (edge.coordinates.length < 2) return false;
       if (edge.built) return true;
       const nFrom = osmNodeIndex.byId.get(edge.fromNodeId);
@@ -1295,6 +1358,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     overviewEdgesGeoJsonRef.current = fcOverview;
     syncSourceData('osm-edges-overview', fcOverview);
   }, [
+    isOverviewZoom,
     edgeTopologyKey,
     unlockedRegionsKey,
     osmNodeIndex,
@@ -1446,21 +1510,35 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     const touchBoost = isTouchRef.current ? 1.2 : 0;
     const features: Array<Record<string, unknown>> = [];
 
-    const processNode = (node: (typeof gameState.osmNodes)[number]) => {
-      if (!isNodeInUnlockedRegion(gameState, node)) return;
+    const pendingSeedCountLocal = pendingSeedSet.size;
+    const unseededCountLocal = unseededIslandNodeIds.size;
 
+    const processNode = (node: (typeof gameState.osmNodes)[number]) => {
       const isSelected = node.id === selectedOsmNodeId;
-      const keepOutsideViewport =
-        isSelected || Boolean(reachableOsmNodeSet?.has(node.id));
+      const isReachable =
+        !selectedOsmNodeId ||
+        isSelected ||
+        Boolean(reachableOsmNodeSet && reachableOsmNodeSet.has(node.id));
       if (
         viewportBounds &&
-        !keepOutsideViewport &&
+        !isSelected &&
+        !(selectedOsmNodeId && isReachable) &&
         !isNodeInViewport(node.lat, node.lng, viewportBounds)
       ) {
         return;
       }
 
-      const isPendingSeed = isPendingSeedNode(node);
+      if (!isNodeInUnlockedRegion(gameState, node)) return;
+
+      let isPendingSeed = false;
+      if (!node.connected) {
+        if (unseededCountLocal > 0 && unseededIslandNodeIds.has(node.id)) {
+          isPendingSeed = true;
+        } else if (pendingSeedCountLocal > 0) {
+          isPendingSeed = isPendingSeedNode(node);
+        }
+      }
+
       const fDist = frontierDistances.get(node.id);
       if (!node.connected && hasAnyConnected && fDist === undefined && !isPendingSeed) {
         return;
@@ -1480,15 +1558,10 @@ export const WorldMap: React.FC<WorldMapProps> = ({
         return;
       }
 
-      const isCompatible =
+      const canTarget =
         !selectedOsmNodeId ||
-        selectedOsmNodeId === node.id ||
-        resolveCompatibleOsmMode(gameState, selectedOsmNodeId, node.id) !== null;
-      const isReachable =
-        !selectedOsmNodeId ||
-        selectedOsmNodeId === node.id ||
-        Boolean(reachableOsmNodeSet?.has(node.id));
-      const canTarget = isCompatible && isReachable;
+        isSelected ||
+        (isReachable && resolveCompatibleOsmMode(gameState, selectedOsmNodeId, node.id) !== null);
       const dimForSelection =
         !isPendingSeed && Boolean(selectedOsmNodeId) && !isSelected && !canTarget;
 
@@ -1531,23 +1604,14 @@ export const WorldMap: React.FC<WorldMapProps> = ({
         type: 'Feature',
         properties: {
           id: node.id,
-          label:
-            node.label ||
-            (isPendingSeed ? '출발 후보 교차점' : isStartHub ? '출발 거점 노드' : 'OSM 노드'),
           mode,
-          connected: node.connected,
           isPendingSeed,
-          frontierDist: resolvedDist,
-          brightness: visual.brightness,
           hideDot,
-          isSelected,
-          isCompatible,
-          isReachable,
           haloRadius,
           haloColor: isPendingSeed ? '#34d399' : isStartHub ? '#34d399' : visual.haloColor,
           haloWidth,
           haloOpacity: isPendingSeed ? 0.92 : isStartHub ? 0.95 : visual.haloOpacity,
-          radius: Number((baseRadius + touchBoost).toFixed(2)),
+          radius: Math.round((baseRadius + touchBoost) * 100) / 100,
           strokeColor: isPendingSeed ? pendingStroke : isStartHub ? '#34d399' : visual.strokeColor,
           strokeWidth,
           strokeOpacity: isPendingSeed ? 0.96 : visual.strokeOpacity,
@@ -1692,14 +1756,16 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       });
   }, [gameState.provincialRegions, gameState.startingCity.lat, gameState.startingCity.lng]);
 
-  const expandableSig = expandableEntries
-    .map(
-      (e) =>
-        `${e.region.regionId}:${e.cost}:${gameState.capital >= e.cost ? '1' : '0'}:${
-          selectedExpandableRegionId === e.region.regionId ? '1' : '0'
-        }`
-    )
-    .join('|');
+  const expandableSortedCosts = useMemo(
+    () => expandableEntries.map((e) => e.cost).sort((a, b) => a - b),
+    [expandableEntries]
+  );
+  const expandableRegionsKey = useMemo(
+    () => expandableEntries.map((e) => `${e.region.regionId}:${e.cost}`).join('|'),
+    [expandableEntries]
+  );
+  const expandableAffordCount = countAffordableAtOrBelow(expandableSortedCosts, gameState.capital);
+  const expandableSig = `${expandableRegionsKey}|${expandableAffordCount}|${selectedExpandableRegionId || ''}`;
 
   useEffect(() => {
     const regions = gameState.provincialRegions || [];
@@ -2267,3 +2333,6 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     </div>
   );
 };
+
+export const WorldMap = React.memo(WorldMapComponent);
+

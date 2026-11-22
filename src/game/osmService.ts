@@ -830,7 +830,8 @@ export async function hydrateProvincialRegionsFromCache(
 
 export async function fetchOsmRoadChunk(
   lat: number,
-  lng: number
+  lng: number,
+  options?: { allowStarterFallback?: boolean }
 ): Promise<{
   chunkKey: string;
   osmNodes: OsmNode[];
@@ -838,9 +839,10 @@ export async function fetchOsmRoadChunk(
   usedLiveOverpass: boolean;
 }> {
   const chunkKey = quantizeChunkKey(lat, lng);
+  const allowFallback = options?.allowStarterFallback !== false;
 
   const idbHit = await getCachedOsmTile(chunkKey);
-  if (idbHit && idbHit.osmNodes.length > 0) {
+  if (idbHit && (idbHit.osmNodes.length > 0 || idbHit.usedLiveOverpass)) {
     return {
       chunkKey: idbHit.tileKey,
       osmNodes: idbHit.osmNodes,
@@ -849,14 +851,20 @@ export async function fetchOsmRoadChunk(
     };
   }
 
+  const fbParam = allowFallback ? '' : '&fallback=0';
   const json = await tryFetchBackendJson<{
     chunkKey?: string;
     osmNodes?: OsmNode[];
     osmEdges?: OsmEdge[];
     usedLiveOverpass?: boolean;
-  }>(`/api/osm-roads?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`, 9500);
+  }>(`/api/osm-roads?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}${fbParam}`, 9500);
 
-  if (json && Array.isArray(json.osmNodes) && Array.isArray(json.osmEdges) && json.osmNodes.length > 0) {
+  if (
+    json &&
+    Array.isArray(json.osmNodes) &&
+    Array.isArray(json.osmEdges) &&
+    (json.osmNodes.length > 0 || json.usedLiveOverpass || !allowFallback)
+  ) {
     const resolvedKey = json.chunkKey || chunkKey;
     const usedLive = Boolean(json.usedLiveOverpass);
     if (usedLive) {
@@ -877,8 +885,8 @@ export async function fetchOsmRoadChunk(
   }
 
   try {
-    const direct = await loadOsmRoadChunkDirect(lat, lng);
-    if (direct.osmNodes.length > 0) {
+    const direct = await loadOsmRoadChunkDirect(lat, lng, options);
+    if (direct.osmNodes.length > 0 || direct.usedLiveOverpass || !allowFallback) {
       if (direct.usedLiveOverpass) {
         void putCachedOsmTile({
           tileKey: direct.chunkKey,
@@ -896,7 +904,16 @@ export async function fetchOsmRoadChunk(
       };
     }
   } catch {
-    // Fall through to deterministic starter grid below
+    // Fall through below
+  }
+
+  if (!allowFallback) {
+    return {
+      chunkKey,
+      osmNodes: [],
+      osmEdges: [],
+      usedLiveOverpass: false,
+    };
   }
 
   return buildFallbackStarterGrid(chunkKey, lat, lng);
@@ -1053,7 +1070,8 @@ export async function fetchOsmProvincialRegion(
   lat: number,
   lng: number,
   expectedRegionName?: string,
-  knownRegionId?: string
+  knownRegionId?: string,
+  options?: { allowStarterFallback?: boolean }
 ): Promise<{
   regionId: string;
   regionName: string;
@@ -1067,6 +1085,7 @@ export async function fetchOsmProvincialRegion(
   usedLiveOverpass: boolean;
 }> {
   const chunkKey = quantizeChunkKey(lat, lng);
+  const allowFallback = options?.allowStarterFallback !== false;
   const defaultBbox: [number, number, number, number] = [
     lat - 0.075,
     lng - 0.095,
@@ -1074,6 +1093,7 @@ export async function fetchOsmProvincialRegion(
     lng + 0.095,
   ];
   const nameParam = expectedRegionName ? `&name=${encodeURIComponent(expectedRegionName)}` : '';
+  const fbParam = allowFallback ? '' : '&fallback=0';
 
   const json = await tryFetchBackendJson<{
     regionId?: string;
@@ -1086,9 +1106,14 @@ export async function fetchOsmProvincialRegion(
     osmNodes?: OsmNode[];
     osmEdges?: OsmEdge[];
     usedLiveOverpass?: boolean;
-  }>(`/api/osm-province?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}${nameParam}`, 16000);
+  }>(`/api/osm-province?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}${nameParam}${fbParam}`, 16000);
 
-  if (json && Array.isArray(json.osmNodes) && Array.isArray(json.osmEdges) && json.osmNodes.length > 0) {
+  if (
+    json &&
+    Array.isArray(json.osmNodes) &&
+    Array.isArray(json.osmEdges) &&
+    (json.osmNodes.length > 0 || json.usedLiveOverpass || !allowFallback)
+  ) {
     const rawId = json.regionId || `osm_prov_${chunkKey}`;
     const rawName = json.regionName || expectedRegionName || '도시 행정구역';
     const rawBbox = Array.isArray(json.bbox) && json.bbox.length === 4 ? json.bbox : defaultBbox;
@@ -1134,8 +1159,8 @@ export async function fetchOsmProvincialRegion(
   }
 
   try {
-    const direct = await loadOsmProvinceDirect(lat, lng, expectedRegionName);
-    if (direct.osmNodes.length > 0) {
+    const direct = await loadOsmProvinceDirect(lat, lng, expectedRegionName, options);
+    if (direct.osmNodes.length > 0 || direct.usedLiveOverpass || !allowFallback) {
       const isCountry = isCountryLevelOsmArea({
         name: direct.regionName,
         regionId: direct.regionId,
@@ -1176,7 +1201,21 @@ export async function fetchOsmProvincialRegion(
       };
     }
   } catch {
-    // Fall through to deterministic starter grid below
+    // Fall through below
+  }
+
+  if (!allowFallback) {
+    return {
+      regionId: knownRegionId || `osm_prov_${chunkKey}`,
+      regionName: expectedRegionName || '도시 행정구역',
+      adminLevel: '6',
+      bbox: defaultBbox,
+      totalNodeCount: 0,
+      chunkKey,
+      osmNodes: [],
+      osmEdges: [],
+      usedLiveOverpass: false,
+    };
   }
 
   const fb = buildFallbackStarterGrid(chunkKey, lat, lng);

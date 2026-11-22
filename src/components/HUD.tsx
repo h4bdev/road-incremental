@@ -46,7 +46,7 @@ interface HUDProps {
   onOpenCityReset: () => void;
 }
 
-export const HUD: React.FC<HUDProps> = ({
+const HUDComponent: React.FC<HUDProps> = ({
   gameState,
   activeModal,
   hasMapBottomCard = false,
@@ -306,3 +306,6 @@ export const HUD: React.FC<HUDProps> = ({
     </>
   );
 };
+
+export const HUD = React.memo(HUDComponent);
+

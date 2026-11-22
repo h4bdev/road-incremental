@@ -98,8 +98,8 @@ export function simplifyLonLatLine(
   for (let i = 0; i < points.length; i++) {
     if (keep[i]) {
       out.push([
-        Number(points[i][0].toFixed(5)),
-        Number(points[i][1].toFixed(5)),
+        Math.round(points[i][0] * 1e5) / 1e5,
+        Math.round(points[i][1] * 1e5) / 1e5,
       ]);
     }
   }
@@ -116,7 +116,10 @@ function mergeGroupIntoPolylines(
   if (groupEdges.length === 1) {
     const e = groupEdges[0];
     return [
-      e.coordinates.map(([lat, lng]) => [Number(lng.toFixed(5)), Number(lat.toFixed(5))]),
+      e.coordinates.map(([lat, lng]) => [
+        Math.round(lng * 1e5) / 1e5,
+        Math.round(lat * 1e5) / 1e5,
+      ]),
     ];
   }
 

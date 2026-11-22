@@ -30,6 +30,7 @@ export interface OsmRawRelation {
 }
 
 export interface OsmMapResponse {
+  remark?: string;
   elements?: Array<OsmRawNode | OsmRawWay | OsmRawRelation | { type: string }>;
 }
 
@@ -89,6 +90,9 @@ const DRIVABLE_HIGHWAYS = new Set([
   'pedestrian',
   'track',
   'road',
+  'footway',
+  'path',
+  'cycleway',
 ]);
 
 const RAILWAYS = new Set(['rail', 'subway', 'light_rail', 'tram', 'narrow_gauge']);
@@ -190,8 +194,11 @@ async function fetchOverpassFromUrl(
   });
   if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
   const data = (await res.json()) as OsmMapResponse;
-  if (!Array.isArray(data.elements) || data.elements.length === 0) {
-    throw new Error('Overpass empty elements');
+  if (!Array.isArray(data.elements)) {
+    throw new Error('Overpass invalid elements');
+  }
+  if (data.elements.length === 0 && typeof data.remark === 'string' && data.remark.trim().length > 0) {
+    throw new Error(`Overpass remark: ${data.remark}`);
   }
   return data;
 }
@@ -241,8 +248,8 @@ async function fetchFromOsm06(
   });
   if (!res.ok) throw new Error(`OSM 0.6 HTTP ${res.status}`);
   const data = (await res.json()) as OsmMapResponse;
-  if (!Array.isArray(data.elements) || data.elements.length === 0) {
-    throw new Error('OSM 0.6 empty elements');
+  if (!Array.isArray(data.elements)) {
+    throw new Error('OSM 0.6 invalid elements');
   }
   return data;
 }
@@ -733,12 +740,12 @@ async function searchOsmProvinceByName(
     const res = await fetchWithTimeout(
       `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
         cleanQuery
-      )}&format=jsonv2&polygon_geojson=1&addressdetails=1&accept-language=ko,en&limit=5`,
+      )}&format=jsonv2&polygon_geojson=1&polygon_threshold=0.005&addressdetails=1&accept-language=ko,en&limit=6`,
       { headers: buildRequestHeaders('application/json') },
-      6500
+      8500
     );
     if (!res.ok) return null;
-    const items = (await res.json()) as Array<{
+    const rawItems = (await res.json()) as Array<{
       osm_type?: string;
       osm_id?: number;
       name?: string;
@@ -747,6 +754,26 @@ async function searchOsmProvinceByName(
       boundingbox?: [string, string, string, string];
       geojson?: unknown;
     }>;
+
+    const preferredAdminTypes = new Set(['state', 'province', 'region', 'prefecture', 'city', 'county']);
+    const items = rawItems
+      .filter((item) => item.osm_type === 'relation' && Boolean(item.osm_id))
+      .sort((a, b) => {
+        const score = (it: typeof a) => {
+          let s = 0;
+          const nm = it.name || it.display_name?.split(',')[0] || '';
+          if (it.addresstype && ['state', 'province', 'region', 'prefecture'].includes(it.addresstype)) {
+            s += 4;
+          } else if (it.addresstype && preferredAdminTypes.has(it.addresstype)) {
+            s += 2;
+          }
+          if (adminNamesLikelyMatch(nm, cleanQuery)) s += 3;
+          if (it.geojson) s += 1;
+          return s;
+        };
+        return score(b) - score(a);
+      });
+
     for (const item of items) {
       if (item.osm_type !== 'relation' || !item.osm_id) continue;
       const bbox: [number, number, number, number] =
@@ -771,7 +798,7 @@ async function searchOsmProvinceByName(
       }
       const cLat = (bbox[0] + bbox[2]) / 2;
       const cLng = (bbox[1] + bbox[3]) / 2;
-      if (haversineMeters(nearLat, nearLng, cLat, cLng) > 650_000) continue;
+      if (haversineMeters(nearLat, nearLng, cLat, cLng) > 950_000) continue;
 
       let boundaryGeoJson = simplifyGeoJsonBoundary(item.geojson);
       if (!boundaryGeoJson) {
@@ -862,9 +889,9 @@ export async function resolveOsmProvincialRegion(
       try {
         const ids = distRelId && distRelId !== relId ? `R${relId},R${distRelId}` : `R${relId}`;
         const nomRes = await fetchWithTimeout(
-          `https://nominatim.openstreetmap.org/lookup?osm_ids=${ids}&format=json&polygon_geojson=1&accept-language=ko,en`,
+          `https://nominatim.openstreetmap.org/lookup?osm_ids=${ids}&format=json&polygon_geojson=1&polygon_threshold=0.005&accept-language=ko,en`,
           { headers: buildRequestHeaders('application/json') },
-          5500
+          7500
         );
         if (nomRes.ok) {
           const items = (await nomRes.json()) as Array<{
@@ -935,9 +962,9 @@ export async function resolveOsmProvincialRegion(
   for (const zoomLevel of [5, 6, 8]) {
     try {
       const revRes = await fetchWithTimeout(
-        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=${zoomLevel}&addressdetails=1&polygon_geojson=1&accept-language=ko,en`,
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=${zoomLevel}&addressdetails=1&polygon_geojson=1&polygon_threshold=0.005&accept-language=ko,en`,
         { headers: buildRequestHeaders('application/json') },
-        5000
+        6500
       );
       if (!revRes.ok) continue;
       const rev = (await revRes.json()) as {
@@ -1065,12 +1092,20 @@ export function buildDenseRealOsmGraph(
     } else if (el.type === 'way' && 'nodes' in el && Array.isArray(el.nodes) && el.nodes.length >= 2) {
       const hw = el.tags?.highway;
       const rw = el.tags?.railway;
-      const isParkingAisle = el.tags?.service === 'parking_aisle';
-      if ((hw && DRIVABLE_HIGHWAYS.has(hw) && !isParkingAisle) || (rw && RAILWAYS.has(rw))) {
+      if ((hw && DRIVABLE_HIGHWAYS.has(hw)) || (rw && RAILWAYS.has(rw))) {
         validWays.push(el);
       }
     }
   }
+
+  const DEG_TO_RAD = Math.PI / 180;
+  const METERS_PER_DEG_LAT = 111194.9266;
+  const metersPerDegLngCenter = METERS_PER_DEG_LAT * Math.cos(centerLat * DEG_TO_RAD);
+  const fastEquirectMeters = (lat1: number, lng1: number, lat2: number, lng2: number): number => {
+    const dLatM = (lat2 - lat1) * METERS_PER_DEG_LAT;
+    const dLngM = (lng2 - lng1) * metersPerDegLngCenter;
+    return Math.sqrt(dLatM * dLatM + dLngM * dLngM);
+  };
 
   const wayMinDistMap = new Map<number, number>();
   for (const way of validWays) {
@@ -1078,7 +1113,7 @@ export function buildDenseRealOsmGraph(
     for (const nid of way.nodes!) {
       const pt = rawNodeCoords.get(nid);
       if (!pt) continue;
-      const d = haversineMeters(centerLat, centerLng, pt.lat, pt.lng);
+      const d = fastEquirectMeters(centerLat, centerLng, pt.lat, pt.lng);
       if (d < minD) minD = d;
     }
     wayMinDistMap.set(way.id, minD);
@@ -1112,9 +1147,9 @@ export function buildDenseRealOsmGraph(
   const CLIP_LNG = options?.clipLng ?? 0.0062;
   const BRIDGE_CLIP_LAT = CLIP_LAT * 1.45;
   const BRIDGE_CLIP_LNG = CLIP_LNG * 1.45;
-  const roadBudget = options?.roadBudget ?? 1750;
+  const roadBudget = options?.roadBudget ?? 2600;
   const railBudget = options?.railBudget ?? 420;
-  const maxPerWayBudget = options?.maxPerWay ?? 85;
+  const maxPerWayBudget = options?.maxPerWay ?? 95;
 
   const roadWays = validWays.filter((w) => !w.tags?.railway);
   const railWays = validWays.filter((w) => Boolean(w.tags?.railway));
@@ -1136,6 +1171,58 @@ export function buildDenseRealOsmGraph(
     } else if (existing.mode !== mode && existing.mode !== 'mixed') {
       existing.mode = 'mixed';
     }
+  };
+
+  // Spatial grid keyed by `${mode}:${layerKey}` to collapse nearly-coincident (<=2.0m) duplicate OSM vertices
+  // while strictly preserving parallel carriageways (>=6m apart) and stacked bridges/tunnels (different layerKey).
+  const SNAP_CELL_DEG = 0.0001;
+  const SNAP_METERS = 2.0;
+  const snapGridByLayer = new Map<string, Map<string, Array<{ id: string; lat: number; lng: number }>>>();
+
+  const resolveOrRegisterSnapVertex = (
+    pt: { id: string; lat: number; lng: number; label: string },
+    mode: 'road' | 'rail',
+    layerKey: string
+  ): { id: string; lat: number; lng: number; label: string } => {
+    const existingNode = nodeMap.get(pt.id);
+    if (existingNode) {
+      return { id: existingNode.id, lat: existingNode.lat, lng: existingNode.lng, label: pt.label };
+    }
+    const groupKey = `${mode}:${layerKey}`;
+    let grid = snapGridByLayer.get(groupKey);
+    if (!grid) {
+      grid = new Map();
+      snapGridByLayer.set(groupKey, grid);
+    }
+    const gx = Math.floor(pt.lat / SNAP_CELL_DEG);
+    const gy = Math.floor(pt.lng / SNAP_CELL_DEG);
+    let bestMatch: { id: string; lat: number; lng: number } | null = null;
+    let bestDist = SNAP_METERS;
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const bucket = grid.get(`${gx + dx}_${gy + dy}`);
+        if (!bucket) continue;
+        for (let k = 0; k < bucket.length; k++) {
+          const cand = bucket[k];
+          const d = fastEquirectMeters(cand.lat, cand.lng, pt.lat, pt.lng);
+          if (d <= bestDist) {
+            bestDist = d;
+            bestMatch = cand;
+          }
+        }
+      }
+    }
+    if (bestMatch) {
+      return { id: bestMatch.id, lat: bestMatch.lat, lng: bestMatch.lng, label: pt.label };
+    }
+    const cellKey = `${gx}_${gy}`;
+    let bucket = grid.get(cellKey);
+    if (!bucket) {
+      bucket = [];
+      grid.set(cellKey, bucket);
+    }
+    bucket.push({ id: pt.id, lat: pt.lat, lng: pt.lng });
+    return pt;
   };
 
   const emitWaysWithBudget = (waysList: OsmRawWay[], maxEdgesForGroup: number, maxPerWay: number) => {
@@ -1189,7 +1276,7 @@ export function buildDenseRealOsmGraph(
         if (
           !prev ||
           isMandatory ||
-          haversineMeters(prev.lat, prev.lng, coord.lat, coord.lng) >= MIN_VERTEX_METERS
+          fastEquirectMeters(prev.lat, prev.lng, coord.lat, coord.lng) >= MIN_VERTEX_METERS
         ) {
           const id = `osm_${osmId}`;
           basePts.push({
@@ -1211,7 +1298,7 @@ export function buildDenseRealOsmGraph(
           continue;
         }
         const prev = basePts[i - 1];
-        const segMeters = haversineMeters(prev.lat, prev.lng, curr.lat, curr.lng);
+        const segMeters = fastEquirectMeters(prev.lat, prev.lng, curr.lat, curr.lng);
 
         if (segMeters > 2500) {
           densePts.push(curr);
@@ -1225,8 +1312,8 @@ export function buildDenseRealOsmGraph(
 
           for (let s = 1; s < subCount; s++) {
             const t = s / subCount;
-            const lat = Number((prev.lat + (curr.lat - prev.lat) * t).toFixed(6));
-            const lng = Number((prev.lng + (curr.lng - prev.lng) * t).toFixed(6));
+            const lat = Math.round((prev.lat + (curr.lat - prev.lat) * t) * 1e6) / 1e6;
+            const lng = Math.round((prev.lng + (curr.lng - prev.lng) * t) * 1e6) / 1e6;
             const subIdx = forward ? s : subCount - s;
             const subId = `osm_sub_${pairKey}_${subIdx}`;
             densePts.push({
@@ -1249,16 +1336,25 @@ export function buildDenseRealOsmGraph(
           ? 1.25
           : hwType.startsWith('tertiary')
           ? 1.1
+          : hwType === 'footway' || hwType === 'path' || hwType === 'cycleway'
+          ? 0.75
+          : hwType === 'service' || hwType === 'track' || hwType === 'pedestrian'
+          ? 0.85
           : 0.9;
 
+      const layerKey = `${way.tags?.layer || '0'}_${
+        way.tags?.tunnel === 'yes' ? 't' : way.tags?.bridge === 'yes' ? 'b' : 'g'
+      }`;
+      const snappedPts = densePts.map((pt) => resolveOrRegisterSnapVertex(pt, mode, layerKey));
+
       let wayAdded = 0;
-      for (let i = 0; i < densePts.length - 1; i++) {
+      for (let i = 0; i < snappedPts.length - 1; i++) {
         if (groupAdded >= maxEdgesForGroup || wayAdded >= maxPerWay) break;
-        const a = densePts[i];
-        const b = densePts[i + 1];
+        const a = snappedPts[i];
+        const b = snappedPts[i + 1];
         if (a.id === b.id) continue;
 
-        const distM = haversineMeters(a.lat, a.lng, b.lat, b.lng);
+        const distM = fastEquirectMeters(a.lat, a.lng, b.lat, b.lng);
         if (distM > MAX_EMITTED_METERS) continue;
 
         const edgeId = a.id < b.id ? `oe_${a.id}_${b.id}` : `oe_${b.id}_${a.id}`;
@@ -1344,26 +1440,33 @@ export async function resolveRegionCached(
   return pendingInfo;
 }
 
-export async function loadOsmRoadChunkDirect(lat: number, lng: number): Promise<ChunkPayload> {
+export async function loadOsmRoadChunkDirect(
+  lat: number,
+  lng: number,
+  options?: { allowStarterFallback?: boolean }
+): Promise<ChunkPayload> {
   const chunkKey = quantizeChunkKey(lat, lng);
   const cached = chunkCache.get(chunkKey);
-  if (cached && cached.osmEdges.length > 0) {
+  if (cached && (cached.osmEdges.length > 0 || cached.usedLiveOverpass)) {
     return cached;
   }
 
   let pending = inFlightChunks.get(chunkKey);
   if (!pending) {
     pending = (async () => {
+      let hadLiveResponse = false;
       const dLat1 = 0.0038;
       const dLng1 = 0.0048;
       let raw = await fetchOsmBbox(lat - dLat1, lng - dLng1, lat + dLat1, lng + dLng1);
+      if (raw !== null) hadLiveResponse = true;
       let payload = raw ? buildDenseRealOsmGraph(raw, chunkKey, lat, lng) : null;
 
       if (!payload || payload.osmEdges.length < 12) {
         const dLat2 = 0.0045;
         const dLng2 = 0.0058;
         raw = await fetchOsmBbox(lat - dLat2, lng - dLng2, lat + dLat2, lng + dLng2);
-        if (raw) {
+        if (raw !== null) {
+          hadLiveResponse = true;
           payload = buildDenseRealOsmGraph(raw, chunkKey, lat, lng);
         }
       }
@@ -1372,7 +1475,8 @@ export async function loadOsmRoadChunkDirect(lat: number, lng: number): Promise<
         const dLat3 = 0.011;
         const dLng3 = 0.014;
         raw = await fetchOsmBbox(lat - dLat3, lng - dLng3, lat + dLat3, lng + dLng3);
-        if (raw) {
+        if (raw !== null) {
+          hadLiveResponse = true;
           payload = buildDenseRealOsmGraph(raw, chunkKey, lat, lng, {
             clipLat: 0.012,
             clipLng: 0.015,
@@ -1387,13 +1491,36 @@ export async function loadOsmRoadChunkDirect(lat: number, lng: number): Promise<
         return payload;
       }
 
+      if (hadLiveResponse || options?.allowStarterFallback === false) {
+        const emptyPayload: ChunkPayload = {
+          chunkKey,
+          osmNodes: [],
+          osmEdges: [],
+          usedLiveOverpass: hadLiveResponse,
+          source: 'osm-0.6-api',
+          wayCount: 0,
+        };
+        if (hadLiveResponse) {
+          chunkCache.set(chunkKey, emptyPayload);
+        }
+        return emptyPayload;
+      }
+
       return buildFallbackStarterGrid(chunkKey, lat, lng);
     })();
     inFlightChunks.set(chunkKey, pending);
     pending.finally(() => inFlightChunks.delete(chunkKey));
   }
 
-  return pending;
+  const res = await pending;
+  if (
+    !res.usedLiveOverpass &&
+    res.osmNodes.length === 0 &&
+    options?.allowStarterFallback !== false
+  ) {
+    return buildFallbackStarterGrid(chunkKey, lat, lng);
+  }
+  return res;
 }
 
 export async function loadOsmRegionInfoDirect(
@@ -1486,7 +1613,8 @@ export async function loadNearbyProvincialRegionsDirect(
 export async function loadOsmProvinceDirect(
   lat: number,
   lng: number,
-  expectedRegionName?: string
+  expectedRegionName?: string,
+  options?: { allowStarterFallback?: boolean }
 ): Promise<ProvincePayload> {
   const chunkKey = quantizeChunkKey(lat, lng);
   const region = await resolveRegionCached(lat, lng, expectedRegionName);
@@ -1495,7 +1623,7 @@ export async function loadOsmProvinceDirect(
   const adminLevel = region?.adminLevel || '6';
 
   const cached = provinceCache.get(regionId);
-  if (cached && cached.osmEdges.length > 0) {
+  if (cached && (cached.osmEdges.length > 0 || cached.usedLiveOverpass)) {
     return cached;
   }
 
@@ -1528,7 +1656,7 @@ export async function loadOsmProvinceDirect(
 
       const [districtRaw, cityWideRaw, localBboxRaw] = await Promise.allSettled([
         fetchOverpassQuery(
-          `[out:json][timeout:6];(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street).*$"](${distBoxStr});way["railway"](${distBoxStr}););out body;>;out skel qt;`,
+          `[out:json][timeout:6];(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street|service|pedestrian|track|road|footway|path|cycleway).*$"](${distBoxStr});way["railway"](${distBoxStr}););out body;>;out skel qt;`,
           7500
         ),
         fetchOverpassQuery(
@@ -1537,6 +1665,11 @@ export async function loadOsmProvinceDirect(
         ),
         fetchOsmBbox(lat - 0.0032, lng - 0.0042, lat + 0.0032, lng + 0.0042, 7500),
       ]);
+
+      let hadLiveResponse =
+        (localBboxRaw.status === 'fulfilled' && localBboxRaw.value !== null) ||
+        districtRaw.status === 'fulfilled' ||
+        cityWideRaw.status === 'fulfilled';
 
       const mergedNodes = new Map<string, OsmNode>();
       const mergedEdges = new Map<string, OsmEdge>();
@@ -1555,9 +1688,9 @@ export async function loadOsmProvinceDirect(
           clipLng: 0.019,
           maxEdgeMeters: 30,
           targetSubdivMeters: 25,
-          roadBudget: 1800,
+          roadBudget: 2600,
           railBudget: 450,
-          maxPerWay: 75,
+          maxPerWay: 95,
         });
         totalWayCount += g.wayCount;
         g.osmNodes.forEach((n) => {
@@ -1593,9 +1726,10 @@ export async function loadOsmProvinceDirect(
         });
       }
 
-      if (mergedEdges.size === 0) {
+      if (mergedEdges.size === 0 && !hadLiveResponse) {
         const fallbackRaw = await fetchOsmBbox(lat - 0.005, lng - 0.006, lat + 0.005, lng + 0.006);
-        if (fallbackRaw) {
+        if (fallbackRaw !== null) {
+          hadLiveResponse = true;
           const g = buildDenseRealOsmGraph(fallbackRaw, chunkKey, lat, lng);
           totalWayCount += g.wayCount;
           g.osmNodes.forEach((n) => mergedNodes.set(n.id, n));
@@ -1603,8 +1737,8 @@ export async function loadOsmProvinceDirect(
         }
       }
 
-      const usedLiveOverpass = mergedEdges.size > 0;
-      if (mergedEdges.size === 0) {
+      const usedLiveOverpass = hadLiveResponse || mergedEdges.size > 0;
+      if (mergedEdges.size === 0 && !hadLiveResponse && options?.allowStarterFallback !== false) {
         const fb = buildFallbackStarterGrid(chunkKey, lat, lng);
         totalWayCount += fb.wayCount;
         fb.osmNodes.forEach((n) => mergedNodes.set(n.id, n));
@@ -1626,7 +1760,7 @@ export async function loadOsmProvinceDirect(
         wayCount: totalWayCount,
       };
 
-      if (usedLiveOverpass && payload.osmEdges.length > 0) {
+      if (usedLiveOverpass) {
         provinceCache.set(regionId, payload);
       }
       return payload;
@@ -1635,5 +1769,20 @@ export async function loadOsmProvinceDirect(
     pending.finally(() => inFlightProvinces.delete(regionId));
   }
 
-  return pending;
+  const res = await pending;
+  if (
+    !res.usedLiveOverpass &&
+    res.osmNodes.length === 0 &&
+    options?.allowStarterFallback !== false
+  ) {
+    const fb = buildFallbackStarterGrid(chunkKey, lat, lng);
+    return {
+      ...res,
+      totalNodeCount: fb.osmNodes.length,
+      osmNodes: fb.osmNodes,
+      osmEdges: fb.osmEdges,
+      wayCount: fb.wayCount,
+    };
+  }
+  return res;
 }

@@ -8,6 +8,7 @@ import {
   buyMaxSkill,
   calculateMultipliers,
   calculateTotalIncomePerSec,
+  canConnectIsolatedRoutePair,
   computeOsmFrontierDistances,
   computeOsmFrontierDistancesForState,
   connectOsmEdge,
@@ -35,10 +36,12 @@ import {
   isCountryLevelRegion,
   isNodeInUnlockedRegion,
   isNodeInUnseededModeInUnlockedRegion,
+  isPointInRegionBoundary,
   isSkillBlockedByExclusivePath,
   isSyntheticFallbackRegion,
   MAX_OSM_FRONTIER_DISTANCE,
   mergeOsmChunk,
+  mergeOsmChunksBatch,
   registerDiscoveredProvincialRegion,
   registerStartingProvincialRegion,
   resetSkillTree,
@@ -49,7 +52,7 @@ import {
   unlockSkill,
 } from './rules';
 import { isCountryLevelOsmArea } from './osmCore';
-import { CURATED_LINES, INITIAL_UPGRADES, PRESET_CITIES } from './worldCatalog';
+import { CURATED_LINES, CURATED_PROVINCIAL_REGIONS, INITIAL_UPGRADES, PRESET_CITIES } from './worldCatalog';
 import { MINIGAME_MILESTONES, MINIGAME_ORDER } from './minigames';
 
 function makeSampleOsmGrid(wayName = '세종대로', mode: 'road' | 'rail' = 'road') {
@@ -1858,3 +1861,346 @@ test('mergeOsmChunk & boundary upgrade set hasRealOsmBoundary and re-tag __locke
     '__locked_outside__ node inside upgraded real boundary must re-tag to unlocked region'
   );
 });
+
+test('mergeOsmChunksBatch matches sequential mergeOsmChunk and scales fast across 4,000 nodes', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  const baseSeq = createInitialGameState(seoul);
+  const baseBatch = createInitialGameState(seoul);
+
+  const chunks = Array.from({ length: 20 }, (_, ci) => {
+    const chunkNodes = [];
+    const chunkEdges = [];
+    const baseLat = 37.54 + ci * 0.002;
+    const baseLng = 126.96 + (ci % 4) * 0.004;
+    for (let i = 0; i < 200; i++) {
+      const id = `c${ci}_n${i}`;
+      chunkNodes.push({
+        id,
+        lat: baseLat + i * 0.00008,
+        lng: baseLng + (i % 5) * 0.0002,
+        connected: ci === 0 && i === 0,
+        mode: 'road' as const,
+      });
+      if (i > 0) {
+        chunkEdges.push({
+          id: `c${ci}_e${i}`,
+          wayName: `로_${ci}_${i % 7}`,
+          highwayType: 'primary',
+          mode: 'road' as const,
+          fromNodeId: `c${ci}_n${i - 1}`,
+          toNodeId: id,
+          coordinates: [
+            [baseLat + (i - 1) * 0.00008, baseLng + ((i - 1) % 5) * 0.0002],
+            [baseLat + i * 0.00008, baseLng + (i % 5) * 0.0002],
+          ] as [[number, number], [number, number]],
+          distanceKm: 0.08,
+          buildCost: 20,
+          baseIncomePerSec: 1.5,
+          built: false,
+        });
+      }
+      if (i >= 10) {
+        chunkEdges.push({
+          id: `c${ci}_cross_${i}`,
+          wayName: `교차로_${ci}_${i % 5}`,
+          highwayType: 'secondary',
+          mode: 'road' as const,
+          fromNodeId: `c${ci}_n${i - 10}`,
+          toNodeId: id,
+          coordinates: [
+            [baseLat + (i - 10) * 0.00008, baseLng + ((i - 10) % 5) * 0.0002],
+            [baseLat + i * 0.00008, baseLng + (i % 5) * 0.0002],
+          ] as [[number, number], [number, number]],
+          distanceKm: 0.14,
+          buildCost: 30,
+          baseIncomePerSec: 2.0,
+          built: false,
+        });
+      }
+    }
+    return {
+      chunkKey: `chunk_${ci}`,
+      osmNodes: chunkNodes,
+      osmEdges: chunkEdges,
+      regionId: 'curated_kr_seoul',
+    };
+  });
+
+  // Correctness parity check on first 3 chunks
+  let seqState = baseSeq;
+  for (let i = 0; i < 3; i++) {
+    const ch = chunks[i];
+    seqState = mergeOsmChunk(seqState, ch.chunkKey, ch.osmNodes, ch.osmEdges, ch.regionId, {
+      skipAutoSeed: true,
+    });
+  }
+  const smallBatchState = mergeOsmChunksBatch(baseBatch, chunks.slice(0, 3), {
+    skipAutoSeed: true,
+  });
+  assert.equal(smallBatchState.osmNodes.length, seqState.osmNodes.length);
+  assert.equal(smallBatchState.osmEdges.length, seqState.osmEdges.length);
+  assert.deepEqual(smallBatchState.loadedOsmChunks, seqState.loadedOsmChunks);
+  assert.equal(smallBatchState.stats.connectedOsmNodes, seqState.stats.connectedOsmNodes);
+
+  // Throughput check on all 20 chunks (~4,000 nodes / ~7,780 edges)
+  const t0 = performance.now();
+  const fullBatchState = mergeOsmChunksBatch(baseBatch, chunks, { skipAutoSeed: true });
+  const elapsedMs = performance.now() - t0;
+  assert.equal(fullBatchState.osmNodes.length, 4000);
+  assert.ok(fullBatchState.osmEdges.length > 7000);
+  assert.ok(
+    elapsedMs < 350,
+    `Expected batch merge of 4,000 nodes / ~7,800 edges to finish < 350ms, got ${elapsedMs.toFixed(1)}ms`
+  );
+});
+
+test('A* findOsmRoadPath picks exact shortest path and connectOsmPath stays fast on 5,000-node grid', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  let state = createInitialGameState(seoul);
+  state = { ...state, capital: 1e9 };
+
+  // Build a 100 x 50 grid (5,000 nodes, ~9,850 edges) inside Seoul bbox
+  const rows = 100;
+  const cols = 50;
+  const nodes: typeof state.osmNodes = [];
+  const edges: typeof state.osmEdges = [];
+  const lat0 = 37.50;
+  const lng0 = 126.90;
+  const step = 0.0011; // ~100m spacing
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const id = `g_${r}_${c}`;
+      nodes.push({
+        id,
+        lat: lat0 + r * step,
+        lng: lng0 + c * step,
+        connected: r === 0 && c === 0,
+        mode: 'road',
+        regionId: 'curated_kr_seoul',
+      });
+      if (c > 0) {
+        const left = `g_${r}_${c - 1}`;
+        edges.push({
+          id: `eh_${r}_${c}`,
+          wayName: `가로_${r}`,
+          highwayType: 'primary',
+          mode: 'road',
+          fromNodeId: left,
+          toNodeId: id,
+          coordinates: [
+            [lat0 + r * step, lng0 + (c - 1) * step],
+            [lat0 + r * step, lng0 + c * step],
+          ],
+          distanceKm: 0.1,
+          buildCost: 25,
+          baseIncomePerSec: 1.5,
+          built: false,
+          regionId: 'curated_kr_seoul',
+        });
+      }
+      if (r > 0) {
+        const down = `g_${r - 1}_${c}`;
+        edges.push({
+          id: `ev_${r}_${c}`,
+          wayName: `세로_${c}`,
+          highwayType: 'secondary',
+          mode: 'road',
+          fromNodeId: down,
+          toNodeId: id,
+          coordinates: [
+            [lat0 + (r - 1) * step, lng0 + c * step],
+            [lat0 + r * step, lng0 + c * step],
+          ],
+          distanceKm: 0.122,
+          buildCost: 25,
+          baseIncomePerSec: 1.5,
+          built: false,
+          regionId: 'curated_kr_seoul',
+        });
+      }
+    }
+  }
+
+  state = {
+    ...state,
+    pendingSeedRegionIds: [],
+    osmNodes: nodes,
+    osmEdges: edges,
+    stats: { ...state.stats, connectedOsmNodes: 1 },
+  };
+
+  // Warm up WeakMap static topology once (simulating live game session after map open)
+  const warmDist = computeOsmFrontierDistancesForState(state);
+  assert.ok(warmDist.size > 0);
+
+  // Optimal Manhattan path from (0,0) -> (4,4) = 4*0.1 + 4*0.122 = 0.888 km across 8 edges
+  const path = findOsmRoadPath(state, 'g_0_0', 'g_4_4');
+  assert.ok(path, 'A* must find road path in dense grid');
+  assert.equal(path.edgeIds.length, 8);
+  assert.ok(Math.abs(path.totalDistanceKm - 0.888) < 1e-6);
+
+  // Sequential click-connect benchmark: 10 path clicks in a row must average < 25ms each
+  let cursor = 'g_0_0';
+  const targets = ['g_2_2', 'g_4_4', 'g_6_6', 'g_8_8', 'g_10_10', 'g_12_12', 'g_14_14', 'g_16_16'];
+  const clickStart = performance.now();
+  for (const tgt of targets) {
+    const res = connectOsmPath(state, cursor, tgt);
+    assert.equal(res.success, true);
+    state = res.newState;
+    const d = computeOsmFrontierDistancesForState(state);
+    const reach = getReachableOsmNodeSet(state, tgt);
+    const prox = getProximityAdjacentChunksToLoad(state, 5);
+    assert.ok(d.size > 0);
+    assert.ok(reach.size > 0);
+    assert.ok(Array.isArray(prox));
+    cursor = tgt;
+  }
+  const avgClickMs = (performance.now() - clickStart) / targets.length;
+  assert.ok(
+    avgClickMs < 40,
+    `Expected full click+frontier+reachable+proximity pipeline on 5,000 nodes to average < 40ms, got ${avgClickMs.toFixed(2)}ms`
+  );
+});
+
+test('getFrontierVisualStyle LUT returns consistent immutable style properties across modes and distances', () => {
+  for (let d = 0; d <= MAX_OSM_FRONTIER_DISTANCE; d++) {
+    for (const mode of ['road', 'rail', 'mixed'] as const) {
+      const a = getFrontierVisualStyle(d, mode, { isSelected: false, isHovered: false });
+      const b = getFrontierVisualStyle(d, mode, { isSelected: false, isHovered: false });
+      assert.equal(a, b, 'LUT lookup should return cached identical object reference');
+      assert.ok(a.brightness >= 0.14 && a.brightness <= 1);
+    }
+  }
+  const hovered = getFrontierVisualStyle(8, 'rail', { isHovered: true });
+  assert.equal(hovered.brightness, 1);
+  const undimmed = getFrontierVisualStyle(1, 'road', { dimForSelection: false });
+  const dimmed = getFrontierVisualStyle(1, 'road', { dimForSelection: true });
+  assert.ok(dimmed.fillOpacity < undimmed.fillOpacity * 0.45 && dimmed.fillOpacity < 0.36);
+});
+
+test('non-Korea curated regions (e.g. California) have realistic geographic boundaries instead of n-gon blobs', () => {
+  const ca = CURATED_PROVINCIAL_REGIONS.find((r) => r.regionId === 'curated_us_ca');
+  assert.ok(ca && ca.boundaryGeoJson, 'California should exist with GeoJSON boundary');
+  assert.equal(ca.boundaryGeoJson.type, 'Polygon');
+  const outer = (ca.boundaryGeoJson.coordinates as number[][][])[0];
+  assert.ok(outer.length >= 25, `California polygon should have >=25 vertices, got ${outer.length}`);
+
+  const caRegion = { ...ca, unlocked: false, isIsolated: false };
+  // San Francisco (37.7749, -122.4194) and Sacramento (38.5816, -121.4944) are inside California
+  assert.equal(isPointInRegionBoundary(37.7749, -122.4194, caRegion), true);
+  assert.equal(isPointInRegionBoundary(38.5816, -121.4944, caRegion), true);
+  // Reno NV (39.5296, -119.8138, east of Tahoe bend) & deep Pacific Ocean (36.5, -123.8) are outside
+  assert.equal(isPointInRegionBoundary(39.5296, -119.8138, caRegion), false);
+  assert.equal(isPointInRegionBoundary(36.5, -123.8, caRegion), false);
+
+  const hyogo = CURATED_PROVINCIAL_REGIONS.find((r) => r.regionId === 'curated_jp_hyogo');
+  assert.equal(hyogo?.boundaryGeoJson?.type, 'MultiPolygon', 'Hyogo should include Awaji Island MultiPolygon');
+});
+
+test('isolated route nodes can self-link within their own exposed component while connected component unconnected pairs stay blocked', () => {
+  const seoul = PRESET_CITIES[0];
+  let state = createInitialGameState(seoul);
+  state = {
+    ...state,
+    capital: 50000,
+    pendingSeedRegionIds: [],
+    osmNodes: [
+      { id: 'a1', lat: 37.566, lng: 126.978, connected: true, mode: 'road', regionId: 'curated_kr_seoul' },
+      { id: 'a2', lat: 37.5663, lng: 126.978, connected: false, mode: 'road', regionId: 'curated_kr_seoul' },
+      // Isolated route ~45m east of a1 (within ISOLATED_ROUTE_BRIDGE_MAX_KM=80m), service road
+      { id: 'b1', lat: 37.566, lng: 126.9785, connected: false, mode: 'road', regionId: 'curated_kr_seoul' },
+      { id: 'b2', lat: 37.5663, lng: 126.9785, connected: false, mode: 'road', regionId: 'curated_kr_seoul' },
+      { id: 'b3', lat: 37.5666, lng: 126.9785, connected: false, mode: 'road', regionId: 'curated_kr_seoul' },
+    ],
+    osmEdges: [
+      {
+        id: 'ea1',
+        wayName: '주도로',
+        highwayType: 'primary',
+        mode: 'road',
+        fromNodeId: 'a1',
+        toNodeId: 'a2',
+        coordinates: [[37.566, 126.978], [37.5663, 126.978]],
+        distanceKm: 0.035,
+        buildCost: 25,
+        baseIncomePerSec: 2,
+        built: false,
+        regionId: 'curated_kr_seoul',
+      },
+      {
+        id: 'eb1',
+        wayName: '고립 골목길',
+        highwayType: 'service',
+        mode: 'road',
+        fromNodeId: 'b1',
+        toNodeId: 'b2',
+        coordinates: [[37.566, 126.9785], [37.5663, 126.9785]],
+        distanceKm: 0.035,
+        buildCost: 20,
+        baseIncomePerSec: 1.5,
+        built: false,
+        regionId: 'curated_kr_seoul',
+      },
+      {
+        id: 'eb2',
+        wayName: '고립 골목길',
+        highwayType: 'service',
+        mode: 'road',
+        fromNodeId: 'b2',
+        toNodeId: 'b3',
+        coordinates: [[37.5663, 126.9785], [37.5666, 126.9785]],
+        distanceKm: 0.035,
+        buildCost: 20,
+        baseIncomePerSec: 1.5,
+        built: false,
+        regionId: 'curated_kr_seoul',
+      },
+    ],
+  };
+
+  assert.equal(canConnectIsolatedRoutePair(state, 'b1', 'b3'), true);
+  const res = connectOsmPath(state, 'b1', 'b3');
+  assert.equal(res.success, true);
+  assert.equal(res.builtCount, 2);
+  assert.equal(res.newState.osmNodes.find((n) => n.id === 'b2')?.connected, true);
+  assert.equal(res.newState.osmNodes.find((n) => n.id === 'b3')?.connected, true);
+});
+
+test('unlockProvincialRegion does not queue pendingSeedRegionIds when roadless island payload has 0 nodes', () => {
+  const seoul = PRESET_CITIES[0];
+  let state = createInitialGameState(seoul);
+  state = {
+    ...state,
+    capital: 999999,
+    provincialRegions: [
+      ...state.provincialRegions,
+      {
+        regionId: 'curated_empty_island',
+        regionName: '무도로 외딴섬',
+        adminLevel: '6',
+        bbox: [37.1, 125.1, 37.15, 125.15],
+        centerLat: 37.125,
+        centerLng: 125.125,
+        unlocked: false,
+        isIsolated: true,
+        isKnownIsland: true,
+      },
+    ],
+  };
+
+  const res = unlockProvincialRegion(state, 'curated_empty_island', {
+    chunkKey: '37.1250_125.1250',
+    osmNodes: [],
+    osmEdges: [],
+    bbox: [37.1, 125.1, 37.15, 125.15],
+    totalNodeCount: 0,
+  });
+  assert.equal(res.success, true);
+  assert.equal(
+    (res.newState.pendingSeedRegionIds || []).includes('curated_empty_island'),
+    false,
+    'Roadless island should not trap pendingSeedRegionIds waiting for a click on 0 nodes'
+  );
+});
+

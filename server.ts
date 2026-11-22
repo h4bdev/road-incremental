@@ -20,12 +20,13 @@ async function startServer() {
   app.get('/api/osm-roads', async (req, res) => {
     const lat = Number(req.query.lat);
     const lng = Number(req.query.lng);
+    const allowStarterFallback = req.query.fallback !== '0';
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
       res.status(400).json({ error: 'Invalid lat/lng coordinates' });
       return;
     }
 
-    const result = await loadOsmRoadChunkDirect(lat, lng);
+    const result = await loadOsmRoadChunkDirect(lat, lng, { allowStarterFallback });
     res.json(result);
   });
 
@@ -58,12 +59,15 @@ async function startServer() {
     const lat = Number(req.query.lat);
     const lng = Number(req.query.lng);
     const name = typeof req.query.name === 'string' ? req.query.name.trim() : undefined;
+    const allowStarterFallback = req.query.fallback !== '0';
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
       res.status(400).json({ error: 'Invalid lat/lng coordinates' });
       return;
     }
 
-    const payload = await loadOsmProvinceDirect(lat, lng, name || undefined);
+    const payload = await loadOsmProvinceDirect(lat, lng, name || undefined, {
+      allowStarterFallback,
+    });
     res.json(payload);
   });
 

@@ -11,6 +11,7 @@ import { AchievementsPanel } from './components/AchievementsPanel';
 import { PrestigePanel } from './components/PrestigePanel';
 import { TownArcadePanel } from './components/TownArcadePanel';
 import { AccountViewInfo, SaveSlotsModal } from './components/SaveSlotsModal';
+import { SaveConflictModal } from './components/SaveConflictModal';
 import { TutorialGuide, TUTORIAL_DONE_STORAGE_KEY } from './components/TutorialGuide';
 import { signInWithGoogle, signOutUser, subscribeToAuth } from './firebase';
 import {
@@ -100,9 +101,11 @@ import {
 } from './game/osmService';
 import {
   applyRestoredGraphMarks,
+  clearCloudSyncBaseline,
   countUnhydratedGraphMarks,
   deleteLocalSlotGameState,
   getActiveSlotId,
+  getCloudSyncBaselineMap,
   getLocalSlotBuiltSkeleton,
   getLocalSlotGraphMarks,
   hydrateLocalSlotGraphFromIndexedDb,
@@ -111,18 +114,23 @@ import {
   mergeSlotSummaries,
   renameLocalSlot,
   RestoredGraphMarks,
+  SAVE_SLOT_IDS,
   SaveSlotId,
   SaveSlotSummary,
   saveLocalSlotGameState,
   setActiveSlotId,
+  setCloudSyncBaseline,
   slotIndexFromId,
+  updateLocalSlotTimestamp,
 } from './game/saveSlots';
 import { BuiltSkeletonTuple, ViewportBounds } from './game/osmOverview';
 import {
+  CloudDownloadResult,
   deleteCloudSlot,
   downloadCloudSlot,
   ensureUserProfile,
   fetchCloudSlotSummaries,
+  formatCloudSyncError,
   renameCloudSlot,
   updateCloudActiveSlot,
   uploadSlotToCloud,
@@ -155,6 +163,13 @@ export default function App() {
   const [syncError, setSyncError] = useState<string | null>(null);
   const [lastCloudSyncAt, setLastCloudSyncAt] = useState<number | null>(null);
   const [busySlotId, setBusySlotId] = useState<SaveSlotId | null>(null);
+  const [syncBaseMap, setSyncBaseMap] = useState<Partial<Record<SaveSlotId, number>>>(() =>
+    getCloudSyncBaselineMap()
+  );
+  const [conflictSlotId, setConflictSlotId] = useState<SaveSlotId | null>(null);
+  const [conflictAction, setConflictAction] = useState<'load' | 'save' | 'sync'>('load');
+  const [conflictError, setConflictError] = useState<string | null>(null);
+  const [isResolvingConflict, setIsResolvingConflict] = useState(false);
 
   const [screenState, setScreenState] = useState<'title' | 'playing'>('title');
   const [gameState, setGameState] = useState<GameState | null>(null);
@@ -178,6 +193,9 @@ export default function App() {
   activeSlotIdRef.current = activeSlotId;
   const firebaseUserRef = useRef<User | null>(firebaseUser);
   firebaseUserRef.current = firebaseUser;
+  const conflictSlotIdRef = useRef<SaveSlotId | null>(conflictSlotId);
+  conflictSlotIdRef.current = conflictSlotId;
+  const promptedConflictSigRef = useRef<Record<string, string>>({});
   const pendingRestoredMarksRef = useRef<RestoredGraphMarks | null>(null);
   const viewportBoundsRef = useRef<ViewportBounds | null>(null);
   const loadingSessionRef = useRef(0);
@@ -240,9 +258,16 @@ export default function App() {
   const [tutorialStep, setTutorialStep] = useState(0);
 
   const mergedSlots = useMemo(
-    () => mergeSlotSummaries(localSlots, cloudSlots),
-    [localSlots, cloudSlots]
+    () => mergeSlotSummaries(localSlots, cloudSlots, syncBaseMap),
+    [localSlots, cloudSlots, syncBaseMap]
   );
+
+  const localSlotsRef = useRef(localSlots);
+  localSlotsRef.current = localSlots;
+  const cloudSlotsRef = useRef(cloudSlots);
+  cloudSlotsRef.current = cloudSlots;
+  const mergedSlotsRef = useRef(mergedSlots);
+  mergedSlotsRef.current = mergedSlots;
 
   const accountInfo = useMemo<AccountViewInfo | null>(() => {
     if (!firebaseUser) return null;
@@ -254,24 +279,52 @@ export default function App() {
     };
   }, [firebaseUser]);
 
-  const refreshCloudForUser = useCallback(async (user: User) => {
+  const openConflictModal = useCallback(
+    (slotId: SaveSlotId, action: 'load' | 'save' | 'sync' = 'load') => {
+      setConflictAction(action);
+      setConflictError(null);
+      setConflictSlotId(slotId);
+    },
+    []
+  );
+
+  const refreshCloudForUser = useCallback(async (user: User, options?: { promptConflict?: boolean }) => {
     setIsSyncing(true);
     setSyncError(null);
     try {
       const cloudActive = await ensureUserProfile(user, activeSlotIdRef.current);
       const summaries = await fetchCloudSlotSummaries(user.uid);
+      const freshLocal = listLocalSlotSummaries();
+      const freshBase = getCloudSyncBaselineMap();
+      setLocalSlots(freshLocal);
+      setSyncBaseMap(freshBase);
       setCloudSlots(summaries);
       setLastCloudSyncAt(Date.now());
-      if (
-        Object.keys(listLocalSlotSummaries()).length === 0 &&
-        summaries[cloudActive]
-      ) {
+      if (Object.keys(freshLocal).length === 0 && summaries[cloudActive]) {
         setActiveSlotIdState(cloudActive);
         setActiveSlotId(cloudActive);
       }
+
+      if (options?.promptConflict !== false && !conflictSlotIdRef.current) {
+        const nextMerged = mergeSlotSummaries(freshLocal, summaries, freshBase);
+        const checkOrder: SaveSlotId[] = [
+          activeSlotIdRef.current,
+          ...SAVE_SLOT_IDS.filter((id) => id !== activeSlotIdRef.current),
+        ];
+        const firstConflict = checkOrder.find((id) => nextMerged[id]?.hasConflict);
+        if (firstConflict && freshLocal[firstConflict] && summaries[firstConflict]) {
+          const sig = `${freshLocal[firstConflict]!.clientSavedAt}_${summaries[firstConflict]!.clientSavedAt}`;
+          if (promptedConflictSigRef.current[firstConflict] !== sig) {
+            promptedConflictSigRef.current[firstConflict] = sig;
+            setConflictAction('load');
+            setConflictError(null);
+            setConflictSlotId(firstConflict);
+          }
+        }
+      }
     } catch (err) {
       setSyncError(
-        err instanceof Error ? err.message : '클라우드 저장 목록을 불러오지 못했습니다.'
+        formatCloudSyncError(err, '클라우드 저장 목록을 불러오지 못했습니다.')
       );
     } finally {
       setIsSyncing(false);
@@ -283,9 +336,10 @@ export default function App() {
       setFirebaseUser(user);
       setAuthLoading(false);
       if (user) {
-        void refreshCloudForUser(user);
+        void refreshCloudForUser(user, { promptConflict: true });
       } else {
         setCloudSlots({});
+        setConflictSlotId(null);
         setSyncError(null);
       }
     });
@@ -542,7 +596,7 @@ export default function App() {
   }, []);
 
   const persistCurrentSlotLocally = useCallback(
-    (state: GameState, slotId: SaveSlotId, customName?: string) => {
+    (state: GameState, slotId: SaveSlotId, customName?: string, savedAt?: number): number => {
       if (pendingRestoredMarksRef.current) {
         const { unhydratedNodes, unhydratedEdges } = countUnhydratedGraphMarks(
           state,
@@ -552,17 +606,26 @@ export default function App() {
           pendingRestoredMarksRef.current = null;
         }
       }
+      const ts = savedAt ?? Date.now();
       saveLocalSlotGameState(slotId, state, {
         slotName: customName,
+        savedAt: ts,
         pendingMarks: pendingRestoredMarksRef.current,
       });
       setLocalSlots(listLocalSlotSummaries());
+      return ts;
     },
     []
   );
 
   const syncSlotToCloud = useCallback(
-    async (user: User, slotId: SaveSlotId, state: GameState, customName?: string) => {
+    async (
+      user: User,
+      slotId: SaveSlotId,
+      state: GameState,
+      customName?: string,
+      options?: { forceGraphSync?: boolean; fixedTimestamp?: number }
+    ): Promise<SaveSlotSummary | null> => {
       setIsSyncing(true);
       setSyncError(null);
       try {
@@ -575,16 +638,28 @@ export default function App() {
             pendingRestoredMarksRef.current = null;
           }
         }
+        const syncTs = options?.fixedTimestamp ?? Date.now();
         const syncedSummary = await uploadSlotToCloud(user, slotId, state, {
           slotName: customName,
+          clientSavedAt: syncTs,
+          forceGraphSync: options?.forceGraphSync,
           pendingMarks: pendingRestoredMarksRef.current,
         });
+        updateLocalSlotTimestamp(slotId, syncTs, {
+          source: 'synced',
+          cloudSavedAt: syncTs,
+        });
+        setCloudSyncBaseline(slotId, syncTs);
+        setSyncBaseMap(getCloudSyncBaselineMap());
+        setLocalSlots(listLocalSlotSummaries());
         setCloudSlots((prev) => ({ ...prev, [slotId]: syncedSummary }));
         setLastCloudSyncAt(Date.now());
+        return syncedSummary;
       } catch (err) {
         setSyncError(
-          err instanceof Error ? err.message : '클라우드 동기화 저장 중 오류가 발생했습니다.'
+          formatCloudSyncError(err, '클라우드 동기화 저장 중 오류가 발생했습니다.')
         );
+        return null;
       } finally {
         setIsSyncing(false);
       }
@@ -628,9 +703,11 @@ export default function App() {
       soundManager.enabled = fresh.settings.soundEnabled;
       setActiveSlotIdState(targetSlotId);
       setActiveSlotId(targetSlotId);
+      clearCloudSyncBaseline(targetSlotId);
+      setSyncBaseMap(getCloudSyncBaselineMap());
       setGameState(fresh);
       const slotName = `슬롯 ${slotIndexFromId(targetSlotId)} · ${city.name}`;
-      persistCurrentSlotLocally(fresh, targetSlotId, slotName);
+      const startTs = persistCurrentSlotLocally(fresh, targetSlotId, slotName);
       setFlyToTarget(null);
       setActiveModal(null);
       setScreenState('playing');
@@ -648,8 +725,11 @@ export default function App() {
 
       const user = firebaseUserRef.current;
       if (user) {
-        void syncSlotToCloud(user, targetSlotId, fresh, slotName);
-        void updateCloudActiveSlot(user.uid, targetSlotId).catch(() => undefined);
+        void syncSlotToCloud(user, targetSlotId, fresh, slotName, {
+          forceGraphSync: true,
+          fixedTimestamp: startTs,
+        });
+        void updateCloudActiveSlot(user.uid, targetSlotId, user).catch(() => undefined);
       }
 
       // Stream full administrative region & OSM street/rail network in background
@@ -843,18 +923,34 @@ export default function App() {
     []
   );
 
-  // Load any of the 5 slots: instant map entry (<300ms) + IndexedDB & viewport-priority background streaming
+  // Load any of the 5 slots: conflict check -> instant map entry (<300ms) + IndexedDB & viewport-priority background streaming
   const handleLoadSlot = useCallback(
-    async (slotId: SaveSlotId) => {
+    async (
+      slotId: SaveSlotId,
+      forceSource?: 'local' | 'cloud',
+      preloadedCloud?: CloudDownloadResult,
+      skipLocalReupload?: boolean
+    ) => {
       if (busySlotId) return;
-      const summary = mergedSlots[slotId];
+      const summary = mergedSlotsRef.current[slotId];
+      const hasLocalSummary = Boolean(localSlotsRef.current[slotId]);
+      const hasCloudSummary = Boolean(cloudSlotsRef.current[slotId]);
       const localState = loadLocalSlotGameState(slotId);
       const user = firebaseUserRef.current;
 
+      if (!forceSource && summary?.hasConflict && hasLocalSummary && hasCloudSummary) {
+        openConflictModal(slotId, 'load');
+        return;
+      }
+
       const shouldDownloadCloud =
-        Boolean(user) &&
-        Boolean(summary) &&
-        (summary?.source === 'cloud' || Boolean(summary?.hasNewerCloud) || !localState);
+        forceSource === 'cloud'
+          ? Boolean(user)
+          : forceSource === 'local'
+          ? false
+          : Boolean(user) &&
+            Boolean(summary) &&
+            (summary?.source === 'cloud' || Boolean(summary?.hasNewerCloud) || !localState);
 
       const streamMissingChunksProgressive = async (
         sessionId: number,
@@ -942,6 +1038,32 @@ export default function App() {
 
       if (!shouldDownloadCloud) {
         if (!localState) return;
+        if (forceSource === 'local' && user && !skipLocalReupload) {
+          setBusySlotId(slotId);
+          const localMarks = getLocalSlotGraphMarks(slotId);
+          const synced = await uploadSlotToCloud(user, slotId, localState, {
+            slotName: localSlotsRef.current[slotId]?.slotName,
+            clientSavedAt: Date.now(),
+            forceGraphSync: true,
+            pendingMarks: localMarks,
+          }).catch((err) => {
+            setSyncError(formatCloudSyncError(err, '로컬 저장본을 클라우드에 업로드하지 못했습니다.'));
+            return null;
+          });
+          if (synced) {
+            updateLocalSlotTimestamp(slotId, synced.clientSavedAt, {
+              source: 'synced',
+              cloudSavedAt: synced.clientSavedAt,
+            });
+            setCloudSyncBaseline(slotId, synced.clientSavedAt);
+            setSyncBaseMap(getCloudSyncBaselineMap());
+            setLocalSlots(listLocalSlotSummaries());
+            setCloudSlots((prev) => ({ ...prev, [slotId]: synced }));
+            setLastCloudSyncAt(Date.now());
+          }
+          setBusySlotId(null);
+        }
+
         const localMarks = getLocalSlotGraphMarks(slotId);
         const connectedLocal = (localState.osmNodes || []).filter((n) => n.connected).length;
         pendingRestoredMarksRef.current =
@@ -949,7 +1071,7 @@ export default function App() {
         const skeleton = getLocalSlotBuiltSkeleton(slotId);
         launchLoadedSlotState(localState, slotId, skeleton);
         if (user) {
-          void updateCloudActiveSlot(user.uid, slotId).catch(() => undefined);
+          void updateCloudActiveSlot(user.uid, slotId, user).catch(() => undefined);
         }
 
         const sessionId = beginLoadingSession('캐시 도로망 복원 중', 20);
@@ -1149,7 +1271,7 @@ export default function App() {
       setBusySlotId(slotId);
       setSyncError(null);
       try {
-        const downloaded = await downloadCloudSlot(user.uid, slotId);
+        const downloaded = preloadedCloud ?? (await downloadCloudSlot(user.uid, slotId));
         if (!downloaded) {
           if (localState) {
             pendingRestoredMarksRef.current = null;
@@ -1196,10 +1318,20 @@ export default function App() {
           },
         };
 
+        // Persist cloud snapshot & sync baseline locally immediately so reloading mid-stream never creates false divergence
+        saveLocalSlotGameState(slotId, initialCloudState, {
+          slotName: downloaded.summary.slotName,
+          savedAt: downloaded.summary.clientSavedAt,
+          pendingMarks: downloaded.marks,
+        });
+        setCloudSyncBaseline(slotId, downloaded.summary.clientSavedAt);
+        setSyncBaseMap(getCloudSyncBaselineMap());
+        setLocalSlots(listLocalSlotSummaries());
+
         // Enter 'playing' IMMEDIATELY without blocking on Overpass network!
         launchLoadedSlotState(initialCloudState, slotId, cloudSkeleton);
         setCloudSlots((prev) => ({ ...prev, [slotId]: downloaded.summary }));
-        void updateCloudActiveSlot(user.uid, slotId).catch(() => undefined);
+        void updateCloudActiveSlot(user.uid, slotId, user).catch(() => undefined);
         setBusySlotId(null);
 
         // Background progressive cloud hydration (IndexedDB hits first -> ALL missing chunks streamed)
@@ -1392,6 +1524,8 @@ export default function App() {
                 savedAt: downloaded.summary.clientSavedAt,
                 pendingMarks: pendingRestoredMarksRef.current,
               });
+              setCloudSyncBaseline(slotId, downloaded.summary.clientSavedAt);
+              setSyncBaseMap(getCloudSyncBaselineMap());
               setLocalSlots(listLocalSlotSummaries());
               void discoverNearbyProvinces(
                 finalState.startingCity.lat,
@@ -1406,10 +1540,9 @@ export default function App() {
           }
         })();
       } catch (err) {
-        setSyncError(
-          err instanceof Error ? err.message : '클라우드 슬롯을 불러오지 못했습니다.'
-        );
-        if (localState) {
+        const msg = formatCloudSyncError(err, '클라우드 슬롯을 불러오지 못했습니다.');
+        setSyncError(msg);
+        if (localState && forceSource !== 'cloud') {
           const sk = getLocalSlotBuiltSkeleton(slotId);
           launchLoadedSlotState(localState, slotId, sk);
           completeLoadingSession(sessionId);
@@ -1426,7 +1559,7 @@ export default function App() {
       discoverNearbyProvinces,
       launchLoadedSlotState,
       mergeHydratedGraphPreservingLiveProgress,
-      mergedSlots,
+      openConflictModal,
       updateLoadingSession,
     ]
   );
@@ -1435,37 +1568,146 @@ export default function App() {
     async (slotId: SaveSlotId) => {
       const current = stateRef.current;
       if (!current) return;
+      const user = firebaseUserRef.current;
+      if (
+        user &&
+        mergedSlotsRef.current[slotId]?.hasConflict &&
+        localSlotsRef.current[slotId] &&
+        cloudSlotsRef.current[slotId]
+      ) {
+        openConflictModal(slotId, 'save');
+        return;
+      }
       setBusySlotId(slotId);
       setActiveSlotIdState(slotId);
       setActiveSlotId(slotId);
-      const existingSummary = mergedSlots[slotId];
+      const existingSummary = mergedSlotsRef.current[slotId];
       const preservedName =
         existingSummary && existingSummary.cityId === current.startingCity.id
           ? existingSummary.slotName
           : undefined;
-      persistCurrentSlotLocally(current, slotId, preservedName);
-      const user = firebaseUserRef.current;
+      const savedTs = persistCurrentSlotLocally(current, slotId, preservedName);
       if (user) {
-        await syncSlotToCloud(user, slotId, current, preservedName);
-        void updateCloudActiveSlot(user.uid, slotId).catch(() => undefined);
+        await syncSlotToCloud(user, slotId, current, preservedName, {
+          fixedTimestamp: savedTs,
+        });
+        void updateCloudActiveSlot(user.uid, slotId, user).catch(() => undefined);
       }
       setBusySlotId(null);
     },
-    [mergedSlots, persistCurrentSlotLocally, syncSlotToCloud]
+    [openConflictModal, persistCurrentSlotLocally, syncSlotToCloud]
   );
 
   const handleUploadLocalSlotToCloud = useCallback(
     async (slotId: SaveSlotId) => {
       const user = firebaseUserRef.current;
       if (!user) return;
+      if (
+        mergedSlotsRef.current[slotId]?.hasConflict &&
+        localSlotsRef.current[slotId] &&
+        cloudSlotsRef.current[slotId]
+      ) {
+        openConflictModal(slotId, 'sync');
+        return;
+      }
       const localState = loadLocalSlotGameState(slotId);
       if (!localState) return;
       setBusySlotId(slotId);
-      await syncSlotToCloud(user, slotId, localState, mergedSlots[slotId]?.slotName);
+      await syncSlotToCloud(user, slotId, localState, mergedSlotsRef.current[slotId]?.slotName, {
+        forceGraphSync: true,
+        fixedTimestamp: Date.now(),
+      });
       setBusySlotId(null);
     },
-    [mergedSlots, syncSlotToCloud]
+    [openConflictModal, syncSlotToCloud]
   );
+
+  const handleResolveConflictLocal = useCallback(async () => {
+    const slotId = conflictSlotIdRef.current;
+    const user = firebaseUserRef.current;
+    if (!slotId || !user) return;
+
+    const useLiveState = screenState === 'playing' && activeSlotIdRef.current === slotId && stateRef.current;
+    const localMarks = useLiveState ? pendingRestoredMarksRef.current : getLocalSlotGraphMarks(slotId);
+    const localState = useLiveState ? stateRef.current! : loadLocalSlotGameState(slotId);
+    if (!localState) {
+      setConflictError('로컬 저장 데이터를 불러올 수 없습니다.');
+      return;
+    }
+
+    setIsResolvingConflict(true);
+    setConflictError(null);
+    try {
+      const slotName =
+        localSlotsRef.current[slotId]?.slotName ||
+        cloudSlotsRef.current[slotId]?.slotName;
+      const syncTs = Date.now();
+      const uploaded = await uploadSlotToCloud(user, slotId, localState, {
+        slotName,
+        clientSavedAt: syncTs,
+        forceGraphSync: true,
+        pendingMarks: localMarks,
+      });
+
+      saveLocalSlotGameState(slotId, localState, {
+        slotName: uploaded.slotName,
+        savedAt: syncTs,
+        pendingMarks: localMarks,
+      });
+      setCloudSyncBaseline(slotId, syncTs);
+      setSyncBaseMap(getCloudSyncBaselineMap());
+      setLocalSlots(listLocalSlotSummaries());
+      setCloudSlots((prev) => ({ ...prev, [slotId]: uploaded }));
+      setLastCloudSyncAt(Date.now());
+      void updateCloudActiveSlot(user.uid, slotId, user).catch(() => undefined);
+
+      setConflictSlotId(null);
+      if (conflictAction === 'load') {
+        await handleLoadSlot(slotId, 'local', undefined, true);
+      }
+    } catch (err) {
+      setConflictError(
+        formatCloudSyncError(err, '로컬 저장본을 클라우드에 저장하지 못했습니다.')
+      );
+    } finally {
+      setIsResolvingConflict(false);
+    }
+  }, [conflictAction, handleLoadSlot, screenState]);
+
+  const handleResolveConflictCloud = useCallback(async () => {
+    const slotId = conflictSlotIdRef.current;
+    const user = firebaseUserRef.current;
+    if (!slotId || !user) return;
+
+    setIsResolvingConflict(true);
+    setConflictError(null);
+    try {
+      const downloaded = await downloadCloudSlot(user.uid, slotId);
+      if (!downloaded) {
+        setConflictError('클라우드에서 저장본을 찾지 못했습니다.');
+        return;
+      }
+
+      saveLocalSlotGameState(slotId, downloaded.baseState, {
+        slotName: downloaded.summary.slotName,
+        savedAt: downloaded.summary.clientSavedAt,
+        pendingMarks: downloaded.marks,
+      });
+      setCloudSyncBaseline(slotId, downloaded.summary.clientSavedAt);
+      setSyncBaseMap(getCloudSyncBaselineMap());
+      setLocalSlots(listLocalSlotSummaries());
+      setCloudSlots((prev) => ({ ...prev, [slotId]: downloaded.summary }));
+      setLastCloudSyncAt(Date.now());
+      setConflictSlotId(null);
+      await handleLoadSlot(slotId, 'cloud', downloaded);
+    } catch (err) {
+      setConflictError(
+        formatCloudSyncError(err, '클라우드 저장본을 불러오지 못했습니다.')
+      );
+    } finally {
+      setIsResolvingConflict(false);
+    }
+  }, [handleLoadSlot]);
 
   const handleRenameSlot = useCallback(
     async (slotId: SaveSlotId, newName: string) => {
@@ -1474,7 +1716,7 @@ export default function App() {
       renameLocalSlot(slotId, trimmed);
       setLocalSlots(listLocalSlotSummaries());
       const user = firebaseUserRef.current;
-      if (user && cloudSlots[slotId]) {
+      if (user && cloudSlotsRef.current[slotId]) {
         setBusySlotId(slotId);
         try {
           await renameCloudSlot(user.uid, slotId, trimmed);
@@ -1482,22 +1724,24 @@ export default function App() {
             prev[slotId] ? { ...prev, [slotId]: { ...prev[slotId]!, slotName: trimmed } } : prev
           );
         } catch (err) {
-          setSyncError(err instanceof Error ? err.message : '슬롯 이름 변경에 실패했습니다.');
+          setSyncError(formatCloudSyncError(err, '슬롯 이름 변경에 실패했습니다.'));
         } finally {
           setBusySlotId(null);
         }
       }
     },
-    [cloudSlots]
+    []
   );
 
   const handleDeleteSlot = useCallback(
     async (slotId: SaveSlotId) => {
       setBusySlotId(slotId);
       deleteLocalSlotGameState(slotId);
+      clearCloudSyncBaseline(slotId);
+      setSyncBaseMap(getCloudSyncBaselineMap());
       setLocalSlots(listLocalSlotSummaries());
       const user = firebaseUserRef.current;
-      if (user && cloudSlots[slotId]) {
+      if (user && cloudSlotsRef.current[slotId]) {
         try {
           await deleteCloudSlot(user.uid, slotId);
           setCloudSlots((prev) => {
@@ -1506,12 +1750,12 @@ export default function App() {
             return next;
           });
         } catch (err) {
-          setSyncError(err instanceof Error ? err.message : '클라우드 슬롯 삭제에 실패했습니다.');
+          setSyncError(formatCloudSyncError(err, '클라우드 슬롯 삭제에 실패했습니다.'));
         }
       }
       setBusySlotId(null);
     },
-    [cloudSlots]
+    []
   );
 
   const handleSignIn = useCallback(async () => {
@@ -1519,9 +1763,23 @@ export default function App() {
     try {
       await signInWithGoogle();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!msg.includes('popup-closed-by-user')) {
-        setSyncError('Google 로그인에 실패했습니다. 팝업 차단을 해제한 뒤 다시 시도해 주세요.');
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code?: unknown }).code || '')
+          : '';
+      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+        return;
+      }
+      if (code === 'auth/popup-blocked') {
+        setSyncError('브라우저에서 로그인 팝업이 차단되었습니다. 팝업 허용 후 다시 시도해 주세요.');
+      } else if (code === 'auth/unauthorized-domain') {
+        setSyncError('현재 도메인이 Google 로그인 허용 목록에 등록되어 있지 않습니다.');
+      } else if (code === 'auth/network-request-failed') {
+        setSyncError('네트워크 연결 오류로 Google 로그인에 실패했습니다.');
+      } else {
+        setSyncError(
+          formatCloudSyncError(err, 'Google 로그인에 실패했습니다. 팝업 차단을 해제한 뒤 다시 시도해 주세요.')
+        );
       }
     }
   }, []);
@@ -1811,7 +2069,7 @@ export default function App() {
     return () => cancelAnimationFrame(rafId);
   }, [screenState, announceAchievements, announceMilestones]);
 
-  // Auto-save locally every 8 seconds + background cloud sync every 30s while signed in
+  // Auto-save locally every 8 seconds + background cloud sync every 30s while signed in (skips conflicted slots)
   useEffect(() => {
     if (screenState !== 'playing') return;
     const persistState = () => {
@@ -1820,7 +2078,13 @@ export default function App() {
     };
     const syncCloudIfSignedIn = () => {
       if (!stateRef.current || !firebaseUserRef.current) return;
-      void syncSlotToCloud(firebaseUserRef.current, activeSlotIdRef.current, stateRef.current);
+      const slotId = activeSlotIdRef.current;
+      if (conflictSlotIdRef.current === slotId) return;
+      if (mergedSlotsRef.current[slotId]?.hasConflict) return;
+      const ts = persistCurrentSlotLocally(stateRef.current, slotId);
+      void syncSlotToCloud(firebaseUserRef.current, slotId, stateRef.current, undefined, {
+        fixedTimestamp: ts,
+      });
     };
     const onVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
@@ -1946,12 +2210,18 @@ export default function App() {
 
   const handleOpenCityReset = useCallback(() => {
     if (stateRef.current) {
-      persistCurrentSlotLocally(stateRef.current, activeSlotIdRef.current);
-      if (firebaseUserRef.current) {
+      const slotId = activeSlotIdRef.current;
+      const savedTs = persistCurrentSlotLocally(stateRef.current, slotId);
+      if (
+        firebaseUserRef.current &&
+        !mergedSlotsRef.current[slotId]?.hasConflict
+      ) {
         void syncSlotToCloud(
           firebaseUserRef.current,
-          activeSlotIdRef.current,
-          stateRef.current
+          slotId,
+          stateRef.current,
+          undefined,
+          { fixedTimestamp: savedTs }
         );
       }
     }
@@ -2056,12 +2326,15 @@ export default function App() {
       queueMicrotask(() => {
         const cur = updated || stateRef.current;
         if (!cur) return;
-        persistCurrentSlotLocally(cur, activeSlotIdRef.current);
-        if (firebaseUserRef.current) {
+        const slotId = activeSlotIdRef.current;
+        const savedTs = persistCurrentSlotLocally(cur, slotId);
+        if (firebaseUserRef.current && !mergedSlotsRef.current[slotId]?.hasConflict) {
           void syncSlotToCloud(
             firebaseUserRef.current,
-            activeSlotIdRef.current,
-            cur
+            slotId,
+            cur,
+            undefined,
+            { fixedTimestamp: savedTs }
           );
         }
       });
@@ -2126,11 +2399,12 @@ export default function App() {
           onSignOut={handleSignOut}
           onRefreshCloud={async () => {
             if (firebaseUserRef.current) {
-              await refreshCloudForUser(firebaseUserRef.current);
+              await refreshCloudForUser(firebaseUserRef.current, { promptConflict: true });
             }
           }}
           onStartWithCity={handleStartWithCity}
           onLoadSlot={handleLoadSlot}
+          onResolveConflict={(slotId) => openConflictModal(slotId, 'load')}
           onRenameSlot={handleRenameSlot}
           onDeleteSlot={handleDeleteSlot}
           onUploadLocalSlotToCloud={handleUploadLocalSlotToCloud}
@@ -2197,21 +2471,30 @@ export default function App() {
               onSignOut={handleSignOut}
               onRefreshCloud={async () => {
                 if (firebaseUserRef.current) {
-                  await refreshCloudForUser(firebaseUserRef.current);
+                  await refreshCloudForUser(firebaseUserRef.current, { promptConflict: true });
                 }
               }}
               onSyncNow={async () => {
-                if (firebaseUserRef.current && stateRef.current) {
-                  persistCurrentSlotLocally(stateRef.current, activeSlotIdRef.current);
-                  await syncSlotToCloud(
-                    firebaseUserRef.current,
-                    activeSlotIdRef.current,
-                    stateRef.current
-                  );
+                const user = firebaseUserRef.current;
+                const slotId = activeSlotIdRef.current;
+                if (!user || !stateRef.current) return;
+                if (
+                  mergedSlotsRef.current[slotId]?.hasConflict &&
+                  localSlotsRef.current[slotId] &&
+                  cloudSlotsRef.current[slotId]
+                ) {
+                  openConflictModal(slotId, 'sync');
+                  return;
                 }
+                const savedTs = persistCurrentSlotLocally(stateRef.current, slotId);
+                await syncSlotToCloud(user, slotId, stateRef.current, undefined, {
+                  forceGraphSync: true,
+                  fixedTimestamp: savedTs,
+                });
               }}
               onSaveToSlot={handleSaveToSlot}
               onLoadSlot={handleLoadSlot}
+              onResolveConflict={(slotId) => openConflictModal(slotId, 'sync')}
               onRenameSlot={handleRenameSlot}
               onDeleteSlot={handleDeleteSlot}
               currentCapital={gameState.capital}
@@ -2573,6 +2856,24 @@ export default function App() {
             </div>
           )}
         </>
+      )}
+
+      {conflictSlotId && (
+        <SaveConflictModal
+          slotId={conflictSlotId}
+          localSummary={localSlots[conflictSlotId] || null}
+          cloudSummary={cloudSlots[conflictSlotId] || null}
+          onChooseLocal={handleResolveConflictLocal}
+          onChooseCloud={handleResolveConflictCloud}
+          onClose={() => {
+            if (!isResolvingConflict) {
+              setConflictError(null);
+              setConflictSlotId(null);
+            }
+          }}
+          isBusy={isResolvingConflict}
+          errorMessage={conflictError}
+        />
       )}
     </div>
   );

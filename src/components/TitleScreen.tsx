@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   Check,
   Cloud,
   CloudOff,
@@ -43,6 +44,7 @@ interface TitleScreenProps {
   onRefreshCloud: () => Promise<void>;
   onStartWithCity: (city: StartingCity, slotId: SaveSlotId) => Promise<void>;
   onLoadSlot: (slotId: SaveSlotId) => Promise<void>;
+  onResolveConflict?: (slotId: SaveSlotId) => void;
   onRenameSlot: (slotId: SaveSlotId, newName: string) => Promise<void>;
   onDeleteSlot: (slotId: SaveSlotId) => Promise<void>;
   onUploadLocalSlotToCloud: (slotId: SaveSlotId) => Promise<void>;
@@ -62,6 +64,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   onRefreshCloud,
   onStartWithCity,
   onLoadSlot,
+  onResolveConflict,
   onRenameSlot,
   onDeleteSlot,
   onUploadLocalSlotToCloud,
@@ -109,6 +112,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (document.activeElement?.tagName === 'INPUT') return;
+      if (document.querySelector('[role="dialog"]')) return;
       if (e.code === 'Enter' || e.code === 'Space') {
         e.preventDefault();
         if (preferredResumeSlot) {
@@ -307,7 +311,9 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                   data-testid={`title-slot-${slotId}`}
                   onClick={() => setTargetNewSlotId(slotId)}
                   className={`rounded-xl border p-2.5 transition-colors cursor-pointer flex flex-col justify-between gap-2 ${
-                    isSelectedTarget
+                    summary?.hasConflict
+                      ? 'bg-amber-950/20 border-amber-500/70'
+                      : isSelectedTarget
                       ? 'bg-sky-500/10 border-sky-400/70'
                       : 'bg-slate-900/70 border-slate-800 hover:border-slate-700'
                   }`}
@@ -325,19 +331,25 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                       {summary && (
                         <span
                           className={`text-[10px] px-1.5 py-0.5 rounded flex items-center gap-1 ${
-                            summary.source === 'synced'
+                            summary.hasConflict
+                              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold'
+                              : summary.source === 'synced'
                               ? 'bg-emerald-500/15 text-emerald-300'
                               : summary.source === 'cloud' || summary.hasNewerCloud
                               ? 'bg-indigo-500/15 text-indigo-300'
                               : 'bg-slate-800 text-slate-300'
                           }`}
                         >
-                          {summary.source === 'local' ? (
+                          {summary.hasConflict ? (
+                            <AlertTriangle className="w-2.5 h-2.5" />
+                          ) : summary.source === 'local' ? (
                             <HardDrive className="w-2.5 h-2.5" />
                           ) : (
                             <Cloud className="w-2.5 h-2.5" />
                           )}
-                          {summary.source === 'synced'
+                          {summary.hasConflict
+                            ? '충돌 · 선택'
+                            : summary.source === 'synced'
                             ? '동기화'
                             : summary.hasNewerCloud
                             ? '클라우드 최신'
@@ -421,37 +433,57 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                       className="flex items-center gap-1 pt-1 border-t border-slate-800/80"
                       onClick={(e) => e.stopPropagation()}
                     >
-                      <button
-                        type="button"
-                        disabled={isBusy}
-                        onClick={() => void onLoadSlot(slotId)}
-                        className="flex-1 min-h-[32px] px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-[11px] font-semibold flex items-center justify-center gap-1 cursor-pointer tabular-nums"
-                      >
-                        {isBusy ? (
-                          <>
-                            <Loader2 className="w-3 h-3 animate-spin" />
-                            <span>
-                              {loadingProgress?.active ? `${loadingProgress.percent}%` : '불러오는 중'}
-                            </span>
-                          </>
-                        ) : (
-                          <>
-                            <Play className="w-3 h-3 fill-current" />
-                            <span>이어하기</span>
-                          </>
-                        )}
-                      </button>
-
-                      {account && summary.hasNewerLocal && (
+                      {summary.hasConflict ? (
                         <button
                           type="button"
                           disabled={isBusy}
-                          title="로컬 저장본을 클라우드에 업로드"
-                          onClick={() => void onUploadLocalSlotToCloud(slotId)}
-                          className="min-h-[32px] px-2 py-1 rounded-lg bg-sky-600/80 hover:bg-sky-500 text-white text-[11px] flex items-center justify-center cursor-pointer"
+                          onClick={() => {
+                            if (onResolveConflict) {
+                              onResolveConflict(slotId);
+                            } else {
+                              void onLoadSlot(slotId);
+                            }
+                          }}
+                          className="flex-1 min-h-[32px] px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
                         >
-                          <CloudUpload className="w-3.5 h-3.5" />
+                          <AlertTriangle className="w-3 h-3" />
+                          <span>충돌 해결</span>
                         </button>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => void onLoadSlot(slotId)}
+                            className="flex-1 min-h-[32px] px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-[11px] font-semibold flex items-center justify-center gap-1 cursor-pointer tabular-nums"
+                          >
+                            {isBusy ? (
+                              <>
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                <span>
+                                  {loadingProgress?.active ? `${loadingProgress.percent}%` : '불러오는 중'}
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                <Play className="w-3 h-3 fill-current" />
+                                <span>이어하기</span>
+                              </>
+                            )}
+                          </button>
+
+                          {account && summary.hasNewerLocal && (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              title="로컬 저장본을 클라우드에 업로드"
+                              onClick={() => void onUploadLocalSlotToCloud(slotId)}
+                              className="min-h-[32px] px-2 py-1 rounded-lg bg-sky-600/80 hover:bg-sky-500 text-white text-[11px] flex items-center justify-center cursor-pointer"
+                            >
+                              <CloudUpload className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </>
                       )}
 
                       {confirmingDelete ? (

@@ -1,15 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createInitialGameState, mergeOsmChunk, mergeOsmChunksBatch, unlockSkill } from './rules';
+import { chunkKeyForCoords } from './osmService';
 import {
   applyRestoredGraphMarks,
+  clearCloudSyncBaseline,
   countUnhydratedGraphMarks,
   dehydrateGameStateForCloud,
   deleteLocalSlotGameState,
   estimateFirestoreDocBytes,
   getActiveSlotId,
+  getCloudSyncBaseline,
+  getCloudSyncBaselineMap,
   getLocalSlotGraphMarks,
   GRAPH_CHUNK_ITEM_LIMIT,
+  isSlotConflict,
   LEGACY_SAVE_KEY,
   listLocalSlotSummaries,
   loadLocalSlotGameState,
@@ -23,6 +28,8 @@ import {
   SAVE_SLOT_IDS,
   saveLocalSlotGameState,
   setActiveSlotId,
+  setCloudSyncBaseline,
+  updateLocalSlotTimestamp,
 } from './saveSlots';
 import { PRESET_CITIES } from './worldCatalog';
 
@@ -440,8 +447,10 @@ test('4,351-node progressive restore across chunks never truncates at 600 and pr
 
   const dehydrated = dehydrateGameStateForCloud('slot_1', fullState);
   assert.ok(dehydrated.coreFields.loadedOsmChunks.length <= 500);
-  // Prioritized chunk with connected node must be retained in loadedOsmChunks
-  assert.ok(dehydrated.coreFields.loadedOsmChunks.includes('37.450_126.825'));
+  // Prioritized chunk with connected node must match osmService chunkKeyForCoords precision (1/300)
+  assert.ok(
+    dehydrated.coreFields.loadedOsmChunks.includes(chunkKeyForCoords(allNodes[0].lat, allNodes[0].lng))
+  );
 
   const { baseState, marks } = rehydrateGameStateFromCloudPayload(
     dehydrated.coreFields,
@@ -489,4 +498,74 @@ test('4,351-node progressive restore across chunks never truncates at 600 and pr
   assert.equal(completedState.stats.connectedOsmNodes, totalNodes);
   assert.equal(countUnhydratedGraphMarks(completedState, marks).unhydratedNodes, 0);
 });
+
+test('cloud sync baseline prevents false single-device conflicts and catches cross-device or unlinked divergence', () => {
+  const storage = createMemoryStorage();
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  const tokyo = PRESET_CITIES.find((c) => c.id === 'tokyo')!;
+
+  const sBase = createInitialGameState(seoul);
+  const sTokyo = createInitialGameState(tokyo);
+
+  const cloudT0 = {
+    ...dehydrateGameStateForCloud('slot_1', sBase, { clientSavedAt: 100_000 }).metaFields,
+    source: 'cloud' as const,
+  };
+  const localForward = {
+    ...dehydrateGameStateForCloud('slot_1', { ...sBase, capital: 5500 }, { clientSavedAt: 220_000 }).metaFields,
+    connectedOsmNodes: 15,
+    totalOsmEdgesBuilt: 12,
+    source: 'local' as const,
+  };
+
+  // Without baseline -> unlinked local + cloud saves must trigger conflict
+  assert.equal(isSlotConflict(localForward, cloudT0, undefined), true);
+
+  // With matching sync baseline (100_000) -> clean single-device forward progress is NOT a conflict
+  setCloudSyncBaseline('slot_1', 100_000, storage);
+  assert.equal(getCloudSyncBaseline('slot_1', storage), 100_000);
+  assert.equal(isSlotConflict(localForward, cloudT0, getCloudSyncBaseline('slot_1', storage)), false);
+
+  const mergedForward = mergeSlotSummaries(
+    { slot_1: localForward },
+    { slot_1: cloudT0 },
+    getCloudSyncBaselineMap(storage)
+  );
+  assert.equal(mergedForward.slot_1?.hasConflict, false);
+  assert.equal(mergedForward.slot_1?.hasNewerLocal, true);
+  assert.equal(mergedForward.slot_1?.source, 'local');
+
+  // If another device updates Cloud (150_000 !== baseline 100_000) -> MUST trigger conflict
+  const cloudFromOtherDevice = {
+    ...dehydrateGameStateForCloud('slot_1', { ...sBase, capital: 9900 }, { clientSavedAt: 150_000 }).metaFields,
+    connectedOsmNodes: 20,
+    totalOsmEdgesBuilt: 18,
+    source: 'cloud' as const,
+  };
+  assert.equal(
+    isSlotConflict(localForward, cloudFromOtherDevice, getCloudSyncBaseline('slot_1', storage)),
+    true
+  );
+
+  // If city differs even with close timestamps -> MUST trigger conflict
+  const localTokyo = {
+    ...dehydrateGameStateForCloud('slot_1', sTokyo, { clientSavedAt: 100_500 }).metaFields,
+    source: 'local' as const,
+  };
+  assert.equal(isSlotConflict(localTokyo, cloudT0, 100_000), true);
+
+  // Timestamp unification & baseline clearing
+  saveLocalSlotGameState('slot_1', sBase, { storage, savedAt: 250_000 });
+  updateLocalSlotTimestamp('slot_1', 150_000, {
+    storage,
+    source: 'synced',
+    cloudSavedAt: 150_000,
+  });
+  const localAfterSync = listLocalSlotSummaries(storage).slot_1!;
+  assert.equal(localAfterSync.clientSavedAt, 150_000);
+
+  clearCloudSyncBaseline('slot_1', storage);
+  assert.equal(getCloudSyncBaseline('slot_1', storage), undefined);
+});
+
 

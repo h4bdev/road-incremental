@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import {
+  AlertTriangle,
   Check,
   Cloud,
+  CloudDownload,
   CloudOff,
   CloudUpload,
   HardDrive,
@@ -43,6 +45,7 @@ interface SaveSlotsModalProps {
   onSyncNow: () => Promise<void>;
   onSaveToSlot: (slotId: SaveSlotId) => Promise<void>;
   onLoadSlot: (slotId: SaveSlotId) => Promise<void>;
+  onResolveConflict?: (slotId: SaveSlotId) => void;
   onRenameSlot: (slotId: SaveSlotId, newName: string) => Promise<void>;
   onDeleteSlot: (slotId: SaveSlotId) => Promise<void>;
   currentCapital?: number;
@@ -78,6 +81,7 @@ export const SaveSlotsModal: React.FC<SaveSlotsModalProps> = ({
   onSyncNow,
   onSaveToSlot,
   onLoadSlot,
+  onResolveConflict,
   onRenameSlot,
   onDeleteSlot,
   currentCapital,
@@ -109,7 +113,7 @@ export const SaveSlotsModal: React.FC<SaveSlotsModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-40 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-xs sm:p-4"
+      className="fixed inset-0 z-[55] flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-xs sm:p-4"
       onClick={onClose}
     >
       <section
@@ -389,7 +393,9 @@ export const SaveSlotsModal: React.FC<SaveSlotsModalProps> = ({
                   key={slotId}
                   data-testid={`save-slot-${slotId}`}
                   className={`rounded-xl border p-3 sm:p-3.5 transition-colors ${
-                    isActive
+                    summary?.hasConflict
+                      ? 'bg-amber-950/20 border-amber-500/60'
+                      : isActive
                       ? 'bg-sky-950/25 border-sky-500/60'
                       : 'bg-slate-900/75 border-slate-800'
                   }`}
@@ -408,19 +414,25 @@ export const SaveSlotsModal: React.FC<SaveSlotsModalProps> = ({
                         {summary && (
                           <span
                             className={`text-[10px] px-1.5 py-0.5 rounded border flex items-center gap-1 ${
-                              summary.source === 'synced'
+                              summary.hasConflict
+                                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-bold'
+                                : summary.source === 'synced'
                                 ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
                                 : summary.source === 'cloud' || summary.hasNewerCloud
                                 ? 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30'
                                 : 'bg-slate-800 text-slate-300 border-slate-700'
                             }`}
                           >
-                            {summary.source === 'local' ? (
+                            {summary.hasConflict ? (
+                              <AlertTriangle className="w-3 h-3" />
+                            ) : summary.source === 'local' ? (
                               <HardDrive className="w-3 h-3" />
                             ) : (
                               <Cloud className="w-3 h-3" />
                             )}
-                            {summary.source === 'synced'
+                            {summary.hasConflict
+                              ? '충돌 · 선택 필요'
+                              : summary.source === 'synced'
                               ? '동기화됨'
                               : summary.hasNewerCloud
                               ? '클라우드 최신본'
@@ -496,36 +508,56 @@ export const SaveSlotsModal: React.FC<SaveSlotsModalProps> = ({
 
                     {/* Actions */}
                     <div className="flex items-center gap-1.5 flex-wrap shrink-0">
-                      {summary && !isActive && (
+                      {summary?.hasConflict ? (
                         <button
                           type="button"
                           disabled={isBusy}
-                          onClick={() => void onLoadSlot(slotId)}
-                          className="min-h-[36px] px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                          onClick={() => {
+                            if (onResolveConflict) {
+                              onResolveConflict(slotId);
+                            } else {
+                              void onLoadSlot(slotId);
+                            }
+                          }}
+                          className="min-h-[36px] px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-xs font-bold flex items-center gap-1 cursor-pointer"
                         >
-                          {isBusy ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          ) : (
-                            <Play className="w-3.5 h-3.5 fill-current" />
-                          )}
-                          불러오기
+                          <AlertTriangle className="w-3.5 h-3.5" />
+                          충돌 해결
                         </button>
-                      )}
+                      ) : (
+                        <>
+                          {summary && !isActive && (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => void onLoadSlot(slotId)}
+                              className="min-h-[36px] px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                            >
+                              {isBusy ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Play className="w-3.5 h-3.5 fill-current" />
+                              )}
+                              불러오기
+                            </button>
+                          )}
 
-                      {summary && isActive && summary.hasNewerCloud && (
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() => void onLoadSlot(slotId)}
-                          className="min-h-[36px] px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1 cursor-pointer"
-                        >
-                          {isBusy ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          ) : (
-                            <Cloud className="w-3.5 h-3.5" />
+                          {summary && isActive && account && summary.cloudSavedAt && (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => void onLoadSlot(slotId)}
+                              className="min-h-[36px] px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                            >
+                              {isBusy ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <CloudDownload className="w-3.5 h-3.5" />
+                              )}
+                              {summary.hasNewerCloud ? '클라우드 받기' : '클라우드에서 불러오기'}
+                            </button>
                           )}
-                          클라우드 덮어쓰기 받기
-                        </button>
+                        </>
                       )}
 
                       {confirmingOverwrite ? (
@@ -554,7 +586,7 @@ export const SaveSlotsModal: React.FC<SaveSlotsModalProps> = ({
                           type="button"
                           disabled={isBusy}
                           onClick={() => {
-                            if (summary && !isActive) {
+                            if (summary && !isActive && !summary.hasConflict) {
                               setConfirmOverwriteSlot(slotId);
                               setConfirmDeleteSlot(null);
                             } else {

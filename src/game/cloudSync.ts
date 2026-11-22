@@ -34,10 +34,94 @@ export interface CloudDownloadResult {
   pendingChunkKeys: string[];
 }
 
+const MAX_META_CORE_BATCH_BYTES = 950 * 1024;
 const MAX_WRITE_BATCH_BYTES = 450 * 1024;
 const MAX_WRITE_BATCH_OPS = 100;
 
+const VALID_CLOUD_CORE_KEYS = new Set([
+  'ownerUid',
+  'slotId',
+  'version',
+  'capital',
+  'totalLifetimeEarnings',
+  'lastTickTimestamp',
+  'startingCity',
+  'stats',
+  'settings',
+  'skillsMap',
+  'unlockedAchievementIds',
+  'loadedOsmChunks',
+  'loadedOsmRegions',
+  'pendingSeedRegionIds',
+  'completedOsmWays',
+  'regions',
+  'customBridgeEdges',
+  'minigames',
+  'createdAt',
+  'updatedAt',
+]);
+
 const ensuredProfilesInSession = new Set<string>();
+
+export function formatCloudSyncError(
+  error: unknown,
+  fallback = '클라우드 동기화 중 오류가 발생했습니다.'
+): string {
+  const raw = error instanceof Error ? error.message : String(error || '');
+  let parsedError = raw;
+  let op = '';
+  try {
+    if (raw.trim().startsWith('{')) {
+      const info = JSON.parse(raw) as { error?: string; operationType?: string };
+      if (info.error) parsedError = String(info.error);
+      if (info.operationType) op = String(info.operationType);
+    }
+  } catch {
+    // Keep raw string
+  }
+  const lower = parsedError.toLowerCase();
+  if (raw.includes('CLOUD_CORE_MISSING')) {
+    return '클라우드 슬롯의 본문 데이터가 비어 있거나 손상되었습니다. 로컬 저장본으로 덮어쓰기 저장해 복구할 수 있습니다.';
+  }
+  if (lower.includes('permission-denied') || lower.includes('insufficient permissions')) {
+    return op === 'get' || op === 'list'
+      ? '클라우드 데이터를 읽을 권한이 없습니다. Google 계정으로 다시 로그인해 주세요.'
+      : '클라우드 저장 권한이 거부되었습니다. 다시 Google 로그인 후 동기화를 시도해 주세요.';
+  }
+  if (lower.includes('unauthenticated')) {
+    return '로그인 세션이 만료되었습니다. Google 계정으로 다시 로그인해 주세요.';
+  }
+  if (lower.includes('not-found') || lower.includes('no document to update')) {
+    return '클라우드 슬롯 문서를 찾지 못했습니다. 새로고침 후 다시 저장해 주세요.';
+  }
+  if (lower.includes('quota exceeded') || lower.includes('resource-exhausted')) {
+    return '클라우드 데이터베이스 일일 무료 사용량 한도를 초과했습니다. 내일 다시 시도하거나 업그레이드해 주세요.';
+  }
+  if (
+    lower.includes('client is offline') ||
+    lower.includes('unavailable') ||
+    lower.includes('network') ||
+    lower.includes('failed to fetch')
+  ) {
+    return '네트워크 연결이 불안정하여 클라우드 서버에 접속할 수 없습니다.';
+  }
+  if (lower.includes('invalid-argument') || lower.includes('exceeds the maximum allowed size')) {
+    return '저장 데이터 크기가 클라우드 허용 한도를 초과했습니다.';
+  }
+  return parsedError ? `${fallback} (${parsedError.slice(0, 120)})` : fallback;
+}
+
+function isValidExistingDocShape(
+  data: Record<string, unknown> | undefined,
+  uid: string,
+  requiredTimestampKey = 'createdAt'
+): boolean {
+  if (!data) return false;
+  if (data.ownerUid !== uid && data.uid !== uid) return false;
+  const ts = data[requiredTimestampKey];
+  if (!ts || typeof ts !== 'object') return false;
+  return true;
+}
 
 export async function ensureUserProfile(
   user: User,
@@ -45,8 +129,10 @@ export async function ensureUserProfile(
 ): Promise<SaveSlotId> {
   const userPath = `users/${user.uid}`;
   const userRef = doc(db, 'users', user.uid);
-  const email = (user.email || '').slice(0, 254);
-  if (!email || !user.emailVerified) {
+  const rawEmail = user.email || (user.providerData?.[0]?.email ?? '');
+  const email = (rawEmail || `${user.uid}@player.google.com`).slice(0, 254);
+  const isGoogle = user.providerData?.some((p) => p.providerId === 'google.com');
+  if (!user.emailVerified && !isGoogle) {
     return preferredSlotId;
   }
   const displayName = (user.displayName || 'Player').slice(0, 120);
@@ -73,13 +159,35 @@ export async function ensureUserProfile(
       ? data.activeSlotId
       : preferredSlotId;
 
-    await updateDoc(userRef, {
-      displayName,
-      email,
-      photoURL,
-      activeSlotId: existingActiveSlot,
-      updatedAt: serverTimestamp(),
-    });
+    const unchanged =
+      data?.uid === user.uid &&
+      data?.displayName === displayName &&
+      data?.email === email &&
+      data?.photoURL === photoURL &&
+      data?.activeSlotId === existingActiveSlot &&
+      Boolean(data?.createdAt);
+
+    if (unchanged) {
+      ensuredProfilesInSession.add(user.uid);
+      return existingActiveSlot;
+    }
+
+    try {
+      await updateDoc(userRef, {
+        displayName,
+        email,
+        photoURL,
+        activeSlotId: existingActiveSlot,
+        updatedAt: serverTimestamp(),
+      });
+    } catch (updateErr) {
+      // If existing user doc satisfies ownership, allow cloud reads to proceed rather than failing all slot queries
+      if (data?.uid === user.uid) {
+        console.warn('User profile metadata refresh skipped:', updateErr);
+      } else {
+        throw updateErr;
+      }
+    }
     ensuredProfilesInSession.add(user.uid);
     return existingActiveSlot;
   } catch (error) {
@@ -89,11 +197,22 @@ export async function ensureUserProfile(
 
 export async function updateCloudActiveSlot(
   uid: string,
-  slotId: SaveSlotId
+  slotId: SaveSlotId,
+  user?: User | null
 ): Promise<void> {
   const userPath = `users/${uid}`;
+  const userRef = doc(db, 'users', uid);
   try {
-    await updateDoc(doc(db, 'users', uid), {
+    if (!ensuredProfilesInSession.has(uid)) {
+      if (user && user.uid === uid) {
+        await ensureUserProfile(user, slotId);
+      } else {
+        const snap = await getDoc(userRef);
+        if (!snap.exists()) return;
+        ensuredProfilesInSession.add(uid);
+      }
+    }
+    await updateDoc(userRef, {
       activeSlotId: slotId,
       updatedAt: serverTimestamp(),
     });
@@ -150,19 +269,35 @@ const lastUploadedGraphSig = new Map<
   { sig: string; chunkCount: number }
 >();
 
+function fnv1aHashUpdate(hash: number, str: string): number {
+  let h = hash >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  h ^= 0xff;
+  return Math.imul(h, 0x01000193) >>> 0;
+}
+
 function computeGraphChunksSig(
   chunks: DehydratedCloudSlot['graphChunks']
 ): string {
-  let acc = `${chunks.length}`;
+  let hash = 0x811c9dc5;
+  let totalNodes = 0;
+  let totalEdges = 0;
   for (let i = 0; i < chunks.length; i++) {
     const c = chunks[i];
-    const nLen = c.nodeIds.length;
-    const eLen = c.edgeIds.length;
-    acc += `|${c.chunkIndex}:${nLen}:${eLen}:${c.nodeIds[0] || ''}:${
-      nLen > 0 ? c.nodeIds[nLen - 1] : ''
-    }:${c.edgeIds[0] || ''}:${eLen > 0 ? c.edgeIds[eLen - 1] : ''}`;
+    totalNodes += c.nodeIds.length;
+    totalEdges += c.edgeIds.length;
+    hash = fnv1aHashUpdate(hash, `c:${c.chunkIndex}:${c.nodeIds.length}:${c.edgeIds.length}`);
+    for (let j = 0; j < c.nodeIds.length; j++) {
+      hash = fnv1aHashUpdate(hash, c.nodeIds[j]);
+    }
+    for (let j = 0; j < c.edgeIds.length; j++) {
+      hash = fnv1aHashUpdate(hash, c.edgeIds[j]);
+    }
   }
-  return acc;
+  return `${chunks.length}:${totalNodes}:${totalEdges}:${hash.toString(16)}`;
 }
 
 export async function uploadSlotToCloud(
@@ -180,6 +315,7 @@ export async function uploadSlotToCloud(
     throw new Error(`Invalid save slot id: ${slotId}`);
   }
   const uid = user.uid;
+  const userRef = doc(db, 'users', uid);
   if (!ensuredProfilesInSession.has(uid)) {
     await ensureUserProfile(user, slotId);
   }
@@ -198,14 +334,49 @@ export async function uploadSlotToCloud(
     const nextGraphSig = computeGraphChunksSig(dehydrated.graphChunks);
     const cacheKey = `${uid}:${slotId}`;
     const prevGraphCached = lastUploadedGraphSig.get(cacheKey);
+
+    let slotSnap = await getDoc(slotRef);
+    let slotExists = slotSnap.exists();
+    if (!slotExists) {
+      // Double-check parent user profile exists so relational create rule never fails
+      const userSnap = await getDoc(userRef);
+      if (!userSnap.exists()) {
+        ensuredProfilesInSession.delete(uid);
+        await ensureUserProfile(user, slotId);
+      }
+    }
+
+    let coreSnap = slotExists ? await getDoc(coreRef) : null;
+    const slotData = slotExists ? (slotSnap.data() as Record<string, unknown>) : undefined;
+    const coreData = coreSnap?.exists() ? (coreSnap.data() as Record<string, unknown>) : undefined;
+
+    // Self-heal corrupted or legacy docs that would fail strict update rules (e.g. missing createdAt or extra keys)
+    const isSlotUpdateSafe =
+      slotExists &&
+      isValidExistingDocShape(slotData, uid) &&
+      slotData?.slotId === slotId &&
+      Number(slotData?.slotIndex) === slotIndexFromId(slotId);
+    const isCoreUpdateSafe =
+      Boolean(coreSnap?.exists()) &&
+      isValidExistingDocShape(coreData, uid) &&
+      coreData?.slotId === slotId &&
+      Object.keys(coreData || {}).every((k) => VALID_CLOUD_CORE_KEYS.has(k));
+
+    if (slotExists && (!isSlotUpdateSafe || (coreSnap?.exists() && !isCoreUpdateSafe))) {
+      await deleteCloudSlot(uid, slotId);
+      slotExists = false;
+      coreSnap = null;
+      lastUploadedGraphSig.delete(cacheKey);
+    }
+
     const canSkipChunks =
       !options?.forceGraphSync &&
+      slotExists &&
+      Boolean(coreSnap?.exists()) &&
+      Number(slotData?.graphChunkCount) === dehydrated.graphChunks.length &&
       Boolean(prevGraphCached) &&
       prevGraphCached!.sig === nextGraphSig;
 
-    const slotSnap = await getDoc(slotRef);
-    const slotExists = slotSnap.exists();
-    const coreSnap = slotExists ? await getDoc(coreRef) : null;
     const existingChunksSnap =
       slotExists && !canSkipChunks
         ? await getDocs(query(chunksCol, where('ownerUid', '==', uid)))
@@ -214,11 +385,13 @@ export async function uploadSlotToCloud(
     const existingSlotName = slotExists
       ? String(slotSnap.data()?.slotName || '').trim()
       : undefined;
-    const resolvedName =
+    const resolvedName = (
       options?.slotName?.trim() ||
       (existingSlotName && slotSnap.data()?.cityId === state.startingCity.id
         ? existingSlotName
-        : undefined);
+        : undefined) ||
+      dehydrated.metaFields.slotName
+    ).slice(0, 60);
     if (resolvedName && resolvedName !== dehydrated.metaFields.slotName) {
       dehydrated.metaFields.slotName = resolvedName;
     }
@@ -267,35 +440,48 @@ export async function uploadSlotToCloud(
     const metaBytes = estimateFirestoreDocBytes(metaPayload as unknown as Record<string, unknown>);
     const coreBytes = estimateFirestoreDocBytes(corePayload as unknown as Record<string, unknown>);
 
-    const metaBatch = writeBatch(db);
+    // Commit slot meta and core atomically in one batch (WriteBatch limit is 10 MiB; meta+core <= 950KB)
+    const metaCoreBatch = writeBatch(db);
     if (slotExists) {
-      metaBatch.update(slotRef, metaPayload);
+      metaCoreBatch.update(slotRef, metaPayload);
     } else {
-      metaBatch.set(slotRef, metaPayload);
+      metaCoreBatch.set(slotRef, metaPayload);
     }
 
-    if (metaBytes + coreBytes <= MAX_WRITE_BATCH_BYTES) {
+    if (metaBytes + coreBytes <= MAX_META_CORE_BATCH_BYTES) {
       if (coreSnap && coreSnap.exists()) {
-        metaBatch.update(coreRef, corePayload);
+        metaCoreBatch.update(coreRef, corePayload);
       } else {
-        metaBatch.set(coreRef, corePayload);
+        metaCoreBatch.set(coreRef, corePayload);
       }
-      await metaBatch.commit();
+      await metaCoreBatch.commit();
     } else {
-      await metaBatch.commit();
-      const coreBatch = writeBatch(db);
-      if (coreSnap && coreSnap.exists()) {
-        coreBatch.update(coreRef, corePayload);
+      // Fallback only if ever near 1MB, still create core first only when slot already existed
+      if (slotExists) {
+        const coreBatch = writeBatch(db);
+        if (coreSnap && coreSnap.exists()) {
+          coreBatch.update(coreRef, corePayload);
+        } else {
+          coreBatch.set(coreRef, corePayload);
+        }
+        await coreBatch.commit();
+        await metaCoreBatch.commit();
       } else {
-        coreBatch.set(coreRef, corePayload);
+        if (coreSnap && coreSnap.exists()) {
+          metaCoreBatch.update(coreRef, corePayload);
+        } else {
+          metaCoreBatch.set(coreRef, corePayload);
+        }
+        await metaCoreBatch.commit();
       }
-      await coreBatch.commit();
     }
 
     if (!canSkipChunks || !slotExists) {
-      const existingChunkIds = new Set<string>();
+      const existingChunksById = new Map<string, Record<string, unknown>>();
       if (existingChunksSnap) {
-        existingChunksSnap.forEach((d) => existingChunkIds.add(d.id));
+        existingChunksSnap.forEach((d) =>
+          existingChunksById.set(d.id, d.data() as Record<string, unknown>)
+        );
       }
 
       const nextChunkIds = new Set<string>();
@@ -315,8 +501,14 @@ export async function uploadSlotToCloud(
         const chunkId = `graph_${chunk.chunkIndex}`;
         nextChunkIds.add(chunkId);
         const chunkRef = doc(db, 'users', uid, 'slots', slotId, 'chunks', chunkId);
-        const isUpdate = existingChunkIds.has(chunkId);
-        const chunkPayload = isUpdate
+        const prevChunkData = existingChunksById.get(chunkId);
+        const canUpdateChunk =
+          Boolean(prevChunkData) &&
+          isValidExistingDocShape(prevChunkData, uid) &&
+          prevChunkData?.slotId === slotId &&
+          Number(prevChunkData?.chunkIndex) === chunk.chunkIndex;
+
+        const chunkPayload = canUpdateChunk
           ? {
               nodeIds: chunk.nodeIds,
               edgeIds: chunk.edgeIds,
@@ -340,7 +532,16 @@ export async function uploadSlotToCloud(
           await flushChunkBatch();
         }
 
-        if (isUpdate) {
+        if (prevChunkData && !canUpdateChunk) {
+          chunkBatch.delete(chunkRef);
+          batchOps++;
+          batchBytes += 256;
+          if (batchOps >= MAX_WRITE_BATCH_OPS || batchBytes + opBytes > MAX_WRITE_BATCH_BYTES) {
+            await flushChunkBatch();
+          }
+        }
+
+        if (canUpdateChunk) {
           chunkBatch.update(chunkRef, chunkPayload);
         } else {
           chunkBatch.set(chunkRef, chunkPayload);
@@ -349,7 +550,7 @@ export async function uploadSlotToCloud(
         batchBytes += opBytes;
       }
 
-      for (const oldChunkId of existingChunkIds) {
+      for (const oldChunkId of existingChunksById.keys()) {
         if (!nextChunkIds.has(oldChunkId)) {
           if (batchOps >= MAX_WRITE_BATCH_OPS || batchBytes + 256 > MAX_WRITE_BATCH_BYTES) {
             await flushChunkBatch();
@@ -398,7 +599,7 @@ export async function downloadCloudSlot(
     ]);
 
     if (!coreSnap.exists()) {
-      return null;
+      throw new Error('CLOUD_CORE_MISSING');
     }
 
     const metaData = slotSnap.data();

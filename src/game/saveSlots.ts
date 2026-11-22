@@ -31,6 +31,7 @@ export const SLOT_GRAPH_V2_PREFIX = 'ROAD_INC_SAVE_SLOT_GRAPH_V2_';
 export const SLOT_META_MAP_KEY = 'ROAD_INC_SAVE_SLOTS_META_V1';
 export const ACTIVE_SLOT_STORAGE_KEY = 'ROAD_INC_ACTIVE_SLOT_V1';
 export const LEGACY_MIGRATED_KEY = 'ROAD_INC_LEGACY_MIGRATED_V1';
+export const CLOUD_SYNC_BASE_STORAGE_KEY = 'ROAD_INC_CLOUD_SYNC_BASE_V1';
 
 export const GRAPH_CHUNK_ITEM_LIMIT = 1500;
 export const MAX_GRAPH_CHUNKS = 500;
@@ -95,6 +96,7 @@ export interface SaveSlotSummary {
   cloudSavedAt?: number;
   hasNewerCloud?: boolean;
   hasNewerLocal?: boolean;
+  hasConflict?: boolean;
 }
 
 export interface CompactBridgeEdge {
@@ -266,6 +268,8 @@ export function buildSummaryFromState(
   const cityId = ((state.startingCity.id || '').trim() || 'custom').slice(0, 100);
   const rawSlotName = typeof options?.slotName === 'string' ? options.slotName.trim() : '';
   const tierLabel = (rank.label.trim() || 'Bronze I').slice(0, 40);
+  const rawLat = Number.isFinite(state.startingCity.lat) ? state.startingCity.lat : 37.5665;
+  const rawLng = Number.isFinite(state.startingCity.lng) ? state.startingCity.lng : 126.978;
   return {
     slotId,
     slotIndex: slotIndexFromId(slotId),
@@ -273,8 +277,8 @@ export function buildSummaryFromState(
     cityId,
     cityName,
     cityCountry: (state.startingCity.country || '').slice(0, 80),
-    cityLat: Number.isFinite(state.startingCity.lat) ? state.startingCity.lat : 37.5665,
-    cityLng: Number.isFinite(state.startingCity.lng) ? state.startingCity.lng : 126.978,
+    cityLat: Math.max(-90, Math.min(90, rawLat)),
+    cityLng: Math.max(-180, Math.min(180, rawLng)),
     cityZoom: Math.max(1, Math.min(22, Number(state.startingCity.zoom) || 14)),
     cityDescription: (state.startingCity.description || '').slice(0, 300),
     cityIsCustom: Boolean(state.startingCity.isCustom),
@@ -394,9 +398,9 @@ function computeLocalGraphStructureSig(state: GameState): string {
 }
 
 function quantizeChunkKeyForSave(lat: number, lng: number): string {
-  const qLat = (Math.round(lat * 40) / 40).toFixed(3);
-  const qLng = (Math.round(lng * 40) / 40).toFixed(3);
-  return `${qLat}_${qLng}`;
+  const qLat = Math.round(lat * 300) / 300;
+  const qLng = Math.round(lng * 300) / 300;
+  return `${qLat.toFixed(4)}_${qLng.toFixed(4)}`;
 }
 
 export function countUnhydratedGraphMarks(
@@ -1202,8 +1206,8 @@ export function dehydrateGameStateForCloud(
 
   const skillsMap: Record<string, number> = {};
   for (const sk of state.skills || []) {
-    if (sk.level > 0 && Object.keys(skillsMap).length < 200) {
-      skillsMap[sk.id] = Math.floor(sk.level);
+    if (Number.isFinite(sk.level) && sk.level > 0 && Object.keys(skillsMap).length < 200) {
+      skillsMap[String(sk.id).slice(0, 120)] = Math.floor(sk.level);
     }
   }
 
@@ -1590,9 +1594,126 @@ export function applyRestoredGraphMarks(
   return evaluated;
 }
 
+export function getCloudSyncBaselineMap(
+  storage?: Storage
+): Partial<Record<SaveSlotId, number>> {
+  const st = getSafeStorage(storage);
+  if (!st) return {};
+  try {
+    const raw = st.getItem(CLOUD_SYNC_BASE_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const result: Partial<Record<SaveSlotId, number>> = {};
+    for (const slotId of SAVE_SLOT_IDS) {
+      const val = Number(parsed?.[slotId]);
+      if (Number.isFinite(val) && val > 0) {
+        result[slotId] = Math.floor(val);
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+export function getCloudSyncBaseline(
+  slotId: SaveSlotId,
+  storage?: Storage
+): number | undefined {
+  return getCloudSyncBaselineMap(storage)[slotId];
+}
+
+export function setCloudSyncBaseline(
+  slotId: SaveSlotId,
+  clientSavedAt: number,
+  storage?: Storage
+): void {
+  const st = getSafeStorage(storage);
+  if (!st || !Number.isFinite(clientSavedAt) || clientSavedAt <= 0) return;
+  try {
+    const current = getCloudSyncBaselineMap(st);
+    current[slotId] = Math.floor(clientSavedAt);
+    st.setItem(CLOUD_SYNC_BASE_STORAGE_KEY, JSON.stringify(current));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function clearCloudSyncBaseline(slotId: SaveSlotId, storage?: Storage): void {
+  const st = getSafeStorage(storage);
+  if (!st) return;
+  try {
+    const current = getCloudSyncBaselineMap(st);
+    delete current[slotId];
+    st.setItem(CLOUD_SYNC_BASE_STORAGE_KEY, JSON.stringify(current));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function updateLocalSlotTimestamp(
+  slotId: SaveSlotId,
+  clientSavedAt: number,
+  options?: { source?: 'local' | 'cloud' | 'synced'; cloudSavedAt?: number; storage?: Storage }
+): SaveSlotSummary | null {
+  const st = getSafeStorage(options?.storage);
+  if (!st) return null;
+  const metaMap = readMetaMap(st);
+  const existing = metaMap[slotId];
+  if (!existing) return null;
+  const updated: SaveSlotSummary = {
+    ...existing,
+    clientSavedAt: Math.max(0, Math.floor(clientSavedAt)),
+    source: options?.source || existing.source,
+    cloudSavedAt: options?.cloudSavedAt ?? existing.cloudSavedAt,
+  };
+  metaMap[slotId] = updated;
+  writeMetaMap(metaMap, st);
+  return updated;
+}
+
+export function isSlotConflict(
+  local?: SaveSlotSummary | null,
+  cloud?: SaveSlotSummary | null,
+  syncedCloudBaseAt?: number | null
+): boolean {
+  if (!local || !cloud) return false;
+
+  const sameCoreValues =
+    local.cityId === cloud.cityId &&
+    local.connectedOsmNodes === cloud.connectedOsmNodes &&
+    local.totalOsmEdgesBuilt === cloud.totalOsmEdgesBuilt &&
+    Math.round(local.capital) === Math.round(cloud.capital);
+
+  const timeDiff = Math.abs(local.clientSavedAt - cloud.clientSavedAt);
+  if (timeDiff <= 3000 && sameCoreValues) {
+    return false;
+  }
+
+  // Single-device clean forward progress since last known cloud sync baseline: NOT a conflict
+  if (
+    typeof syncedCloudBaseAt === 'number' &&
+    Number.isFinite(syncedCloudBaseAt) &&
+    syncedCloudBaseAt > 0 &&
+    Math.abs(cloud.clientSavedAt - syncedCloudBaseAt) <= 3000 &&
+    local.clientSavedAt >= cloud.clientSavedAt - 3000 &&
+    local.cityId === cloud.cityId &&
+    local.connectedOsmNodes >= cloud.connectedOsmNodes &&
+    local.totalOsmEdgesBuilt >= cloud.totalOsmEdgesBuilt
+  ) {
+    return false;
+  }
+
+  // Otherwise local and cloud have diverged (different city, unseen cloud update, offline edits, or unlinked local+cloud saves)
+  if (timeDiff > 3000) return true;
+  if (!sameCoreValues) return true;
+  return false;
+}
+
 export function mergeSlotSummaries(
   localMap: Partial<Record<SaveSlotId, SaveSlotSummary>>,
-  cloudMap: Partial<Record<SaveSlotId, SaveSlotSummary>>
+  cloudMap: Partial<Record<SaveSlotId, SaveSlotSummary>>,
+  syncBaseMap?: Partial<Record<SaveSlotId, number>>
 ): Record<SaveSlotId, SaveSlotSummary | null> {
   const merged: Record<SaveSlotId, SaveSlotSummary | null> = {
     slot_1: null,
@@ -1605,31 +1726,41 @@ export function mergeSlotSummaries(
   for (const slotId of SAVE_SLOT_IDS) {
     const local = localMap[slotId];
     const cloud = cloudMap[slotId];
+    const syncedBase = syncBaseMap?.[slotId];
     if (local && cloud) {
       const hasNewerCloud = cloud.clientSavedAt > local.clientSavedAt + 3000;
       const hasNewerLocal = local.clientSavedAt > cloud.clientSavedAt + 3000;
+      const hasConflict = isSlotConflict(local, cloud, syncedBase);
       merged[slotId] = {
         ...(hasNewerCloud ? cloud : local),
-        source: hasNewerCloud || hasNewerLocal ? local.source : 'synced',
+        source: hasConflict
+          ? hasNewerCloud
+            ? 'cloud'
+            : 'local'
+          : hasNewerLocal
+          ? 'local'
+          : hasNewerCloud
+          ? 'cloud'
+          : 'synced',
         cloudSavedAt: cloud.clientSavedAt,
         hasNewerCloud,
         hasNewerLocal,
+        hasConflict,
       };
-      if (!hasNewerCloud && !hasNewerLocal) {
-        merged[slotId]!.source = 'synced';
-      }
     } else if (cloud) {
       merged[slotId] = {
         ...cloud,
         source: 'cloud',
         cloudSavedAt: cloud.clientSavedAt,
         hasNewerCloud: true,
+        hasConflict: false,
       };
     } else if (local) {
       merged[slotId] = {
         ...local,
         source: 'local',
         hasNewerLocal: true,
+        hasConflict: false,
       };
     }
   }

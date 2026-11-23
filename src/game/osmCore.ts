@@ -1348,6 +1348,43 @@ export function buildDenseRealOsmGraph(
     return pt;
   };
 
+  const segmentIntersectsClipBox = (
+    p1: { lat: number; lng: number },
+    p2: { lat: number; lng: number }
+  ): boolean => {
+    const minX = centerLng - CLIP_LNG;
+    const maxX = centerLng + CLIP_LNG;
+    const minY = centerLat - CLIP_LAT;
+    const maxY = centerLat + CLIP_LAT;
+    let t0 = 0;
+    let t1 = 1;
+    const dx = p2.lng - p1.lng;
+    const dy = p2.lat - p1.lat;
+    const checks: Array<[number, number]> = [
+      [-dx, p1.lng - minX],
+      [dx, maxX - p1.lng],
+      [-dy, p1.lat - minY],
+      [dy, maxY - p1.lat],
+    ];
+    for (let k = 0; k < 4; k++) {
+      const p = checks[k][0];
+      const q = checks[k][1];
+      if (Math.abs(p) < 1e-12) {
+        if (q < 0) return false;
+      } else {
+        const r = q / p;
+        if (p < 0) {
+          if (r > t1) return false;
+          if (r > t0) t0 = r;
+        } else {
+          if (r < t0) return false;
+          if (r < t1) t1 = r;
+        }
+      }
+    }
+    return t0 <= t1;
+  };
+
   const emitWaysWithBudget = (waysList: OsmRawWay[], maxEdgesForGroup: number, maxPerWay: number) => {
     let groupAdded = 0;
 
@@ -1358,6 +1395,18 @@ export function buildDenseRealOsmGraph(
       const isRail = Boolean(way.tags?.railway);
       const mode: 'road' | 'rail' = isRail ? 'rail' : 'road';
       const hwType = way.tags?.railway || way.tags?.highway || 'road';
+      const isLongSpanEligible =
+        way.tags?.bridge === 'yes' ||
+        way.tags?.tunnel === 'yes' ||
+        hwType === 'motorway' ||
+        hwType === 'motorway_link' ||
+        hwType === 'trunk' ||
+        hwType === 'trunk_link' ||
+        hwType === 'primary' ||
+        hwType === 'primary_link' ||
+        isRail;
+      const effectiveMaxPerWay = isLongSpanEligible ? Math.max(maxPerWay, 950) : maxPerWay;
+      const groupCapForWay = isLongSpanEligible ? maxEdgesForGroup + 320 : maxEdgesForGroup;
       const wayName =
         way.tags?.['name:ko'] ||
         way.tags?.name ||
@@ -1381,13 +1430,30 @@ export function buildDenseRealOsmGraph(
         const inClip = isInsideClip(coord);
         let keepAsBoundaryBridge = false;
         if (!inClip) {
-          if (!isInsideBridgeClip(coord)) continue;
           const prevCoord = i > 0 ? rawNodeCoords.get(wayNodes[i - 1]) : undefined;
           const nextCoord = i + 1 < wayNodes.length ? rawNodeCoords.get(wayNodes[i + 1]) : undefined;
-          keepAsBoundaryBridge =
+          const touchesClip =
             Boolean(prevCoord && isInsideClip(prevCoord)) ||
             Boolean(nextCoord && isInsideClip(nextCoord));
-          if (!keepAsBoundaryBridge) continue;
+          const crossesClipSpan =
+            isLongSpanEligible &&
+            ((Boolean(prevCoord) &&
+              segmentIntersectsClipBox(prevCoord!, coord) &&
+              fastEquirectMeters(prevCoord!.lat, prevCoord!.lng, coord.lat, coord.lng) <= 22000) ||
+              (Boolean(nextCoord) &&
+                segmentIntersectsClipBox(coord, nextCoord!) &&
+                fastEquirectMeters(coord.lat, coord.lng, nextCoord!.lat, nextCoord!.lng) <= 22000));
+          const inLongSpanRange =
+            isLongSpanEligible &&
+            (touchesClip || crossesClipSpan) &&
+            fastEquirectMeters(centerLat, centerLng, coord.lat, coord.lng) <= 22000;
+          if (!inLongSpanRange) {
+            if (!isInsideBridgeClip(coord)) continue;
+            keepAsBoundaryBridge = touchesClip;
+            if (!keepAsBoundaryBridge) continue;
+          } else {
+            keepAsBoundaryBridge = true;
+          }
         }
 
         const isMandatory =
@@ -1423,13 +1489,14 @@ export function buildDenseRealOsmGraph(
         const prev = basePts[i - 1];
         const segMeters = fastEquirectMeters(prev.lat, prev.lng, curr.lat, curr.lng);
 
-        if (segMeters > 2500) {
+        if (segMeters > 25000) {
           densePts.push(curr);
           continue;
         }
 
         if (segMeters > MAX_EDGE_METERS) {
-          const subCount = Math.min(80, Math.ceil(segMeters / TARGET_SUBDIV_METERS));
+          const maxSubSteps = isLongSpanEligible ? 950 : 120;
+          const subCount = Math.min(maxSubSteps, Math.ceil(segMeters / TARGET_SUBDIV_METERS));
           const pairKey = prev.id < curr.id ? `${prev.id}_${curr.id}` : `${curr.id}_${prev.id}`;
           const forward = prev.id < curr.id;
 
@@ -1472,7 +1539,7 @@ export function buildDenseRealOsmGraph(
 
       let wayAdded = 0;
       for (let i = 0; i < snappedPts.length - 1; i++) {
-        if (groupAdded >= maxEdgesForGroup || wayAdded >= maxPerWay) break;
+        if (groupAdded >= groupCapForWay || wayAdded >= effectiveMaxPerWay) break;
         const a = snappedPts[i];
         const b = snappedPts[i + 1];
         if (a.id === b.id) continue;

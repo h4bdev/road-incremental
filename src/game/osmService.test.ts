@@ -389,5 +389,66 @@ test('loadOsmRoadChunksBatchDirect clusters nearby coordinates into one Overpass
   }
 });
 
+test('buildDenseRealOsmGraph preserves multi-kilometer 2-node bridge spans (e.g. SF-Oakland Bay Bridge West Span)', () => {
+  const raw = {
+    elements: [
+      { type: 'node' as const, id: 6196866302, lat: 37.7861827, lon: -122.3906949 },
+      { type: 'node' as const, id: 645557712, lat: 37.7864781, lon: -122.3903709 },
+      { type: 'node' as const, id: 1895821104, lat: 37.8080581, lon: -122.3672612 }, // ~3.15 km NE at Yerba Buena Island
+      {
+        type: 'way' as const,
+        id: 50690291,
+        tags: { highway: 'motorway', name: 'Dwight D. Eisenhower Highway', oneway: 'yes' },
+        nodes: [6196866302, 645557712],
+      },
+      {
+        type: 'way' as const,
+        id: 661905446,
+        tags: { highway: 'motorway', bridge: 'yes', layer: '1', name: 'Dwight D. Eisenhower Highway' },
+        nodes: [645557712, 1895821104],
+      },
+    ],
+  };
+
+  const graph = buildDenseRealOsmGraph(raw, '37.7867_-122.3900', 37.7867, -122.39);
+  assert.ok(
+    graph.osmNodes.some((n) => n.id === 'osm_645557712'),
+    'Should retain SF anchorage node osm_645557712'
+  );
+  assert.ok(
+    graph.osmNodes.some((n) => n.id === 'osm_1895821104'),
+    'Should retain Yerba Buena Island far-end bridge anchor osm_1895821104 (~3.15 km away)'
+  );
+  assert.ok(
+    graph.osmEdges.length >= 130,
+    `Expected >130 subdivided edges across the 3.15km Bay Bridge span, got ${graph.osmEdges.length}`
+  );
+
+  // Verify full BFS continuity from SF approach (osm_6196866302) to YBI anchor (osm_1895821104)
+  const adj = new Map<string, string[]>();
+  for (const e of graph.osmEdges) {
+    if (!adj.has(e.fromNodeId)) adj.set(e.fromNodeId, []);
+    if (!adj.has(e.toNodeId)) adj.set(e.toNodeId, []);
+    adj.get(e.fromNodeId)!.push(e.toNodeId);
+    adj.get(e.toNodeId)!.push(e.fromNodeId);
+  }
+  const visited = new Set<string>(['osm_6196866302']);
+  const q = ['osm_6196866302'];
+  while (q.length > 0) {
+    const cur = q.shift()!;
+    for (const nb of adj.get(cur) || []) {
+      if (!visited.has(nb)) {
+        visited.add(nb);
+        q.push(nb);
+      }
+    }
+  }
+  assert.ok(
+    visited.has('osm_1895821104'),
+    'Bay Bridge West Span must form a complete continuous path from SF to Yerba Buena Island'
+  );
+});
+
+
 
 

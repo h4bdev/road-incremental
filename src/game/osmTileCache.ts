@@ -51,7 +51,7 @@ export interface CachedSlotGraphSnapshot {
 }
 
 const DB_NAME = 'terraline_osm_cache_v1';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_TILES = 'osm_tiles';
 const STORE_REGIONS = 'osm_regions';
 const STORE_SLOT_GRAPHS = 'slot_graphs';
@@ -75,10 +75,12 @@ function openCacheDb(): Promise<IDBDatabase | null> {
   dbPromise = new Promise<IDBDatabase | null>((resolve) => {
     try {
       const req = indexedDB.open(DB_NAME, DB_VERSION);
-      req.onupgradeneeded = () => {
+      req.onupgradeneeded = (ev) => {
         const db = req.result;
         if (!db.objectStoreNames.contains(STORE_TILES)) {
           db.createObjectStore(STORE_TILES, { keyPath: 'tileKey' });
+        } else if (ev.oldVersion < 2 && req.transaction) {
+          req.transaction.objectStore(STORE_TILES).clear();
         }
         if (!db.objectStoreNames.contains(STORE_REGIONS)) {
           db.createObjectStore(STORE_REGIONS, { keyPath: 'regionId' });

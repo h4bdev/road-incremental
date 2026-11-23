@@ -22,7 +22,6 @@ import {
   calculateMultipliers,
   canConnectIsolatedRoutePair,
   computeOsmFrontierDistancesForState,
-  findIncompleteLoadedChunksInViewport,
   findOsmRoadPath,
   getBuiltOsmEdgesForState,
   getDirectOsmBridgeCost,
@@ -212,7 +211,6 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
   const hoverNodeGeoJsonRef = useRef<GeoJsonData>(EMPTY_FC);
   const renderedBoundsRef = useRef<ViewportBounds | null>(null);
   const prevBuiltSigRef = useRef<string>('');
-  const autoHealedTilesRef = useRef<Set<string>>(new Set());
   const requestViewportChunksRef = useRef<(forceRescan?: boolean) => void>(() => {});
 
   const [viewportBounds, setViewportBounds] = useState<ViewportBounds | null>(null);
@@ -1005,9 +1003,8 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       const screenChunks = enumerateChunkKeysForBounds(rawBounds, 20);
       if (forceRescan) {
         const rescanCoords: Array<{ lat: number; lng: number }> = [];
-        for (let i = 0; i < screenChunks.length && rescanCoords.length < 20; i++) {
+        for (let i = 0; i < screenChunks.length && rescanCoords.length < 16; i++) {
           const c = screenChunks[i];
-          autoHealedTilesRef.current.add(c.key);
           const inUnlocked = unlockedRegions.some((r) =>
             isPointInRegionBoundary(c.lat, c.lng, r, 0.005)
           );
@@ -1022,23 +1019,6 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
           });
         }
         return;
-      }
-
-      // Auto-heal any already-marked loaded chunks on screen that are suspiciously sparse or have a truncated road tip
-      const incompleteLoaded = findIncompleteLoadedChunksInViewport(
-        gs,
-        screenChunks,
-        autoHealedTilesRef.current,
-        8
-      );
-      if (incompleteLoaded.length > 0 && callbacksRef.current.onLoadOsmChunksBatch) {
-        for (let i = 0; i < incompleteLoaded.length; i++) {
-          autoHealedTilesRef.current.add(incompleteLoaded[i].key);
-        }
-        callbacksRef.current.onLoadOsmChunksBatch(
-          incompleteLoaded.map((c) => ({ lat: c.lat, lng: c.lng })),
-          { force: true, bypassCache: true }
-        );
       }
 
       // Prioritize currently visible on-screen chunks first, then moderate prefetch halo

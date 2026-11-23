@@ -828,5 +828,41 @@ test('hydrateCloudPayloadAsync falls back gracefully on legacy cloud saves lacki
   assert.equal(result.marks.builtEdgeIds.size, 1);
 });
 
+test('packCloudGraphV1 does not poison loadedOsmChunks with sparse neighbor-spilled bridge tiles', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  const state = createInitialGameState(seoul);
+  const denseKey = chunkKeyForCoords(37.5667, 126.9767);
+  const spilledKey = chunkKeyForCoords(37.5733, 126.9767);
+
+  state.loadedOsmChunks = [];
+  state.osmNodes = [
+    ...Array.from({ length: 14 }, (_, i) => ({
+      id: `d_${i}`,
+      lat: 37.5667 + i * 0.00002,
+      lng: 126.9767,
+      connected: i === 0,
+      mode: 'road' as const,
+      regionId: 'curated_kr_seoul',
+    })),
+    {
+      id: 'spill_1',
+      lat: 37.5733,
+      lng: 126.9767,
+      connected: true,
+      mode: 'road' as const,
+      regionId: 'curated_kr_seoul',
+    },
+  ];
+
+  const packed = packCloudGraphV1(state);
+  assert.equal(packed.loadedOsmChunks.includes(denseKey), true);
+  assert.equal(
+    packed.loadedOsmChunks.includes(spilledKey),
+    false,
+    'Tile with only 1 spilled node must not be marked loaded in loadedOsmChunks'
+  );
+});
+
+
 
 

@@ -3517,6 +3517,73 @@ export function getProximityAdjacentChunksToLoad(
     .slice(0, maxChunks);
 }
 
+export function findIncompleteLoadedChunksInViewport(
+  state: GameState,
+  screenChunks: Array<{ key: string; lat: number; lng: number }>,
+  alreadyVerifiedKeys?: Set<string>,
+  maxRepair = 8
+): Array<{ key: string; lat: number; lng: number }> {
+  const loadedSet = new Set(state.loadedOsmChunks || []);
+  if (loadedSet.size === 0 || screenChunks.length === 0) return [];
+  const unlockedRegions = (state.provincialRegions || []).filter((r) => r.unlocked);
+  if (unlockedRegions.length === 0) return [];
+
+  const screenByKey = new Map<string, { key: string; lat: number; lng: number }>();
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  let minLng = Infinity;
+  let maxLng = -Infinity;
+
+  for (let i = 0; i < screenChunks.length; i++) {
+    const c = screenChunks[i];
+    if (!loadedSet.has(c.key)) continue;
+    if (alreadyVerifiedKeys?.has(c.key)) continue;
+    const inUnlocked = unlockedRegions.some((r) => isPointInRegionBoundary(c.lat, c.lng, r, 0.005));
+    if (!inUnlocked) continue;
+    screenByKey.set(c.key, c);
+    if (c.lat < minLat) minLat = c.lat;
+    if (c.lat > maxLat) maxLat = c.lat;
+    if (c.lng < minLng) minLng = c.lng;
+    if (c.lng > maxLng) maxLng = c.lng;
+  }
+
+  if (screenByKey.size === 0) return [];
+
+  const padLat = minLat - 0.0025;
+  const maxPadLat = maxLat + 0.0025;
+  const padLng = minLng - 0.0025;
+  const maxPadLng = maxLng + 0.0025;
+
+  const quantizedKey = (lat: number, lng: number): string =>
+    `${(Math.round(lat * 300) / 300).toFixed(4)}_${(Math.round(lng * 300) / 300).toFixed(4)}`;
+
+  const counts = new Map<string, number>();
+  const truncatedTipKeys = new Set<string>();
+  const graphIdx = getOsmGraphIndex(state.osmNodes || [], state.osmEdges || []);
+  const nodes = state.osmNodes || [];
+
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    if (n.lat < padLat || n.lat > maxPadLat || n.lng < padLng || n.lng > maxPadLng) continue;
+    const ck = quantizedKey(n.lat, n.lng);
+    if (!screenByKey.has(ck)) continue;
+    counts.set(ck, (counts.get(ck) || 0) + 1);
+    if (n.connected && (graphIdx.adjEdgesAll.get(n.id)?.length || 0) <= 1) {
+      truncatedTipKeys.add(ck);
+    }
+  }
+
+  const results: Array<{ key: string; lat: number; lng: number }> = [];
+  for (const [ck, c] of screenByKey.entries()) {
+    const cnt = counts.get(ck) || 0;
+    if (cnt < 8 || truncatedTipKeys.has(ck)) {
+      results.push(c);
+      if (results.length >= maxRepair) break;
+    }
+  }
+  return results;
+}
+
 const FRONTIER_BRIGHTNESS_BY_DIST = [1, 1.0, 0.86, 0.74, 0.62, 0.52, 0.42, 0.34, 0.26, 0.20, 0.15];
 const FRONTIER_OPACITY_BY_DIST = [1, 0.96, 0.88, 0.80, 0.72, 0.64, 0.56, 0.48, 0.40, 0.32, 0.24];
 const FRONTIER_RADIUS_SCALE_BY_DIST = [1, 1.06, 1.01, 0.96, 0.91, 0.86, 0.81, 0.76, 0.71, 0.66, 0.61];

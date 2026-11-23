@@ -22,12 +22,13 @@ async function startServer() {
     const lat = Number(req.query.lat);
     const lng = Number(req.query.lng);
     const allowStarterFallback = req.query.fallback !== '0';
+    const bypassCache = req.query.refresh === '1';
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
       res.status(400).json({ error: 'Invalid lat/lng coordinates' });
       return;
     }
 
-    const result = await loadOsmRoadChunkDirect(lat, lng, { allowStarterFallback });
+    const result = await loadOsmRoadChunkDirect(lat, lng, { allowStarterFallback, bypassCache });
     res.json(result);
   });
 
@@ -35,6 +36,7 @@ async function startServer() {
     const body = req.body as {
       coords?: Array<{ lat?: unknown; lng?: unknown }>;
       allowStarterFallback?: boolean;
+      bypassCache?: boolean;
     };
     const rawCoords = Array.isArray(body?.coords) ? body.coords.slice(0, 24) : [];
     const validCoords = rawCoords
@@ -45,7 +47,11 @@ async function startServer() {
       return;
     }
     const allowStarterFallback = body?.allowStarterFallback !== false;
-    const chunks = await loadOsmRoadChunksBatchDirect(validCoords, { allowStarterFallback });
+    const bypassCache = Boolean(body?.bypassCache);
+    const chunks = await loadOsmRoadChunksBatchDirect(validCoords, {
+      allowStarterFallback,
+      bypassCache,
+    });
     res.json({ chunks });
   });
 

@@ -18,6 +18,7 @@ import {
   dispatchClickBonus,
   ensureSeedConnectedOsmNodes,
   evaluateLinesAndAchievements,
+  findIncompleteLoadedChunksInViewport,
   findOsmRoadPath,
   getExpandableProvincialRegions,
   getFrontierEdgeOpacity,
@@ -2373,5 +2374,73 @@ test('getProximityAdjacentChunksToLoad discovers diagonal neighbor chunks up to 
   const neKey = quantizeChunkKey(37.5667 + 1 / 300, 126.9767 + 1 / 300);
   assert.ok(adj.some((a) => a.key === neKey), 'Diagonal NE chunk within 0.55km should be queued for loading');
 });
+
+test('findIncompleteLoadedChunksInViewport detects already-loaded chunks with sparse nodes or truncated degree<=1 tips', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  const base = createInitialGameState(seoul);
+  const sparseKey = quantizeChunkKey(37.5667, 126.9767);
+  const denseHealthyKey = quantizeChunkKey(37.5700, 126.9767);
+  const tipTruncatedKey = quantizeChunkKey(37.5733, 126.9767);
+
+  const healthyNodes = Array.from({ length: 10 }, (_, idx) => ({
+    id: `h_${idx}`,
+    lat: 37.5700 + idx * 0.00005,
+    lng: 126.9767,
+    connected: false,
+    mode: 'road' as const,
+    regionId: 'curated_kr_seoul',
+  }));
+  const tipDenseNodes = Array.from({ length: 10 }, (_, idx) => ({
+    id: `t_${idx}`,
+    lat: 37.5733 + idx * 0.00005,
+    lng: 126.9767,
+    connected: idx <= 1,
+    mode: 'road' as const,
+    regionId: 'curated_kr_seoul',
+  }));
+  const tipEdges = [
+    {
+      id: 'e_tip',
+      wayName: '단절도로',
+      highwayType: 'motorway',
+      mode: 'road' as const,
+      fromNodeId: 't_0',
+      toNodeId: 't_1',
+      coordinates: [[37.5733, 126.9767], [37.57335, 126.9767]] as [[number, number], [number, number]],
+      distanceKm: 0.01,
+      buildCost: 20,
+      baseIncomePerSec: 1,
+      built: true,
+      regionId: 'curated_kr_seoul',
+    },
+  ];
+
+  const state = {
+    ...base,
+    loadedOsmChunks: [sparseKey, denseHealthyKey, tipTruncatedKey],
+    osmNodes: [
+      { id: 'sp_1', lat: 37.5667, lng: 126.9767, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul' },
+      ...healthyNodes,
+      ...tipDenseNodes,
+    ],
+    osmEdges: tipEdges,
+  };
+
+  const screenChunks = [
+    { key: sparseKey, lat: 37.5667, lng: 126.9767 },
+    { key: denseHealthyKey, lat: 37.5700, lng: 126.9767 },
+    { key: tipTruncatedKey, lat: 37.5733, lng: 126.9767 },
+  ];
+
+  const repair = findIncompleteLoadedChunksInViewport(state, screenChunks);
+  const repairKeys = repair.map((r) => r.key);
+  assert.equal(repairKeys.includes(sparseKey), true, 'Sparse loaded chunk (<8 nodes) must be queued for repair');
+  assert.equal(repairKeys.includes(tipTruncatedKey), true, 'Chunk containing truncated degree<=1 connected tip must be queued for repair');
+  assert.equal(repairKeys.includes(denseHealthyKey), false, 'Healthy dense chunk (>=8 unconnected nodes) should not be re-fetched');
+
+  const already = new Set([sparseKey, tipTruncatedKey]);
+  assert.equal(findIncompleteLoadedChunksInViewport(state, screenChunks, already).length, 0);
+});
+
 
 

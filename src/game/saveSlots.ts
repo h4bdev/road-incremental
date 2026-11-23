@@ -1733,8 +1733,15 @@ export function packCloudGraphV1(
   }));
 
   const chunkSet = new Set<string>(state.loadedOsmChunks || []);
+  const tileNodeCounts = new Map<string, number>();
   for (const n of state.osmNodes || []) {
-    chunkSet.add(quantizeChunkKeyForSave(n.lat, n.lng));
+    const ck = quantizeChunkKeyForSave(n.lat, n.lng);
+    tileNodeCounts.set(ck, (tileNodeCounts.get(ck) || 0) + 1);
+  }
+  for (const [ck, cnt] of tileNodeCounts.entries()) {
+    if (cnt >= 12) {
+      chunkSet.add(ck);
+    }
   }
 
   return {

@@ -844,7 +844,7 @@ export async function hydrateProvincialRegionsFromCache(
 export async function fetchOsmRoadChunk(
   lat: number,
   lng: number,
-  options?: { allowStarterFallback?: boolean }
+  options?: { allowStarterFallback?: boolean; bypassCache?: boolean }
 ): Promise<{
   chunkKey: string;
   osmNodes: OsmNode[];
@@ -853,24 +853,31 @@ export async function fetchOsmRoadChunk(
 }> {
   const chunkKey = quantizeChunkKey(lat, lng);
   const allowFallback = options?.allowStarterFallback !== false;
+  const bypassCache = Boolean(options?.bypassCache);
 
-  const idbHit = await getCachedOsmTile(chunkKey);
-  if (idbHit && (idbHit.osmNodes.length > 0 || idbHit.usedLiveOverpass)) {
-    return {
-      chunkKey: idbHit.tileKey,
-      osmNodes: idbHit.osmNodes,
-      osmEdges: idbHit.osmEdges,
-      usedLiveOverpass: idbHit.usedLiveOverpass,
-    };
+  if (!bypassCache) {
+    const idbHit = await getCachedOsmTile(chunkKey);
+    if (idbHit && (idbHit.osmNodes.length > 0 || idbHit.usedLiveOverpass)) {
+      return {
+        chunkKey: idbHit.tileKey,
+        osmNodes: idbHit.osmNodes,
+        osmEdges: idbHit.osmEdges,
+        usedLiveOverpass: idbHit.usedLiveOverpass,
+      };
+    }
   }
 
   const fbParam = allowFallback ? '' : '&fallback=0';
+  const refreshParam = bypassCache ? '&refresh=1' : '';
   const json = await tryFetchBackendJson<{
     chunkKey?: string;
     osmNodes?: OsmNode[];
     osmEdges?: OsmEdge[];
     usedLiveOverpass?: boolean;
-  }>(`/api/osm-roads?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}${fbParam}`, 14000);
+  }>(
+    `/api/osm-roads?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}${fbParam}${refreshParam}`,
+    14000
+  );
 
   if (
     json &&
@@ -934,7 +941,7 @@ export async function fetchOsmRoadChunk(
 
 export async function fetchOsmRoadChunksBatch(
   coords: Array<{ key?: string; lat: number; lng: number }>,
-  options?: { allowStarterFallback?: boolean }
+  options?: { allowStarterFallback?: boolean; bypassCache?: boolean }
 ): Promise<
   Array<{
     chunkKey: string;
@@ -945,13 +952,16 @@ export async function fetchOsmRoadChunksBatch(
 > {
   if (coords.length === 0) return [];
   const allowFallback = options?.allowStarterFallback !== false;
+  const bypassCache = Boolean(options?.bypassCache);
   const keyed = coords.map((c) => ({
     key: c.key || quantizeChunkKey(c.lat, c.lng),
     lat: c.lat,
     lng: c.lng,
   }));
 
-  const cachedMap = await getCachedOsmTilesBatch(keyed.map((k) => k.key));
+  const cachedMap = bypassCache
+    ? new Map()
+    : await getCachedOsmTilesBatch(keyed.map((k) => k.key));
   const resultMap = new Map<
     string,
     {
@@ -998,6 +1008,7 @@ export async function fetchOsmRoadChunksBatch(
       body: JSON.stringify({
         coords: uncached.map((u) => ({ lat: u.lat, lng: u.lng })),
         allowStarterFallback: allowFallback,
+        bypassCache,
       }),
     });
 

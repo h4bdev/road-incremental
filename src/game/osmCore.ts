@@ -1566,12 +1566,14 @@ export async function resolveRegionCached(
 export async function loadOsmRoadChunkDirect(
   lat: number,
   lng: number,
-  options?: { allowStarterFallback?: boolean }
+  options?: { allowStarterFallback?: boolean; bypassCache?: boolean }
 ): Promise<ChunkPayload> {
   const chunkKey = quantizeChunkKey(lat, lng);
-  const cached = chunkCache.get(chunkKey);
-  if (cached && (cached.osmEdges.length > 0 || cached.usedLiveOverpass)) {
-    return cached;
+  if (!options?.bypassCache) {
+    const cached = chunkCache.get(chunkKey);
+    if (cached && (cached.osmEdges.length > 0 || cached.usedLiveOverpass)) {
+      return cached;
+    }
   }
 
   let pending = inFlightChunks.get(chunkKey);
@@ -1645,7 +1647,7 @@ export async function loadOsmRoadChunkDirect(
 
 export async function loadOsmRoadChunksBatchDirect(
   coords: Array<{ lat: number; lng: number }>,
-  options?: { allowStarterFallback?: boolean }
+  options?: { allowStarterFallback?: boolean; bypassCache?: boolean }
 ): Promise<ChunkPayload[]> {
   const deduped: Array<{ key: string; lat: number; lng: number }> = [];
   const seenKeys = new Set<string>();
@@ -1662,10 +1664,12 @@ export async function loadOsmRoadChunksBatchDirect(
   const pendingCoords: Array<{ key: string; lat: number; lng: number }> = [];
   const inFlightWaiters: Array<Promise<void>> = [];
   for (const pt of deduped) {
-    const cached = chunkCache.get(pt.key);
-    if (cached && (cached.osmEdges.length > 0 || cached.usedLiveOverpass)) {
-      resultsByKey.set(pt.key, cached);
-      continue;
+    if (!options?.bypassCache) {
+      const cached = chunkCache.get(pt.key);
+      if (cached && (cached.osmEdges.length > 0 || cached.usedLiveOverpass)) {
+        resultsByKey.set(pt.key, cached);
+        continue;
+      }
     }
     const existingFlight = inFlightChunks.get(pt.key);
     if (existingFlight) {

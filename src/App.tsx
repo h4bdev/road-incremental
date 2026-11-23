@@ -255,7 +255,10 @@ export default function App() {
   const settledEmptyChunkKeysRef = useRef<Set<string>>(new Set());
   const chunkRetryCooldownRef = useRef<Map<string, { fails: number; retryAfter: number }>>(new Map());
   const queuedBatchCoordsRef = useRef<
-    Map<string, { key: string; lat: number; lng: number; owningRegionId?: string }>
+    Map<
+      string,
+      { key: string; lat: number; lng: number; owningRegionId?: string; bypassCache?: boolean }
+    >
   >(new Map());
   const batchDispatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingChunkQueueRef = useRef<
@@ -489,86 +492,113 @@ export default function App() {
     queuedBatchCoordsRef.current.clear();
     if (items.length === 0) return;
 
-    const WAVE_SIZE = 16;
-    for (let i = 0; i < items.length; i += WAVE_SIZE) {
-      const curState = stateRef.current;
-      const loadedSet = new Set(curState?.loadedOsmChunks || []);
-      const now = Date.now();
-      const wave = items.slice(i, i + WAVE_SIZE).filter((item) => {
-        if (inFlightChunkKeysRef.current.has(item.key)) return false;
-        if (settledEmptyChunkKeysRef.current.has(item.key)) return false;
-        if (loadedSet.has(item.key)) return false;
-        const cd = chunkRetryCooldownRef.current.get(item.key);
-        if (cd && cd.retryAfter > now) return false;
-        return true;
-      });
-      if (wave.length === 0) continue;
+    const runSubQueue = async (
+      subItems: Array<{
+        key: string;
+        lat: number;
+        lng: number;
+        owningRegionId?: string;
+        bypassCache?: boolean;
+      }>,
+      bypassCache: boolean
+    ) => {
+      const WAVE_SIZE = 16;
+      for (let i = 0; i < subItems.length; i += WAVE_SIZE) {
+        const curState = stateRef.current;
+        const loadedSet = new Set(curState?.loadedOsmChunks || []);
+        const now = Date.now();
+        const wave = subItems.slice(i, i + WAVE_SIZE).filter((item) => {
+          if (inFlightChunkKeysRef.current.has(item.key)) return false;
+          if (!bypassCache) {
+            if (settledEmptyChunkKeysRef.current.has(item.key)) return false;
+            if (loadedSet.has(item.key)) return false;
+            const cd = chunkRetryCooldownRef.current.get(item.key);
+            if (cd && cd.retryAfter > now) return false;
+          }
+          return true;
+        });
+        if (wave.length === 0) continue;
 
-      for (const item of wave) {
-        inFlightChunkKeysRef.current.add(item.key);
-      }
-      setIsLoadingOsm(true);
-      try {
-        const fetched = await fetchOsmRoadChunksBatch(
-          wave.map((w) => ({ key: w.key, lat: w.lat, lng: w.lng })),
-          { allowStarterFallback: false }
-        );
-        const byKey = new Map(fetched.map((c) => [c.chunkKey, c]));
-        let queuedAny = false;
         for (const item of wave) {
-          const chunk = byKey.get(item.key);
-          if (chunk && (chunk.osmNodes.length > 0 || chunk.osmEdges.length > 0)) {
-            chunkRetryCooldownRef.current.delete(item.key);
-            pendingChunkQueueRef.current.push({
-              chunkKey: chunk.chunkKey,
-              osmNodes: chunk.osmNodes,
-              osmEdges: chunk.osmEdges,
-              owningRegionId: item.owningRegionId,
-            });
-            queuedAny = true;
-          } else if (chunk && chunk.usedLiveOverpass) {
-            chunkRetryCooldownRef.current.delete(item.key);
-            settledEmptyChunkKeysRef.current.add(item.key);
-          } else {
+          inFlightChunkKeysRef.current.add(item.key);
+        }
+        setIsLoadingOsm(true);
+        try {
+          const fetched = await fetchOsmRoadChunksBatch(
+            wave.map((w) => ({ key: w.key, lat: w.lat, lng: w.lng })),
+            { allowStarterFallback: false, bypassCache }
+          );
+          const byKey = new Map(fetched.map((c) => [c.chunkKey, c]));
+          let queuedAny = false;
+          for (const item of wave) {
+            const chunk = byKey.get(item.key);
+            if (chunk && (chunk.osmNodes.length > 0 || chunk.osmEdges.length > 0)) {
+              chunkRetryCooldownRef.current.delete(item.key);
+              pendingChunkQueueRef.current.push({
+                chunkKey: chunk.chunkKey,
+                osmNodes: chunk.osmNodes,
+                osmEdges: chunk.osmEdges,
+                owningRegionId: item.owningRegionId,
+              });
+              queuedAny = true;
+            } else if (chunk && chunk.usedLiveOverpass) {
+              chunkRetryCooldownRef.current.delete(item.key);
+              settledEmptyChunkKeysRef.current.add(item.key);
+            } else {
+              const prevCd = chunkRetryCooldownRef.current.get(item.key);
+              const fails = (prevCd?.fails || 0) + 1;
+              const delayMs = 3000 * Math.min(8, Math.pow(2, fails - 1));
+              chunkRetryCooldownRef.current.set(item.key, {
+                fails,
+                retryAfter: Date.now() + delayMs,
+              });
+            }
+          }
+          if (queuedAny) {
+            flushPendingOsmChunks();
+          }
+        } catch {
+          const retryAt = Date.now() + 4000;
+          for (const item of wave) {
             const prevCd = chunkRetryCooldownRef.current.get(item.key);
             const fails = (prevCd?.fails || 0) + 1;
-            const delayMs = 3000 * Math.min(8, Math.pow(2, fails - 1));
             chunkRetryCooldownRef.current.set(item.key, {
               fails,
-              retryAfter: Date.now() + delayMs,
+              retryAfter: Math.max(retryAt, Date.now() + 3000 * Math.min(8, Math.pow(2, fails - 1))),
             });
           }
+        } finally {
+          for (const item of wave) {
+            inFlightChunkKeysRef.current.delete(item.key);
+          }
+          setIsLoadingOsm(inFlightChunkKeysRef.current.size > 0);
         }
-        if (queuedAny) {
-          flushPendingOsmChunks();
-        }
-      } catch {
-        const retryAt = Date.now() + 4000;
-        for (const item of wave) {
-          const prevCd = chunkRetryCooldownRef.current.get(item.key);
-          const fails = (prevCd?.fails || 0) + 1;
-          chunkRetryCooldownRef.current.set(item.key, {
-            fails,
-            retryAfter: Math.max(retryAt, Date.now() + 3000 * Math.min(8, Math.pow(2, fails - 1))),
-          });
-        }
-      } finally {
-        for (const item of wave) {
-          inFlightChunkKeysRef.current.delete(item.key);
-        }
-        setIsLoadingOsm(inFlightChunkKeysRef.current.size > 0);
       }
+    };
+
+    const bypassItems = items.filter((it) => it.bypassCache);
+    const normalItems = items.filter((it) => !it.bypassCache);
+    if (bypassItems.length > 0) {
+      await runSubQueue(bypassItems, true);
+    }
+    if (normalItems.length > 0) {
+      await runSubQueue(normalItems, false);
     }
   }, [flushPendingOsmChunks]);
 
   const handleLoadOsmChunksBatch = useCallback(
-    (coords: Array<{ lat: number; lng: number }>) => {
+    (
+      coords: Array<{ lat: number; lng: number }>,
+      options?: { force?: boolean; bypassCache?: boolean }
+    ) => {
       if (!coords || coords.length === 0) return;
       const curState = stateRef.current;
       const regions = curState?.provincialRegions || [];
       const hasUnlockedRegion = regions.some((r) => r.unlocked);
       const loadedSet = new Set(curState?.loadedOsmChunks || []);
       const now = Date.now();
+      const force = Boolean(options?.force || options?.bypassCache);
+      const bypassCache = Boolean(options?.bypassCache);
 
       let added = 0;
       for (let i = 0; i < coords.length; i++) {
@@ -595,23 +625,36 @@ export default function App() {
         }
 
         const key = chunkKeyForCoords(lat, lng);
-        if (
-          loadedSet.has(key) ||
-          inFlightChunkKeysRef.current.has(key) ||
-          settledEmptyChunkKeysRef.current.has(key) ||
-          queuedBatchCoordsRef.current.has(key)
-        ) {
-          continue;
-        }
-        const cd = chunkRetryCooldownRef.current.get(key);
-        if (cd && cd.retryAfter > now) continue;
+        if (inFlightChunkKeysRef.current.has(key)) continue;
 
-        queuedBatchCoordsRef.current.set(key, { key, lat, lng, owningRegionId });
+        if (force) {
+          settledEmptyChunkKeysRef.current.delete(key);
+          chunkRetryCooldownRef.current.delete(key);
+        } else {
+          if (
+            loadedSet.has(key) ||
+            settledEmptyChunkKeysRef.current.has(key) ||
+            queuedBatchCoordsRef.current.has(key)
+          ) {
+            continue;
+          }
+          const cd = chunkRetryCooldownRef.current.get(key);
+          if (cd && cd.retryAfter > now) continue;
+        }
+
+        const existingQueued = queuedBatchCoordsRef.current.get(key);
+        queuedBatchCoordsRef.current.set(key, {
+          key,
+          lat,
+          lng,
+          owningRegionId,
+          bypassCache: bypassCache || Boolean(existingQueued?.bypassCache),
+        });
         added++;
       }
 
       if (added === 0) return;
-      if (queuedBatchCoordsRef.current.size >= 12) {
+      if (force || queuedBatchCoordsRef.current.size >= 12) {
         void dispatchQueuedOsmBatch();
       } else if (!batchDispatchTimerRef.current) {
         batchDispatchTimerRef.current = setTimeout(() => {

@@ -22,6 +22,7 @@ import {
   calculateMultipliers,
   canConnectIsolatedRoutePair,
   computeOsmFrontierDistancesForState,
+  findIncompleteLoadedChunksInViewport,
   findOsmRoadPath,
   getBuiltOsmEdgesForState,
   getDirectOsmBridgeCost,
@@ -62,7 +63,10 @@ interface WorldMapProps {
   isLoadingOsm?: boolean;
   onReloadOsm?: () => void;
   onLoadOsmChunk?: (lat: number, lng: number) => void;
-  onLoadOsmChunksBatch?: (coords: Array<{ lat: number; lng: number }>) => void;
+  onLoadOsmChunksBatch?: (
+    coords: Array<{ lat: number; lng: number }>,
+    options?: { force?: boolean; bypassCache?: boolean }
+  ) => void;
   onViewportChange?: (bounds: ViewportBounds, zoom: number) => void;
   onConnectOsmPath: (fromId: string, toId: string) => void;
   onSelectIsolatedSeed?: (nodeId: string) => void;
@@ -208,6 +212,8 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
   const hoverNodeGeoJsonRef = useRef<GeoJsonData>(EMPTY_FC);
   const renderedBoundsRef = useRef<ViewportBounds | null>(null);
   const prevBuiltSigRef = useRef<string>('');
+  const autoHealedTilesRef = useRef<Set<string>>(new Set());
+  const requestViewportChunksRef = useRef<(forceRescan?: boolean) => void>(() => {});
 
   const [viewportBounds, setViewportBounds] = useState<ViewportBounds | null>(null);
   const [isOverviewZoom, setIsOverviewZoom] = useState(false);
@@ -845,8 +851,15 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       hoverNodeSrc?.setData(hoverNodeGeoJsonRef.current);
     };
 
+    const handleInitialMapLoad = () => {
+      syncAllSources();
+      setTimeout(() => {
+        requestViewportChunksRef.current(false);
+      }, 450);
+    };
+
     map.on('style.load', syncAllSources);
-    map.on('load', syncAllSources);
+    map.on('load', handleInitialMapLoad);
     if (map.isStyleLoaded() || Boolean(map.getSource('osm-edges-built'))) {
       syncAllSources();
     }
@@ -973,69 +986,112 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       }
     });
 
+    const executeViewportChunkCheck = (forceRescan = false) => {
+      const curMap = mapInstanceRef.current;
+      if (!curMap) return;
+      syncViewportState(true);
+      if (curMap.getZoom() < OVERVIEW_ZOOM_THRESHOLD) return;
+      const rawBounds = computeRawViewportBounds();
+      const prefetchBounds: ViewportBounds = {
+        minLat: Math.max(-85, rawBounds.minLat - 0.010),
+        maxLat: Math.min(85, rawBounds.maxLat + 0.010),
+        minLng: Math.max(-180, rawBounds.minLng - 0.014),
+        maxLng: Math.min(180, rawBounds.maxLng + 0.014),
+      };
+      const gs = gameStateRef.current;
+      const unlockedRegions = (gs.provincialRegions || []).filter((r) => r.unlocked);
+      if (unlockedRegions.length === 0) return;
+
+      const screenChunks = enumerateChunkKeysForBounds(rawBounds, 20);
+      if (forceRescan) {
+        const rescanCoords: Array<{ lat: number; lng: number }> = [];
+        for (let i = 0; i < screenChunks.length && rescanCoords.length < 20; i++) {
+          const c = screenChunks[i];
+          autoHealedTilesRef.current.add(c.key);
+          const inUnlocked = unlockedRegions.some((r) =>
+            isPointInRegionBoundary(c.lat, c.lng, r, 0.005)
+          );
+          if (inUnlocked) {
+            rescanCoords.push({ lat: c.lat, lng: c.lng });
+          }
+        }
+        if (rescanCoords.length > 0 && callbacksRef.current.onLoadOsmChunksBatch) {
+          callbacksRef.current.onLoadOsmChunksBatch(rescanCoords, {
+            force: true,
+            bypassCache: true,
+          });
+        }
+        return;
+      }
+
+      // Auto-heal any already-marked loaded chunks on screen that are suspiciously sparse or have a truncated road tip
+      const incompleteLoaded = findIncompleteLoadedChunksInViewport(
+        gs,
+        screenChunks,
+        autoHealedTilesRef.current,
+        8
+      );
+      if (incompleteLoaded.length > 0 && callbacksRef.current.onLoadOsmChunksBatch) {
+        for (let i = 0; i < incompleteLoaded.length; i++) {
+          autoHealedTilesRef.current.add(incompleteLoaded[i].key);
+        }
+        callbacksRef.current.onLoadOsmChunksBatch(
+          incompleteLoaded.map((c) => ({ lat: c.lat, lng: c.lng })),
+          { force: true, bypassCache: true }
+        );
+      }
+
+      // Prioritize currently visible on-screen chunks first, then moderate prefetch halo
+      const haloChunks = enumerateChunkKeysForBounds(prefetchBounds, 28);
+      const orderedCandidates: Array<{ key: string; lat: number; lng: number }> = [];
+      const seenKeys = new Set<string>();
+      for (let i = 0; i < screenChunks.length; i++) {
+        const c = screenChunks[i];
+        if (!seenKeys.has(c.key)) {
+          seenKeys.add(c.key);
+          orderedCandidates.push(c);
+        }
+      }
+      for (let i = 0; i < haloChunks.length; i++) {
+        const c = haloChunks[i];
+        if (!seenKeys.has(c.key)) {
+          seenKeys.add(c.key);
+          orderedCandidates.push(c);
+        }
+      }
+
+      const loadedSet = new Set(gs.loadedOsmChunks || []);
+      const missingCoords: Array<{ lat: number; lng: number }> = [];
+
+      for (let i = 0; i < orderedCandidates.length && missingCoords.length < 24; i++) {
+        const c = orderedCandidates[i];
+        if (loadedSet.has(c.key)) continue;
+        const inUnlocked = unlockedRegions.some((r) =>
+          isPointInRegionBoundary(c.lat, c.lng, r, 0.005)
+        );
+        if (inUnlocked) {
+          missingCoords.push({ lat: c.lat, lng: c.lng });
+        }
+      }
+
+      if (missingCoords.length > 0) {
+        if (callbacksRef.current.onLoadOsmChunksBatch) {
+          callbacksRef.current.onLoadOsmChunksBatch(missingCoords);
+        } else if (callbacksRef.current.onLoadOsmChunk) {
+          for (let i = 0; i < Math.min(missingCoords.length, 4); i++) {
+            callbacksRef.current.onLoadOsmChunk(missingCoords[i].lat, missingCoords[i].lng);
+          }
+        }
+      }
+    };
+    requestViewportChunksRef.current = executeViewportChunkCheck;
+
     let moveEndTimer: ReturnType<typeof setTimeout> | null = null;
     const onMoveEnd = () => {
       syncGlobeOverviewAttr();
       if (moveEndTimer) clearTimeout(moveEndTimer);
       moveEndTimer = setTimeout(() => {
-        const curMap = mapInstanceRef.current;
-        if (!curMap) return;
-        syncViewportState(true);
-        if (curMap.getZoom() < OVERVIEW_ZOOM_THRESHOLD) return;
-        const rawBounds = computeRawViewportBounds();
-        const prefetchBounds: ViewportBounds = {
-          minLat: Math.max(-85, rawBounds.minLat - 0.010),
-          maxLat: Math.min(85, rawBounds.maxLat + 0.010),
-          minLng: Math.max(-180, rawBounds.minLng - 0.014),
-          maxLng: Math.min(180, rawBounds.maxLng + 0.014),
-        };
-        const gs = gameStateRef.current;
-        const unlockedRegions = (gs.provincialRegions || []).filter((r) => r.unlocked);
-        if (unlockedRegions.length === 0) return;
-
-        // Prioritize currently visible on-screen chunks first, then moderate prefetch halo
-        const screenChunks = enumerateChunkKeysForBounds(rawBounds, 20);
-        const haloChunks = enumerateChunkKeysForBounds(prefetchBounds, 28);
-        const orderedCandidates: Array<{ key: string; lat: number; lng: number }> = [];
-        const seenKeys = new Set<string>();
-        for (let i = 0; i < screenChunks.length; i++) {
-          const c = screenChunks[i];
-          if (!seenKeys.has(c.key)) {
-            seenKeys.add(c.key);
-            orderedCandidates.push(c);
-          }
-        }
-        for (let i = 0; i < haloChunks.length; i++) {
-          const c = haloChunks[i];
-          if (!seenKeys.has(c.key)) {
-            seenKeys.add(c.key);
-            orderedCandidates.push(c);
-          }
-        }
-
-        const loadedSet = new Set(gs.loadedOsmChunks || []);
-        const missingCoords: Array<{ lat: number; lng: number }> = [];
-
-        for (let i = 0; i < orderedCandidates.length && missingCoords.length < 24; i++) {
-          const c = orderedCandidates[i];
-          if (loadedSet.has(c.key)) continue;
-          const inUnlocked = unlockedRegions.some((r) =>
-            isPointInRegionBoundary(c.lat, c.lng, r, 0.005)
-          );
-          if (inUnlocked) {
-            missingCoords.push({ lat: c.lat, lng: c.lng });
-          }
-        }
-
-        if (missingCoords.length > 0) {
-          if (callbacksRef.current.onLoadOsmChunksBatch) {
-            callbacksRef.current.onLoadOsmChunksBatch(missingCoords);
-          } else if (callbacksRef.current.onLoadOsmChunk) {
-            for (let i = 0; i < Math.min(missingCoords.length, 4); i++) {
-              callbacksRef.current.onLoadOsmChunk(missingCoords[i].lat, missingCoords[i].lng);
-            }
-          }
-        }
+        executeViewportChunkCheck(false);
       }, 110);
     };
     map.on('moveend', onMoveEnd);
@@ -2130,8 +2186,8 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
           </div>
         )}
 
-        {/* Compact Mobile Node Legend */}
-        <div className="self-start pointer-events-auto flex items-center gap-2.5 px-2.5 py-1 rounded-lg bg-slate-950/85 border border-slate-800/90 text-[10px] text-slate-300 shadow">
+        {/* Compact Mobile Node Legend + Manual Viewport Rescan */}
+        <div className="self-start pointer-events-auto flex items-center gap-2 px-2.5 py-1 rounded-lg bg-slate-950/85 border border-slate-800/90 text-[10px] text-slate-300 shadow">
           <span className="flex items-center gap-1">
             <span className="w-2 h-2 rounded-full bg-amber-500 border border-amber-200 inline-block" />
             도로 노드
@@ -2140,7 +2196,18 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
             <span className="w-2.5 h-2.5 rounded-full border-2 border-cyan-400 bg-sky-950 inline-block" />
             철도 노드
           </span>
-          <span className="text-slate-400">· 노드 2개 터치로 연결</span>
+          {!isOverviewZoom && onLoadOsmChunksBatch && (
+            <button
+              type="button"
+              onClick={() => requestViewportChunksRef.current(true)}
+              disabled={isLoadingOsm}
+              title="현재 화면 도로·철도 노드 다시 수신"
+              className="ml-0.5 px-1.5 py-0.5 rounded bg-sky-500/20 hover:bg-sky-500/30 disabled:opacity-50 text-sky-300 font-semibold flex items-center gap-1 cursor-pointer"
+            >
+              <RefreshCw className={`w-2.5 h-2.5 ${isLoadingOsm ? 'animate-spin' : ''}`} />
+              도로 재수신
+            </button>
+          )}
         </div>
       </div>
 
@@ -2207,8 +2274,8 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
           </button>
         </div>
 
-        {/* Compact Road vs Rail Node Legend */}
-        <div className="flex items-center gap-3 px-2.5 py-1 rounded-xl bg-slate-950/90 border border-slate-800 text-[11px] text-slate-300 shadow-lg">
+        {/* Compact Road vs Rail Node Legend + Manual Viewport Rescan */}
+        <div className="flex items-center gap-2.5 px-2.5 py-1 rounded-xl bg-slate-950/90 border border-slate-800 text-[11px] text-slate-300 shadow-lg">
           <span className="flex items-center gap-1.5">
             <span className="w-2.5 h-2.5 rounded-full bg-amber-500 border border-amber-200 inline-block" />
             도로 노드
@@ -2217,7 +2284,19 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
             <span className="w-3 h-3 rounded-full border-2 border-cyan-400 bg-sky-950 inline-block" />
             철도 노드
           </span>
-          <span className="text-slate-400">· 시야 거리 d≤5 표시</span>
+          <span className="text-slate-400">· 시야 거리 d≤10</span>
+          {!isOverviewZoom && onLoadOsmChunksBatch && (
+            <button
+              type="button"
+              onClick={() => requestViewportChunksRef.current(true)}
+              disabled={isLoadingOsm}
+              title="이미 로드된 구역의 누락된 도로·철도 노드를 현재 화면 기준으로 다시 수신합니다"
+              className="px-2 py-0.5 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 disabled:opacity-50 text-sky-300 font-semibold flex items-center gap-1 cursor-pointer transition-colors"
+            >
+              <RefreshCw className={`w-3 h-3 ${isLoadingOsm ? 'animate-spin' : ''}`} />
+              화면 도로 재수신
+            </button>
+          )}
         </div>
       </div>
 

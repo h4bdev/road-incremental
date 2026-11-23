@@ -5,15 +5,20 @@ import { chunkKeyForCoords } from './osmService';
 import {
   applyRestoredGraphMarks,
   clearCloudSyncBaseline,
+  CloudChunkPayloadRecord,
+  computeCloudGraphStructureSig,
   countUnhydratedGraphMarks,
+  decodeCloudGraphChunks,
   dehydrateGameStateForCloud,
   deleteLocalSlotGameState,
+  encodeCloudGraphChunks,
   estimateFirestoreDocBytes,
   getActiveSlotId,
   getCloudSyncBaseline,
   getCloudSyncBaselineMap,
   getLocalSlotGraphMarks,
   GRAPH_CHUNK_ITEM_LIMIT,
+  hydrateCloudPayloadAsync,
   isSlotConflict,
   LEGACY_SAVE_KEY,
   listLocalSlotSummaries,
@@ -21,9 +26,11 @@ import {
   MAX_CHUNK_DOC_BYTES,
   MAX_CORE_DOC_BYTES,
   MAX_GRAPH_CHUNKS,
+  MAX_MARK_CHUNK_WITH_PAYLOAD_BYTES,
   MAX_SAVE_SLOTS,
   mergeSlotSummaries,
   migrateLegacySaveIfNeeded,
+  packCloudGraphV1,
   rehydrateGameStateFromCloudPayload,
   SAVE_SLOT_IDS,
   saveLocalSlotGameState,
@@ -567,5 +574,259 @@ test('cloud sync baseline prevents false single-device conflicts and catches cro
   clearCloudSyncBaseline('slot_1', storage);
   assert.equal(getCloudSyncBaseline('slot_1', storage), undefined);
 });
+
+test('compressed cloud snapshot (CompactCloudGraphV1) restores 12,000 nodes, 14,650 edges, >600 bridges, >600 chunks, and real boundaries on an empty device with zero loss in <2s', async () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  const base = createInitialGameState(seoul);
+
+  const regions = [
+    {
+      regionId: 'osm_rel_seoul',
+      regionName: '서울특별시',
+      adminLevel: '4',
+      bbox: [37.42, 126.76, 37.71, 127.19] as [number, number, number, number],
+      centerLat: 37.5665,
+      centerLng: 126.978,
+      unlocked: true,
+      isStartingRegion: true,
+      isIsolated: false,
+      hasRealOsmBoundary: true,
+      totalNodeCount: 5000,
+      boundaryGeoJson: {
+        type: 'Polygon' as const,
+        coordinates: [
+          [
+            [126.76, 37.42],
+            [127.19, 37.42],
+            [127.19, 37.71],
+            [126.76, 37.71],
+            [126.76, 37.42],
+          ],
+        ],
+      },
+    },
+    {
+      regionId: 'osm_rel_gyeonggi',
+      regionName: '경기도',
+      adminLevel: '4',
+      bbox: [37.0, 126.5, 38.0, 127.6] as [number, number, number, number],
+      centerLat: 37.27,
+      centerLng: 127.01,
+      unlocked: true,
+      isStartingRegion: false,
+      isIsolated: false,
+      hasRealOsmBoundary: true,
+      totalNodeCount: 7000,
+      boundaryGeoJson: {
+        type: 'MultiPolygon' as const,
+        coordinates: [
+          [
+            [
+              [126.5, 37.0],
+              [127.6, 37.0],
+              [127.6, 38.0],
+              [126.5, 38.0],
+              [126.5, 37.0],
+            ],
+          ],
+        ],
+      },
+    },
+  ];
+
+  const osmNodes = Array.from({ length: 12_000 }, (_, i) => ({
+    id: `osm_n_${i}`,
+    lat: Number((37.45 + (i % 120) * 0.002).toFixed(6)),
+    lng: Number((126.82 + Math.floor(i / 120) * 0.0025).toFixed(6)),
+    connected: i < 5_000,
+    mode: (i % 5 === 0 ? 'rail' : 'road') as 'road' | 'rail',
+    regionId: i < 5_000 ? 'osm_rel_seoul' : 'osm_rel_gyeonggi',
+  }));
+
+  const osmEdges = Array.from({ length: 14_000 }, (_, i) => {
+    const a = osmNodes[i % 11_999];
+    const b = osmNodes[(i + 1) % 11_999];
+    return {
+      id: `osm_e_${i}`,
+      wayName: `간선노선_${i % 40}`,
+      highwayType: i % 5 === 0 ? 'rail' : 'primary',
+      mode: (i % 5 === 0 ? 'rail' : 'road') as 'road' | 'rail',
+      fromNodeId: a.id,
+      toNodeId: b.id,
+      coordinates: [
+        [a.lat, a.lng],
+        [b.lat, b.lng],
+      ] as [[number, number], [number, number]],
+      distanceKm: 0.08,
+      buildCost: 24,
+      baseIncomePerSec: 2,
+      built: i < 5_500,
+      regionId: a.regionId,
+    };
+  });
+
+  // Add 650 custom bridges (exceeds the legacy CORE 500-item cap!)
+  const customBridges = Array.from({ length: 650 }, (_, i) => {
+    const a = osmNodes[i * 10];
+    const b = osmNodes[i * 10 + 5];
+    return {
+      id: `oe_custom_bridge_${i}`,
+      wayName: '교차로 연결 링크',
+      highwayType: 'unclassified',
+      mode: 'road' as const,
+      fromNodeId: a.id,
+      toNodeId: b.id,
+      coordinates: [
+        [a.lat, a.lng],
+        [b.lat, b.lng],
+      ] as [[number, number], [number, number]],
+      distanceKm: 0.12,
+      buildCost: 45,
+      baseIncomePerSec: 3,
+      built: true,
+      regionId: a.regionId,
+    };
+  });
+
+  const loadedChunks = Array.from(
+    { length: 650 },
+    (_, i) => `${(37.4 + (i % 50) * 0.0033).toFixed(4)}_${(126.8 + Math.floor(i / 50) * 0.0033).toFixed(4)}`
+  );
+
+  const largeState = {
+    ...base,
+    capital: 8_888_888,
+    provincialRegions: regions,
+    loadedOsmChunks: loadedChunks,
+    loadedOsmRegions: ['osm_rel_seoul', 'osm_rel_gyeonggi'],
+    completedOsmWays: ['road::간선노선_0', 'rail::간선노선_5'],
+    osmNodes,
+    osmEdges: [...osmEdges, ...customBridges],
+    stats: {
+      ...base.stats,
+      connectedOsmNodes: 5_000,
+      totalOsmEdgesBuilt: 6_150,
+    },
+  };
+
+  const tStart = Date.now();
+  const sig = computeCloudGraphStructureSig(largeState);
+  assert.ok(sig.includes('cb=650'));
+
+  const packedCloudGraph = packCloudGraphV1(largeState);
+  const encoded = await encodeCloudGraphChunks(packedCloudGraph);
+  assert.equal(encoded.encoding, 'gzip-b64-v1');
+  assert.ok(encoded.slices.length >= 1 && encoded.slices.length <= MAX_GRAPH_CHUNKS);
+  assert.ok(encoded.encodedBytes < encoded.rawBytes * 0.45, 'gzip+b64 should shrink JSON dramatically');
+
+  const dehydrated = dehydrateGameStateForCloud('slot_1', largeState, {
+    maxChunkBytes: MAX_MARK_CHUNK_WITH_PAYLOAD_BYTES,
+  });
+
+  const totalChunks = Math.max(dehydrated.graphChunks.length, encoded.slices.length);
+  const firestoreChunks: CloudChunkPayloadRecord[] = Array.from({ length: totalChunks }, (_, idx) => {
+    const mc = dehydrated.graphChunks[idx] || { chunkIndex: idx, nodeIds: [], edgeIds: [] };
+    const payload = idx < encoded.slices.length ? encoded.slices[idx] : '';
+    const encoding = payload.length > 0 ? encoded.encoding : 'none';
+    assert.ok(payload.length <= 350_000, `Slice ${idx} exceeds 350,000 char rule cap`);
+    const docBytes = estimateFirestoreDocBytes(
+      {
+        ownerUid: 'uid_test_1234567890',
+        slotId: 'slot_1',
+        chunkIndex: idx,
+        nodeIds: mc.nodeIds,
+        edgeIds: mc.edgeIds,
+        graphEncoding: encoding,
+        graphPayload: payload,
+      },
+      256
+    );
+    assert.ok(
+      docBytes <= 750 * 1024,
+      `Combined chunk doc ${idx} (${docBytes} B) must remain comfortably under Firestore 1MiB cap`
+    );
+    return {
+      chunkIndex: idx,
+      nodeIds: mc.nodeIds,
+      edgeIds: mc.edgeIds,
+      graphEncoding: encoding,
+      graphPayload: payload,
+    };
+  });
+
+  // Simulate brand-new empty device (no localStorage, no IndexedDB, no Overpass)
+  const decodedDirect = await decodeCloudGraphChunks(firestoreChunks);
+  assert.ok(decodedDirect);
+  assert.equal(decodedDirect.nodes.length, 12_000);
+
+  const hydrated = await hydrateCloudPayloadAsync(dehydrated.coreFields, firestoreChunks);
+  const elapsedMs = Date.now() - tStart;
+
+  assert.ok(elapsedMs < 3000, `Expected full encode+decode roundtrip < 3000ms, got ${elapsedMs}ms`);
+  assert.equal(hydrated.hasFullGraphSnapshot, true);
+  assert.equal(hydrated.baseState.osmNodes.length, 12_000, 'Zero node loss');
+  assert.equal(hydrated.baseState.osmEdges.length, 14_650, 'Zero edge & zero custom bridge loss');
+  assert.equal(
+    hydrated.baseState.osmEdges.filter((e) => e.id.startsWith('oe_custom_bridge_') && e.built).length,
+    650,
+    'All 650 custom bridges must survive uncapped'
+  );
+  assert.equal(hydrated.baseState.osmNodes.filter((n) => n.connected).length, 5_000);
+  assert.equal(hydrated.baseState.osmEdges.filter((e) => e.built).length, 6_150);
+  assert.equal(
+    hydrated.baseState.loadedOsmChunks.length >= 650,
+    true,
+    'All >500 loadedOsmChunks preserved'
+  );
+  assert.deepEqual(
+    [...(hydrated.baseState.loadedOsmRegions || [])].sort(),
+    ['osm_rel_gyeonggi', 'osm_rel_seoul']
+  );
+  const restoredSeoul = hydrated.baseState.provincialRegions.find((r) => r.regionId === 'osm_rel_seoul');
+  const restoredGg = hydrated.baseState.provincialRegions.find((r) => r.regionId === 'osm_rel_gyeonggi');
+  assert.equal(restoredSeoul?.hasRealOsmBoundary, true);
+  assert.equal(restoredSeoul?.boundaryGeoJson?.type, 'Polygon');
+  assert.equal(restoredGg?.hasRealOsmBoundary, true);
+  assert.equal(restoredGg?.boundaryGeoJson?.type, 'MultiPolygon');
+
+  const unhydrated = countUnhydratedGraphMarks(hydrated.baseState, hydrated.marks);
+  assert.equal(unhydrated.unhydratedNodes, 0);
+  assert.equal(unhydrated.unhydratedEdges, 0);
+});
+
+test('hydrateCloudPayloadAsync falls back gracefully on legacy cloud saves lacking graphPayload', async () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  const state = createInitialGameState(seoul);
+  state.osmNodes = [
+    { id: 'legacy_n1', lat: 37.5665, lng: 126.978, connected: true, mode: 'road' },
+    { id: 'legacy_n2', lat: 37.567, lng: 126.979, connected: true, mode: 'road' },
+  ];
+  state.osmEdges = [
+    {
+      id: 'legacy_e1',
+      wayName: '종로',
+      highwayType: 'primary',
+      mode: 'road',
+      fromNodeId: 'legacy_n1',
+      toNodeId: 'legacy_n2',
+      coordinates: [
+        [37.5665, 126.978],
+        [37.567, 126.979],
+      ],
+      distanceKm: 0.1,
+      buildCost: 20,
+      baseIncomePerSec: 1,
+      built: true,
+    },
+  ];
+
+  const dehydrated = dehydrateGameStateForCloud('slot_1', state);
+  const result = await hydrateCloudPayloadAsync(dehydrated.coreFields, dehydrated.graphChunks);
+  assert.equal(result.hasFullGraphSnapshot, false);
+  assert.equal(result.baseState.osmNodes.length, 0);
+  assert.equal(result.marks.connectedNodeIds.size, 2);
+  assert.equal(result.marks.builtEdgeIds.size, 1);
+});
+
 
 

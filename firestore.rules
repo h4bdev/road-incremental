@@ -149,7 +149,7 @@ service cloud.firestore {
 
     function isValidSaveSlotGraphChunk(data, userId, slotId) {
       return data.keys().hasAll(['ownerUid', 'slotId', 'chunkIndex', 'nodeIds', 'edgeIds', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['ownerUid', 'slotId', 'chunkIndex', 'nodeIds', 'edgeIds', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'slotId', 'chunkIndex', 'nodeIds', 'edgeIds', 'graphEncoding', 'graphPayload', 'createdAt', 'updatedAt']) &&
         isValidId(data.ownerUid) &&
         data.ownerUid == userId &&
         data.ownerUid == request.auth.uid &&
@@ -158,6 +158,8 @@ service cloud.firestore {
         data.chunkIndex is number && data.chunkIndex >= 0 && data.chunkIndex <= 499 &&
         isStringArrayBounded(data.nodeIds, 2000) &&
         isStringArrayBounded(data.edgeIds, 2000) &&
+        (!('graphEncoding' in data) || (data.graphEncoding is string && data.graphEncoding.size() <= 24 && data.graphEncoding in ['none', 'gzip-b64-v1', 'json-v1'])) &&
+        (!('graphPayload' in data) || (data.graphPayload is string && data.graphPayload.size() <= 350000)) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -290,7 +292,7 @@ service cloud.firestore {
             incoming().createdAt == existing().createdAt &&
             incoming().updatedAt == request.time &&
             incoming().diff(existing()).affectedKeys().hasOnly([
-              'nodeIds', 'edgeIds', 'updatedAt'
+              'nodeIds', 'edgeIds', 'graphEncoding', 'graphPayload', 'updatedAt'
             ]) &&
             parentSlotExists(userId, slotId);
           allow delete: if isValidId(userId) && isValidSlotId(slotId) && isValidChunkId(chunkId) && isOwner(userId) && isVerifiedUser();

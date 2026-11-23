@@ -25,6 +25,7 @@ import {
   getFrontierVisualStyle,
   getNodeTierRank,
   getOsmEdgeBuildCost,
+  getOsmNodeConnectionFlags,
   getProximityAdjacentChunksToLoad,
   getReachableOsmNodeSet,
   getRecommendedBalancedCapital,
@@ -51,7 +52,8 @@ import {
   unlockProvincialRegion,
   unlockSkill,
 } from './rules';
-import { isCountryLevelOsmArea } from './osmCore';
+import { isCountryLevelOsmArea, quantizeChunkKey } from './osmCore';
+import { enumerateChunkKeysForBounds } from './osmService';
 import { CURATED_LINES, CURATED_PROVINCIAL_REGIONS, INITIAL_UPGRADES, PRESET_CITIES } from './worldCatalog';
 import { MINIGAME_MILESTONES, MINIGAME_ORDER } from './minigames';
 
@@ -2203,4 +2205,173 @@ test('unlockProvincialRegion does not queue pendingSeedRegionIds when roadless i
     'Roadless island should not trap pendingSeedRegionIds waiting for a click on 0 nodes'
   );
 });
+
+test('getOsmNodeConnectionFlags flags d=0 terminal nodes with unlocked unexplored neighbors while hiding fully explored interior nodes', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  let state = { ...createInitialGameState(seoul), capital: 500_000, pendingSeedRegionIds: [] };
+
+  // Build n1 -> n2 -> n3 inside Seoul; n4 is unexplored inside Seoul; n_locked is in locked Gyeonggi
+  state = {
+    ...state,
+    osmNodes: [
+      { id: 'n1', lat: 37.5660, lng: 126.9780, connected: true, mode: 'road', regionId: 'curated_kr_seoul' },
+      { id: 'n2', lat: 37.5663, lng: 126.9780, connected: true, mode: 'road', regionId: 'curated_kr_seoul' },
+      { id: 'n3', lat: 37.5666, lng: 126.9780, connected: true, mode: 'road', regionId: 'curated_kr_seoul' },
+      { id: 'n4', lat: 37.5669, lng: 126.9780, connected: false, mode: 'road', regionId: 'curated_kr_seoul' },
+      { id: 'n_locked', lat: 37.7500, lng: 127.0500, connected: false, mode: 'road', regionId: 'curated_kr_gyeonggi' },
+    ],
+    osmEdges: [
+      {
+        id: 'e12',
+        wayName: '세종대로',
+        highwayType: 'primary',
+        mode: 'road',
+        fromNodeId: 'n1',
+        toNodeId: 'n2',
+        coordinates: [[37.5660, 126.9780], [37.5663, 126.9780]],
+        distanceKm: 0.033,
+        buildCost: 30,
+        baseIncomePerSec: 3,
+        built: true,
+        regionId: 'curated_kr_seoul',
+      },
+      {
+        id: 'e23',
+        wayName: '세종대로',
+        highwayType: 'primary',
+        mode: 'road',
+        fromNodeId: 'n2',
+        toNodeId: 'n3',
+        coordinates: [[37.5663, 126.9780], [37.5666, 126.9780]],
+        distanceKm: 0.033,
+        buildCost: 30,
+        baseIncomePerSec: 3,
+        built: true,
+        regionId: 'curated_kr_seoul',
+      },
+      // Optional parallel/shortcut unbuilt edge between already-connected n1 and n2
+      {
+        id: 'e12_alt',
+        wayName: '측면도로',
+        highwayType: 'secondary',
+        mode: 'road',
+        fromNodeId: 'n1',
+        toNodeId: 'n2',
+        coordinates: [[37.5660, 126.9780], [37.5663, 126.9780]],
+        distanceKm: 0.035,
+        buildCost: 30,
+        baseIncomePerSec: 2,
+        built: false,
+        regionId: 'curated_kr_seoul',
+      },
+      // Unbuilt frontier edge from terminal n3 -> unexplored unlocked n4
+      {
+        id: 'e34',
+        wayName: '세종대로',
+        highwayType: 'primary',
+        mode: 'road',
+        fromNodeId: 'n3',
+        toNodeId: 'n4',
+        coordinates: [[37.5666, 126.9780], [37.5669, 126.9780]],
+        distanceKm: 0.033,
+        buildCost: 30,
+        baseIncomePerSec: 3,
+        built: false,
+        regionId: 'curated_kr_seoul',
+      },
+      // Edge from n1 to locked node should NOT count as buildable unexplored neighbor
+      {
+        id: 'e1_locked',
+        wayName: '시외도로',
+        highwayType: 'primary',
+        mode: 'road',
+        fromNodeId: 'n1',
+        toNodeId: 'n_locked',
+        coordinates: [[37.5660, 126.9780], [37.7500, 127.0500]],
+        distanceKm: 21,
+        buildCost: 100,
+        baseIncomePerSec: 5,
+        built: false,
+        regionId: 'curated_kr_gyeonggi',
+      },
+    ],
+    stats: { ...state.stats, connectedOsmNodes: 3, totalOsmEdgesBuilt: 2 },
+  };
+
+  const frontier = computeOsmFrontierDistancesForState(state);
+  const f1 = getOsmNodeConnectionFlags(state, 'n1', frontier, true);
+  const f2 = getOsmNodeConnectionFlags(state, 'n2', frontier, true);
+  const f3 = getOsmNodeConnectionFlags(state, 'n3', frontier, true);
+
+  assert.equal(f1.hasBuiltEdge, true);
+  assert.equal(f1.hasUnexploredNeighbor, false, 'n1 only borders connected n2 and locked n_locked');
+  assert.equal(f2.hasBuiltEdge, true);
+  assert.equal(f2.hasUnexploredNeighbor, false, 'interior n2 only borders connected nodes');
+  assert.equal(f3.hasBuiltEdge, true);
+  assert.equal(f3.hasUnbuiltEdge, true);
+  assert.equal(f3.hasUnexploredNeighbor, true, 'd=0 terminal n3 borders unexplored unlocked n4 and must stay rendered as a dot');
+});
+
+test('enumerateChunkKeysForBounds returns center and NE quadrant tiles on wide viewports instead of SW truncation', () => {
+  // 0.06 deg x 0.06 deg = 18 x 18 = 324 chunks (far larger than 8x8=64)
+  const bounds = {
+    minLat: 37.74,
+    maxLat: 37.80,
+    minLng: -122.45,
+    maxLng: -122.39,
+  };
+  const centerLat = (bounds.minLat + bounds.maxLat) / 2; // 37.77
+  const centerLng = (bounds.minLng + bounds.maxLng) / 2; // -122.42
+  const centerKey = quantizeChunkKey(centerLat, centerLng);
+
+  const tiles = enumerateChunkKeysForBounds(bounds, 24);
+  assert.equal(tiles.length, 24);
+  assert.equal(tiles[0].key, centerKey, 'First tile must be the viewport center');
+  assert.ok(
+    tiles.some((t) => t.lat > centerLat && t.lng > centerLng),
+    'Wide viewport tiles must include NE quadrant around center'
+  );
+  assert.ok(
+    tiles.some((t) => t.lat < centerLat && t.lng < centerLng),
+    'Wide viewport tiles must include SW quadrant around center'
+  );
+});
+
+test('getProximityAdjacentChunksToLoad discovers diagonal neighbor chunks up to 0.55km around frontier endpoints', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  const base = createInitialGameState(seoul);
+  const centerKey = quantizeChunkKey(37.5667, 126.9767); // (37.5667, 126.9767)
+  const state = {
+    ...base,
+    pendingSeedRegionIds: [],
+    loadedOsmChunks: [centerKey],
+    osmNodes: [
+      { id: 'c0', lat: 37.5667, lng: 126.9767, connected: true, mode: 'road' as const, regionId: 'curated_kr_seoul' },
+      { id: 'c1', lat: 37.5679, lng: 126.9781, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul' },
+    ],
+    osmEdges: [
+      {
+        id: 'ec',
+        wayName: '대각선도로',
+        highwayType: 'primary',
+        mode: 'road' as const,
+        fromNodeId: 'c0',
+        toNodeId: 'c1',
+        coordinates: [[37.5667, 126.9767], [37.5679, 126.9781]] as [[number, number], [number, number]],
+        distanceKm: 0.18,
+        buildCost: 25,
+        baseIncomePerSec: 2,
+        built: false,
+        regionId: 'curated_kr_seoul',
+      },
+    ],
+    stats: { ...base.stats, connectedOsmNodes: 1 },
+  };
+
+  const adj = getProximityAdjacentChunksToLoad(state, 12);
+  assert.ok(adj.length >= 3, `Expected >= 3 adjacent unloaded chunks around frontier, got ${adj.length}`);
+  const neKey = quantizeChunkKey(37.5667 + 1 / 300, 126.9767 + 1 / 300);
+  assert.ok(adj.some((a) => a.key === neKey), 'Diagonal NE chunk within 0.55km should be queued for loading');
+});
+
 

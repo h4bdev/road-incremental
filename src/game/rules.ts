@@ -2345,28 +2345,38 @@ export function getOsmNodeConnectionFlags(
   nodeId: string,
   frontierDistances: Map<string, number>,
   hasAnyConnected: boolean
-): { hasBuiltEdge: boolean; hasUnbuiltEdge: boolean } {
+): { hasBuiltEdge: boolean; hasUnbuiltEdge: boolean; hasUnexploredNeighbor: boolean } {
   const graphIdx = getOsmGraphIndex(state.osmNodes || [], state.osmEdges || []);
   const edges = graphIdx.adjEdgesAll.get(nodeId);
   if (!edges || edges.length === 0) {
-    return { hasBuiltEdge: false, hasUnbuiltEdge: false };
+    return { hasBuiltEdge: false, hasUnbuiltEdge: false, hasUnexploredNeighbor: false };
   }
   const builtSet = graphIdx.builtEdgeIds;
   let hasBuiltEdge = false;
   let hasUnbuiltEdge = false;
+  let hasUnexploredNeighbor = false;
   for (let i = 0; i < edges.length; i++) {
     const e = edges[i];
     if (builtSet.has(e.id)) {
       hasBuiltEdge = true;
-    } else if (
-      !hasAnyConnected ||
-      (frontierDistances.has(e.fromNodeId) && frontierDistances.has(e.toNodeId))
-    ) {
-      hasUnbuiltEdge = true;
+    } else {
+      const isFrontierPair =
+        !hasAnyConnected ||
+        (frontierDistances.has(e.fromNodeId) && frontierDistances.has(e.toNodeId));
+      if (isFrontierPair) {
+        hasUnbuiltEdge = true;
+        if (!hasUnexploredNeighbor) {
+          const otherId = e.fromNodeId === nodeId ? e.toNodeId : e.fromNodeId;
+          const otherNode = graphIdx.nodeById.get(otherId);
+          if (otherNode && !otherNode.connected && isNodeInUnlockedRegion(state, otherNode)) {
+            hasUnexploredNeighbor = true;
+          }
+        }
+      }
     }
-    if (hasBuiltEdge && hasUnbuiltEdge) break;
+    if (hasBuiltEdge && hasUnbuiltEdge && hasUnexploredNeighbor) break;
   }
-  return { hasBuiltEdge, hasUnbuiltEdge };
+  return { hasBuiltEdge, hasUnbuiltEdge, hasUnexploredNeighbor };
 }
 
 export function getFrontierOsmEdgesForState(
@@ -3401,7 +3411,7 @@ export function computeOsmFrontierDistancesForState(
 
 export function getProximityAdjacentChunksToLoad(
   state: GameState,
-  maxChunks = 5
+  maxChunks = 24
 ): Array<{ key: string; lat: number; lng: number; minDistKm: number }> {
   if (!state || !state.osmNodes || state.osmNodes.length === 0) return [];
   const loadedSet = new Set(state.loadedOsmChunks || []);
@@ -3421,17 +3431,30 @@ export function getProximityAdjacentChunksToLoad(
       activeNodes.push(n);
     } else {
       const d = frontierMap.get(n.id);
-      if (d !== undefined && d <= 5) {
+      if (d !== undefined && d <= 10) {
         activeNodes.push(n);
       }
     }
   }
 
-  // Also include center of any unlocked region that has few nodes loaded so far (< 30)
+  // Also include center of any unlocked region that has moderate node density (< 120)
   for (const ur of unlockedRegions) {
-    if ((regionCounts.get(ur.regionId) || 0) < 30) {
+    if ((regionCounts.get(ur.regionId) || 0) < 120) {
       activeNodes.push({
         id: `reg_center_${ur.regionId}`,
+        lat: ur.centerLat,
+        lng: ur.centerLng,
+        connected: true,
+        mode: 'road',
+        label: ur.regionName,
+      });
+    }
+  }
+
+  if (activeNodes.length === 0) {
+    for (const ur of unlockedRegions) {
+      activeNodes.push({
+        id: `reg_fallback_${ur.regionId}`,
         lat: ur.centerLat,
         lng: ur.centerLng,
         connected: true,
@@ -3468,8 +3491,8 @@ export function getProximityAdjacentChunksToLoad(
         if (loadedSet.has(key)) continue;
 
         const distKm = haversineKm(n.lat, n.lng, cLat, cLng);
-        // Self chunk: <= 0.35km, Adjacent chunks: <= 0.45km
-        const thresholdKm = dy === 0 && dx === 0 ? 0.35 : 0.45;
+        // Self chunk: <= 0.35km, Adjacent (including diagonal): <= 0.55km
+        const thresholdKm = dy === 0 && dx === 0 ? 0.35 : 0.55;
         if (distKm > thresholdKm) continue;
 
         let inUnlocked = unlockedCellCache.get(key);

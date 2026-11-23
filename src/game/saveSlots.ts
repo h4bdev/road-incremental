@@ -37,6 +37,9 @@ export const GRAPH_CHUNK_ITEM_LIMIT = 1500;
 export const MAX_GRAPH_CHUNKS = 500;
 export const MAX_CORE_DOC_BYTES = 750 * 1024;
 export const MAX_CHUNK_DOC_BYTES = 400 * 1024;
+export const MAX_MARK_CHUNK_WITH_PAYLOAD_BYTES = 260 * 1024;
+export const MAX_CLOUD_GRAPH_B64_SLICE_CHARS = 280_000;
+export const MAX_CLOUD_GRAPH_JSON_SLICE_CHARS = 90_000;
 
 const utf8Encoder = new TextEncoder();
 
@@ -188,6 +191,30 @@ export interface DehydratedCloudSlot {
     nodeIds: string[];
     edgeIds: string[];
   }>;
+}
+
+export type CloudGraphEncoding = 'none' | 'gzip-b64-v1' | 'json-v1';
+
+export interface CloudChunkPayloadRecord {
+  chunkIndex: number;
+  nodeIds: string[];
+  edgeIds: string[];
+  graphEncoding?: string;
+  graphPayload?: string;
+}
+
+export interface CompactCloudGraphV1 {
+  v: 1;
+  wayNames: string[];
+  hwTypes: string[];
+  regionIds: string[];
+  nodes: CompactNodeTuple[];
+  edges: CompactEdgeTuple[];
+  regionBoundaries: Array<[string, ProvincialRegion['boundaryGeoJson'], boolean | undefined]>;
+  regions?: LocalCompactRegionRecord[];
+  loadedOsmChunks: string[];
+  loadedOsmRegions: string[];
+  completedOsmWays: string[];
 }
 
 export interface RestoredGraphMarks {
@@ -387,14 +414,20 @@ function computeLocalGraphStructureSig(state: GameState): string {
   const edges = state.osmEdges || [];
   const regions = state.provincialRegions || [];
   let boundaryCount = 0;
+  let customCount = 0;
   for (let i = 0; i < regions.length; i++) {
     if (regions[i].boundaryGeoJson) boundaryCount++;
   }
+  for (let i = 0; i < edges.length; i++) {
+    if (edges[i].id.startsWith('oe_custom_')) customCount++;
+  }
   const nLen = nodes.length;
   const eLen = edges.length;
-  return `${nLen}:${eLen}:${boundaryCount}:${(state.loadedOsmRegions || []).length}:${
-    nLen > 0 ? nodes[0].id : ''
-  }:${nLen > 0 ? nodes[nLen - 1].id : ''}:${eLen > 0 ? edges[eLen - 1].id : ''}`;
+  return `${state.startingCity?.id || ''}:${nLen}:${eLen}:${customCount}:${boundaryCount}:${
+    (state.loadedOsmChunks || []).length
+  }:${(state.loadedOsmRegions || []).length}:${nLen > 0 ? nodes[0].id : ''}:${
+    nLen > 0 ? nodes[nLen - 1].id : ''
+  }:${eLen > 0 ? edges[eLen - 1].id : ''}`;
 }
 
 function quantizeChunkKeyForSave(lat: number, lng: number): string {
@@ -528,7 +561,10 @@ function packLocalCoreV2(
   };
 }
 
-function packLocalGraphV2(state: GameState): CompactLocalGraphV2 {
+function packLocalGraphV2(
+  state: GameState,
+  options?: { includeCustomBridges?: boolean; extraCustomEdges?: OsmEdge[] }
+): CompactLocalGraphV2 {
   const wayNames: string[] = [];
   const wayIndex = new Map<string, number>();
   const hwTypes: string[] = [];
@@ -561,9 +597,10 @@ function packLocalGraphV2(state: GameState): CompactLocalGraphV2 {
 
   const osmEdges = state.osmEdges || [];
   const packedEdges: CompactEdgeTuple[] = [];
-  for (let i = 0; i < osmEdges.length; i++) {
-    const e = osmEdges[i];
-    if (e.id.startsWith('oe_custom_')) continue; // Stored in CORE so player-built links always survive
+  const seenEdgeIds = new Set<string>();
+  const pushEdge = (e: OsmEdge) => {
+    if (seenEdgeIds.has(e.id)) return;
+    seenEdgeIds.add(e.id);
     const wIdx = intern(wayNames, wayIndex, e.wayName);
     const hIdx = intern(hwTypes, hwIndex, e.highwayType);
     const rIdx = intern(regionIds, regIndex, e.regionId);
@@ -590,6 +627,17 @@ function packLocalGraphV2(state: GameState): CompactLocalGraphV2 {
       rIdx,
       matchesEndpoints ? 0 : e.coordinates,
     ]);
+  };
+
+  for (let i = 0; i < osmEdges.length; i++) {
+    const e = osmEdges[i];
+    if (!options?.includeCustomBridges && e.id.startsWith('oe_custom_')) continue;
+    pushEdge(e);
+  }
+  if (options?.includeCustomBridges && options?.extraCustomEdges?.length) {
+    for (let i = 0; i < options.extraCustomEdges.length; i++) {
+      pushEdge(options.extraCustomEdges[i]);
+    }
   }
 
   const regionBoundaries: CompactLocalGraphV2['regionBoundaries'] = [];
@@ -1114,10 +1162,40 @@ function sanitizePlainObject(obj: Record<string, unknown>): Record<string, unkno
   return clean;
 }
 
+export async function saveLocalSlotGraphToIndexedDb(
+  slotId: SaveSlotId,
+  state: GameState
+): Promise<void> {
+  if (!hasIndexedDb()) return;
+  const graphSig = computeLocalGraphStructureSig(state);
+  lastIdbGraphSigBySlot.set(slotId, graphSig);
+  const packed = packLocalGraphV2(state);
+  const snapshot: CachedSlotGraphSnapshot = {
+    slotId,
+    version: 3,
+    cityId: state.startingCity.id,
+    wayNames: packed.wayNames,
+    hwTypes: packed.hwTypes,
+    regionIds: packed.regionIds,
+    nodes: packed.nodes,
+    edges: packed.edges,
+    regionBoundaries: packed.regionBoundaries,
+    loadedOsmChunks: state.loadedOsmChunks || [],
+    loadedOsmRegions: state.loadedOsmRegions || [],
+    updatedAt: Date.now(),
+  };
+  await putCachedSlotGraph(snapshot);
+}
+
 export function dehydrateGameStateForCloud(
   slotId: SaveSlotId,
   state: GameState,
-  options?: { slotName?: string; clientSavedAt?: number; pendingMarks?: RestoredGraphMarks | null }
+  options?: {
+    slotName?: string;
+    clientSavedAt?: number;
+    pendingMarks?: RestoredGraphMarks | null;
+    maxChunkBytes?: number;
+  }
 ): DehydratedCloudSlot {
   const pendingMarks = options?.pendingMarks;
   const connectedSet = new Set<string>();
@@ -1261,6 +1339,7 @@ export function dehydrateGameStateForCloud(
   let nodeCursor = 0;
   let edgeCursor = 0;
   const CHUNK_DOC_BASE_BYTES = 320; // ownerUid, slotId, chunkIndex, timestamps, doc path
+  const chunkDocBudget = Math.max(64 * 1024, Math.min(MAX_CHUNK_DOC_BYTES, options?.maxChunkBytes ?? MAX_CHUNK_DOC_BYTES));
 
   while (
     (nodeCursor < connectedNodeIds.length || edgeCursor < builtEdgeIds.length) &&
@@ -1276,7 +1355,7 @@ export function dehydrateGameStateForCloud(
       if (nodeCursor < connectedNodeIds.length && chunkNodes.length < GRAPH_CHUNK_ITEM_LIMIT) {
         const nid = connectedNodeIds[nodeCursor];
         const nidBytes = utf8ByteLength(nid) + 1;
-        if (chunkBytes + nidBytes <= MAX_CHUNK_DOC_BYTES || (chunkNodes.length === 0 && chunkEdges.length === 0)) {
+        if (chunkBytes + nidBytes <= chunkDocBudget || (chunkNodes.length === 0 && chunkEdges.length === 0)) {
           chunkNodes.push(nid);
           chunkBytes += nidBytes;
           nodeCursor++;
@@ -1287,7 +1366,7 @@ export function dehydrateGameStateForCloud(
       if (edgeCursor < builtEdgeIds.length && chunkEdges.length < GRAPH_CHUNK_ITEM_LIMIT) {
         const eid = builtEdgeIds[edgeCursor];
         const eidBytes = utf8ByteLength(eid) + 1;
-        if (chunkBytes + eidBytes <= MAX_CHUNK_DOC_BYTES || (chunkNodes.length === 0 && chunkEdges.length === 0)) {
+        if (chunkBytes + eidBytes <= chunkDocBudget || (chunkNodes.length === 0 && chunkEdges.length === 0)) {
           chunkEdges.push(eid);
           chunkBytes += eidBytes;
           edgeCursor++;
@@ -1515,6 +1594,321 @@ export function rehydrateGameStateFromCloudPayload(
       builtEdgeIds,
       customBridgeEdges,
     },
+  };
+}
+
+const utf8Decoder = new TextDecoder();
+
+function uint8ToBase64(bytes: Uint8Array): string {
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(bytes).toString('base64');
+  }
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function base64ToUint8(b64: string): Uint8Array {
+  if (typeof Buffer !== 'undefined') {
+    return new Uint8Array(Buffer.from(b64, 'base64'));
+  }
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    bytes[i] = bin.charCodeAt(i);
+  }
+  return bytes;
+}
+
+async function readAllStreamBytes(readable: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const reader = readable.getReader();
+  const parts: Uint8Array[] = [];
+  let totalLen = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value && value.length > 0) {
+      parts.push(value);
+      totalLen += value.length;
+    }
+  }
+  const out = new Uint8Array(totalLen);
+  let offset = 0;
+  for (let i = 0; i < parts.length; i++) {
+    out.set(parts[i], offset);
+    offset += parts[i].length;
+  }
+  return out;
+}
+
+async function gzipBytes(raw: Uint8Array): Promise<Uint8Array | null> {
+  if (typeof CompressionStream === 'undefined') return null;
+  try {
+    const cs = new CompressionStream('gzip');
+    const readPromise = readAllStreamBytes(cs.readable);
+    const writer = cs.writable.getWriter();
+    const writePromise = (async () => {
+      await writer.write(new Uint8Array(raw));
+      await writer.close();
+    })();
+    const [compressed] = await Promise.all([readPromise, writePromise]);
+    return compressed;
+  } catch {
+    return null;
+  }
+}
+
+async function gunzipBytes(compressed: Uint8Array): Promise<Uint8Array | null> {
+  if (typeof DecompressionStream === 'undefined') return null;
+  try {
+    const ds = new DecompressionStream('gzip');
+    const readPromise = readAllStreamBytes(ds.readable);
+    const writer = ds.writable.getWriter();
+    const writePromise = (async () => {
+      await writer.write(new Uint8Array(compressed));
+      await writer.close();
+    })();
+    const [raw] = await Promise.all([readPromise, writePromise]);
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+function sliceStringSafely(str: string, maxSliceChars: number): string[] {
+  if (!str) return [];
+  const slices: string[] = [];
+  let pos = 0;
+  while (pos < str.length) {
+    let end = Math.min(str.length, pos + maxSliceChars);
+    if (end < str.length) {
+      const lastChar = str.charCodeAt(end - 1);
+      if (lastChar >= 0xd800 && lastChar <= 0xdbff) {
+        end = Math.max(pos + 1, end - 1);
+      }
+    }
+    slices.push(str.slice(pos, end));
+    pos = end;
+  }
+  return slices;
+}
+
+export function computeCloudGraphStructureSig(
+  state: GameState,
+  pendingMarks?: RestoredGraphMarks | null
+): string {
+  const customBridgeCount =
+    (state.osmEdges || []).filter((e) => e.id.startsWith('oe_custom_')).length +
+    (pendingMarks?.customBridgeEdges?.length || 0);
+  return `${computeLocalGraphStructureSig(state)}:cb=${customBridgeCount}:ways=${
+    (state.completedOsmWays || []).length
+  }`;
+}
+
+export function packCloudGraphV1(
+  state: GameState,
+  pendingMarks?: RestoredGraphMarks | null
+): CompactCloudGraphV1 {
+  const packed = packLocalGraphV2(state, {
+    includeCustomBridges: true,
+    extraCustomEdges: pendingMarks?.customBridgeEdges,
+  });
+
+  const regions: LocalCompactRegionRecord[] = (state.provincialRegions || []).map((r) => ({
+    regionId: r.regionId,
+    regionName: r.regionName,
+    adminLevel: r.adminLevel || '6',
+    bbox: r.bbox,
+    centerLat: r.centerLat,
+    centerLng: r.centerLng,
+    unlocked: Boolean(r.unlocked),
+    isStartingRegion: Boolean(r.isStartingRegion),
+    isIsolated: Boolean(r.isIsolated),
+    isKnownIsland: Boolean(r.isKnownIsland),
+    totalNodeCount: Math.max(0, Math.floor(r.totalNodeCount || 0)),
+    ...(r.hasRealOsmBoundary ? { hasRealOsmBoundary: true } : {}),
+  }));
+
+  const chunkSet = new Set<string>(state.loadedOsmChunks || []);
+  for (const n of state.osmNodes || []) {
+    chunkSet.add(quantizeChunkKeyForSave(n.lat, n.lng));
+  }
+
+  return {
+    v: 1,
+    wayNames: packed.wayNames,
+    hwTypes: packed.hwTypes,
+    regionIds: packed.regionIds,
+    nodes: packed.nodes,
+    edges: packed.edges,
+    regionBoundaries: packed.regionBoundaries,
+    regions,
+    loadedOsmChunks: Array.from(chunkSet),
+    loadedOsmRegions: Array.from(new Set(state.loadedOsmRegions || [])),
+    completedOsmWays: Array.from(new Set(state.completedOsmWays || [])),
+  };
+}
+
+export async function encodeCloudGraphChunks(graph: CompactCloudGraphV1): Promise<{
+  encoding: CloudGraphEncoding;
+  slices: string[];
+  rawBytes: number;
+  encodedBytes: number;
+}> {
+  if (
+    graph.nodes.length === 0 &&
+    graph.edges.length === 0 &&
+    graph.regionBoundaries.length === 0 &&
+    graph.loadedOsmChunks.length === 0
+  ) {
+    return { encoding: 'none', slices: [], rawBytes: 0, encodedBytes: 0 };
+  }
+
+  const json = JSON.stringify(graph);
+  const rawBytesArr = utf8Encoder.encode(json);
+  const gzipped = await gzipBytes(rawBytesArr);
+
+  if (gzipped && gzipped.length > 0) {
+    const b64 = uint8ToBase64(gzipped);
+    const slices = sliceStringSafely(b64, MAX_CLOUD_GRAPH_B64_SLICE_CHARS);
+    if (slices.length <= MAX_GRAPH_CHUNKS) {
+      return {
+        encoding: 'gzip-b64-v1',
+        slices,
+        rawBytes: rawBytesArr.length,
+        encodedBytes: b64.length,
+      };
+    }
+  }
+
+  const jsonSlices = sliceStringSafely(json, MAX_CLOUD_GRAPH_JSON_SLICE_CHARS).slice(
+    0,
+    MAX_GRAPH_CHUNKS
+  );
+  return {
+    encoding: jsonSlices.length > 0 ? 'json-v1' : 'none',
+    slices: jsonSlices,
+    rawBytes: rawBytesArr.length,
+    encodedBytes: rawBytesArr.length,
+  };
+}
+
+export async function decodeCloudGraphChunks(
+  chunks: CloudChunkPayloadRecord[]
+): Promise<CompactCloudGraphV1 | null> {
+  const sorted = [...chunks]
+    .filter(
+      (c) =>
+        typeof c.graphPayload === 'string' &&
+        c.graphPayload.length > 0 &&
+        (c.graphEncoding === 'gzip-b64-v1' || c.graphEncoding === 'json-v1')
+    )
+    .sort((a, b) => a.chunkIndex - b.chunkIndex);
+
+  if (sorted.length === 0) return null;
+  const primaryEncoding = sorted[0].graphEncoding;
+  const joined = sorted
+    .filter((c) => c.graphEncoding === primaryEncoding)
+    .map((c) => c.graphPayload!)
+    .join('');
+  if (!joined) return null;
+
+  try {
+    let jsonText = '';
+    if (primaryEncoding === 'gzip-b64-v1') {
+      const compressed = base64ToUint8(joined);
+      const raw = await gunzipBytes(compressed);
+      if (!raw) return null;
+      jsonText = utf8Decoder.decode(raw);
+    } else if (primaryEncoding === 'json-v1') {
+      jsonText = joined;
+    } else {
+      return null;
+    }
+
+    const parsed = JSON.parse(jsonText) as CompactCloudGraphV1;
+    if (!parsed || parsed.v !== 1 || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export async function hydrateCloudPayloadAsync(
+  core: DehydratedCloudSlot['coreFields'],
+  graphChunks: CloudChunkPayloadRecord[]
+): Promise<{
+  baseState: GameState;
+  marks: RestoredGraphMarks;
+  hasFullGraphSnapshot: boolean;
+}> {
+  const { baseState, marks } = rehydrateGameStateFromCloudPayload(core, graphChunks);
+  const cloudGraph = await decodeCloudGraphChunks(graphChunks);
+
+  const hasSnapshotContent =
+    Boolean(cloudGraph) &&
+    (cloudGraph!.nodes.length > 0 ||
+      cloudGraph!.edges.length > 0 ||
+      (cloudGraph!.regionBoundaries?.length || 0) > 0 ||
+      (cloudGraph!.regions?.length || 0) > 0);
+
+  if (!cloudGraph || !hasSnapshotContent) {
+    return { baseState, marks, hasFullGraphSnapshot: false };
+  }
+
+  const corePayloadWithAllRegions: CompactLocalCoreV2 = {
+    v: 2,
+    capital: baseState.capital,
+    totalLifetimeEarnings: baseState.totalLifetimeEarnings,
+    lastTickTimestamp: baseState.lastTickTimestamp,
+    startingCity: baseState.startingCity,
+    stats: baseState.stats,
+    settings: baseState.settings,
+    skillsMap: core.skillsMap || {},
+    unlockedAchievementIds: core.unlockedAchievementIds || [],
+    loadedOsmChunks: Array.from(
+      new Set([...(cloudGraph.loadedOsmChunks || []), ...(core.loadedOsmChunks || [])])
+    ),
+    loadedOsmRegions: Array.from(
+      new Set([...(cloudGraph.loadedOsmRegions || []), ...(core.loadedOsmRegions || [])])
+    ),
+    pendingSeedRegionIds: [...(core.pendingSeedRegionIds || [])],
+    completedOsmWays: Array.from(
+      new Set([...(cloudGraph.completedOsmWays || []), ...(core.completedOsmWays || [])])
+    ),
+    regions:
+      Array.isArray(cloudGraph.regions) && cloudGraph.regions.length > 0
+        ? cloudGraph.regions
+        : (core.regions || []).map((r) => ({ ...r })),
+    minigames: baseState.minigames,
+    connectedNodeIds: Array.from(marks.connectedNodeIds),
+    builtEdgeIds: Array.from(marks.builtEdgeIds),
+    customBridgeEdges: marks.customBridgeEdges,
+  };
+
+  const graphV2: CompactLocalGraphV2 = {
+    v: 2,
+    wayNames: cloudGraph.wayNames || [],
+    hwTypes: cloudGraph.hwTypes || [],
+    regionIds: cloudGraph.regionIds || [],
+    nodes: cloudGraph.nodes || [],
+    edges: cloudGraph.edges || [],
+    regionBoundaries: cloudGraph.regionBoundaries || [],
+  };
+
+  const unpacked = unpackLocalV2ToRawGameState(corePayloadWithAllRegions, graphV2);
+  const hydrated = hydrateRawGameState(unpacked, { trustedV2: true }) || baseState;
+  const withMarks = applyRestoredGraphMarks(hydrated, marks);
+
+  return {
+    baseState: withMarks,
+    marks,
+    hasFullGraphSnapshot: true,
   };
 }
 

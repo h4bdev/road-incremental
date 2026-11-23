@@ -48,5 +48,7 @@ test('Dirty Dozen payload guards are present in firestore.rules helpers', () => 
   assert.ok(rulesText.includes('data.slotName is string && data.slotName.size() >= 1 && data.slotName.size() <= 60'));
   assert.ok(rulesText.includes('isStringArrayBounded(data.nodeIds, 2000)'));
   assert.ok(rulesText.includes('isStringArrayBounded(data.edgeIds, 2000)'));
+  assert.ok(rulesText.includes('data.graphPayload is string && data.graphPayload.size() <= 350000'));
+  assert.ok(rulesText.includes("data.graphEncoding in ['none', 'gzip-b64-v1', 'json-v1']"));
   assert.ok(rulesText.includes('existsAfter(/databases/$(database)/documents/users/$(userId)/slots/$(slotId))'));
 });

@@ -260,7 +260,7 @@
     },
     "SaveSlotGraphChunk": {
       "title": "SaveSlotGraphChunk",
-      "description": "Byte-bounded chunk of connected OSM node IDs and built edge IDs (max 2000 each per chunk doc, up to 500 chunks).",
+      "description": "Byte-bounded chunk of connected OSM node IDs, built edge IDs, and optional compressed full-graph snapshot slice (up to 500 chunks).",
       "type": "object",
       "properties": {
         "ownerUid": {
@@ -283,6 +283,16 @@
         },
         "edgeIds": {
           "type": "array"
+        },
+        "graphEncoding": {
+          "type": "string",
+          "description": "Encoding format for full-graph snapshot slice ('none', 'gzip-b64-v1', or 'json-v1').",
+          "maxLength": 24
+        },
+        "graphPayload": {
+          "type": "string",
+          "description": "Bounded slice of compressed full-graph snapshot payload (max 350,000 chars per chunk doc).",
+          "maxLength": 350000
         },
         "createdAt": {
           "type": "string",

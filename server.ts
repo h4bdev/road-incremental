@@ -7,6 +7,7 @@ import {
   loadOsmProvinceDirect,
   loadOsmRegionInfoDirect,
   loadOsmRoadChunkDirect,
+  loadOsmRoadChunksBatchDirect,
 } from './src/game/osmCore.ts';
 
 async function startServer() {
@@ -28,6 +29,24 @@ async function startServer() {
 
     const result = await loadOsmRoadChunkDirect(lat, lng, { allowStarterFallback });
     res.json(result);
+  });
+
+  app.post('/api/osm-roads-batch', async (req, res) => {
+    const body = req.body as {
+      coords?: Array<{ lat?: unknown; lng?: unknown }>;
+      allowStarterFallback?: boolean;
+    };
+    const rawCoords = Array.isArray(body?.coords) ? body.coords.slice(0, 24) : [];
+    const validCoords = rawCoords
+      .map((c) => ({ lat: Number(c?.lat), lng: Number(c?.lng) }))
+      .filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lng));
+    if (validCoords.length === 0) {
+      res.status(400).json({ error: 'Invalid coords array' });
+      return;
+    }
+    const allowStarterFallback = body?.allowStarterFallback !== false;
+    const chunks = await loadOsmRoadChunksBatchDirect(validCoords, { allowStarterFallback });
+    res.json({ chunks });
   });
 
   app.get('/api/osm-region-info', async (req, res) => {

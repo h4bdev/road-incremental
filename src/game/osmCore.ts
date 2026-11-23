@@ -97,21 +97,67 @@ const DRIVABLE_HIGHWAYS = new Set([
 
 const RAILWAYS = new Set(['rail', 'subway', 'light_rail', 'tram', 'narrow_gauge']);
 
-const OVERPASS_ENDPOINTS = [
+const OVERPASS_ENDPOINTS_SERVER = [
   'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
   'https://overpass.openstreetmap.fr/api/interpreter',
+];
+
+const OVERPASS_ENDPOINTS_BROWSER = [
+  'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
 ];
 
+const MAX_CHUNK_CACHE_SIZE = 4000;
 const chunkCache = new Map<string, ChunkPayload>();
 const provinceCache = new Map<string, ProvincePayload>();
 const regionInfoCache = new Map<string, ResolvedAdminRegion>();
 const inFlightChunks = new Map<string, Promise<ChunkPayload>>();
 const inFlightProvinces = new Map<string, Promise<ProvincePayload>>();
 const inFlightRegionInfo = new Map<string, Promise<ResolvedAdminRegion | null>>();
+const endpointCooldownUntil = new Map<string, number>();
+
+function setChunkCache(key: string, payload: ChunkPayload): void {
+  if (chunkCache.size >= MAX_CHUNK_CACHE_SIZE && !chunkCache.has(key)) {
+    const oldest = chunkCache.keys().next().value;
+    if (oldest !== undefined) chunkCache.delete(oldest);
+  }
+  chunkCache.set(key, payload);
+}
 
 function isServerRuntime(): boolean {
   return typeof window === 'undefined';
+}
+
+function getActiveOverpassEndpoints(): string[] {
+  const list = isServerRuntime() ? OVERPASS_ENDPOINTS_SERVER : OVERPASS_ENDPOINTS_BROWSER;
+  const now = Date.now();
+  const healthy = list.filter((ep) => (endpointCooldownUntil.get(ep) || 0) <= now);
+  return healthy.length > 0 ? healthy : list;
+}
+
+const MAX_UPSTREAM_CONCURRENT = 4;
+let activeUpstreamCount = 0;
+const upstreamWaiters: Array<() => void> = [];
+
+async function withUpstreamSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (isServerRuntime()) {
+    if (activeUpstreamCount >= MAX_UPSTREAM_CONCURRENT) {
+      await new Promise<void>((resolve) => {
+        upstreamWaiters.push(resolve);
+      });
+    }
+    activeUpstreamCount++;
+  }
+  try {
+    return await fn();
+  } finally {
+    if (isServerRuntime()) {
+      activeUpstreamCount = Math.max(0, activeUpstreamCount - 1);
+      const next = upstreamWaiters.shift();
+      if (next) next();
+    }
+  }
 }
 
 function buildRequestHeaders(accept = 'application/json', contentType?: string): Record<string, string> {
@@ -186,37 +232,53 @@ async function fetchOverpassFromUrl(
   query: string,
   signal: AbortSignal
 ): Promise<OsmMapResponse> {
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    signal,
-    headers: buildRequestHeaders('application/json', 'application/x-www-form-urlencoded'),
-    body: `data=${encodeURIComponent(query)}`,
-  });
-  if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
-  const data = (await res.json()) as OsmMapResponse;
-  if (!Array.isArray(data.elements)) {
-    throw new Error('Overpass invalid elements');
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      signal,
+      headers: buildRequestHeaders('application/json', 'application/x-www-form-urlencoded'),
+      body: `data=${encodeURIComponent(query)}`,
+    });
+    if (!res.ok) {
+      if (res.status === 429 || res.status >= 500) {
+        endpointCooldownUntil.set(endpoint, Date.now() + 12000);
+      }
+      throw new Error(`Overpass HTTP ${res.status}`);
+    }
+    const data = (await res.json()) as OsmMapResponse;
+    if (!Array.isArray(data.elements)) {
+      throw new Error('Overpass invalid elements');
+    }
+    if (data.elements.length === 0 && typeof data.remark === 'string' && data.remark.trim().length > 0) {
+      throw new Error(`Overpass remark: ${data.remark}`);
+    }
+    endpointCooldownUntil.delete(endpoint);
+    return data;
+  } catch (err) {
+    if (!signal.aborted) {
+      endpointCooldownUntil.set(endpoint, Date.now() + 8000);
+    }
+    throw err;
   }
-  if (data.elements.length === 0 && typeof data.remark === 'string' && data.remark.trim().length > 0) {
-    throw new Error(`Overpass remark: ${data.remark}`);
-  }
-  return data;
 }
 
 export async function fetchOverpassQuery(
   query: string,
   timeoutMs = 8500
 ): Promise<OsmMapResponse> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await Promise.any(
-      OVERPASS_ENDPOINTS.map((ep) => fetchOverpassFromUrl(ep, query, controller.signal))
-    );
-  } finally {
-    clearTimeout(timer);
-    controller.abort();
-  }
+  return withUpstreamSlot(async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const endpoints = getActiveOverpassEndpoints();
+    try {
+      return await Promise.any(
+        endpoints.map((ep) => fetchOverpassFromUrl(ep, query, controller.signal))
+      );
+    } finally {
+      clearTimeout(timer);
+      controller.abort();
+    }
+  });
 }
 
 async function fetchFromOverpass(
@@ -261,34 +323,28 @@ export async function fetchOsmBbox(
   maxLng: number,
   timeoutMs = 8500
 ): Promise<OsmMapResponse | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await Promise.any([
-      fetchFromOsm06(minLat, minLng, maxLat, maxLng, controller.signal),
-      fetchFromOverpass(
-        'https://overpass-api.de/api/interpreter',
-        minLat,
-        minLng,
-        maxLat,
-        maxLng,
-        controller.signal
-      ),
-      fetchFromOverpass(
-        'https://overpass.openstreetmap.fr/api/interpreter',
-        minLat,
-        minLng,
-        maxLat,
-        maxLng,
-        controller.signal
-      ),
-    ]);
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-    controller.abort();
-  }
+  return withUpstreamSlot(async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const latSpan = Math.abs(maxLat - minLat);
+    const lngSpan = Math.abs(maxLng - minLng);
+    const allowOsm06 = latSpan <= 0.015 && lngSpan <= 0.019;
+    const overpassEndpoints = getActiveOverpassEndpoints();
+    const attempts: Array<Promise<OsmMapResponse>> = overpassEndpoints.map((ep) =>
+      fetchFromOverpass(ep, minLat, minLng, maxLat, maxLng, controller.signal)
+    );
+    if (allowOsm06) {
+      attempts.unshift(fetchFromOsm06(minLat, minLng, maxLat, maxLng, controller.signal));
+    }
+    try {
+      return await Promise.any(attempts);
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+      controller.abort();
+    }
+  });
 }
 
 export function buildFallbackStarterGrid(
@@ -1067,6 +1123,75 @@ export async function resolveOsmProvincialRegion(
   return null;
 }
 
+export interface IndexedOsmWay {
+  way: OsmRawWay;
+  minLat: number;
+  maxLat: number;
+  minLng: number;
+  maxLng: number;
+  isRail: boolean;
+}
+
+export interface PreIndexedOsmData {
+  rawNodeCoords: Map<number, { lat: number; lng: number }>;
+  indexedWays: IndexedOsmWay[];
+  nodeRefCount: Map<number, number>;
+}
+
+export function prepareOsmElementsIndex(data: OsmMapResponse): PreIndexedOsmData {
+  const elements = data.elements || [];
+  const rawNodeCoords = new Map<number, { lat: number; lng: number }>();
+  const validWays: OsmRawWay[] = [];
+
+  for (let i = 0; i < elements.length; i++) {
+    const el = elements[i];
+    if (el.type === 'node' && 'lat' in el && 'lon' in el && 'id' in el) {
+      rawNodeCoords.set((el as OsmRawNode).id, { lat: (el as OsmRawNode).lat, lng: (el as OsmRawNode).lon });
+    } else if (el.type === 'way' && 'nodes' in el && Array.isArray((el as OsmRawWay).nodes) && (el as OsmRawWay).nodes!.length >= 2) {
+      const w = el as OsmRawWay;
+      const hw = w.tags?.highway;
+      const rw = w.tags?.railway;
+      if ((hw && DRIVABLE_HIGHWAYS.has(hw)) || (rw && RAILWAYS.has(rw))) {
+        validWays.push(w);
+      }
+    }
+  }
+
+  const nodeRefCount = new Map<number, number>();
+  const indexedWays: IndexedOsmWay[] = [];
+  for (let i = 0; i < validWays.length; i++) {
+    const way = validWays[i];
+    let minLat = Infinity;
+    let maxLat = -Infinity;
+    let minLng = Infinity;
+    let maxLng = -Infinity;
+    const nodes = way.nodes!;
+    for (let j = 0; j < nodes.length; j++) {
+      const nid = nodes[j];
+      nodeRefCount.set(nid, (nodeRefCount.get(nid) || 0) + 1);
+      const pt = rawNodeCoords.get(nid);
+      if (pt) {
+        if (pt.lat < minLat) minLat = pt.lat;
+        if (pt.lat > maxLat) maxLat = pt.lat;
+        if (pt.lng < minLng) minLng = pt.lng;
+        if (pt.lng > maxLng) maxLng = pt.lng;
+      }
+    }
+    if (minLat <= maxLat) {
+      indexedWays.push({
+        way,
+        minLat,
+        maxLat,
+        minLng,
+        maxLng,
+        isRail: Boolean(way.tags?.railway),
+      });
+    }
+  }
+
+  return { rawNodeCoords, indexedWays, nodeRefCount };
+}
+
 export function buildDenseRealOsmGraph(
   data: OsmMapResponse,
   chunkKey: string,
@@ -1080,23 +1205,11 @@ export function buildDenseRealOsmGraph(
     roadBudget?: number;
     railBudget?: number;
     maxPerWay?: number;
+    preIndexed?: PreIndexedOsmData;
   }
 ): ChunkPayload {
-  const elements = data.elements || [];
-  const rawNodeCoords = new Map<number, { lat: number; lng: number }>();
-  const validWays: OsmRawWay[] = [];
-
-  for (const el of elements) {
-    if (el.type === 'node' && 'lat' in el && 'lon' in el && 'id' in el) {
-      rawNodeCoords.set(el.id, { lat: el.lat, lng: el.lon });
-    } else if (el.type === 'way' && 'nodes' in el && Array.isArray(el.nodes) && el.nodes.length >= 2) {
-      const hw = el.tags?.highway;
-      const rw = el.tags?.railway;
-      if ((hw && DRIVABLE_HIGHWAYS.has(hw)) || (rw && RAILWAYS.has(rw))) {
-        validWays.push(el);
-      }
-    }
-  }
+  const indexed = options?.preIndexed || prepareOsmElementsIndex(data);
+  const { rawNodeCoords, indexedWays, nodeRefCount } = indexed;
 
   const DEG_TO_RAD = Math.PI / 180;
   const METERS_PER_DEG_LAT = 111194.9266;
@@ -1106,38 +1219,6 @@ export function buildDenseRealOsmGraph(
     const dLngM = (lng2 - lng1) * metersPerDegLngCenter;
     return Math.sqrt(dLatM * dLatM + dLngM * dLngM);
   };
-
-  const wayMinDistMap = new Map<number, number>();
-  for (const way of validWays) {
-    let minD = 99999;
-    for (const nid of way.nodes!) {
-      const pt = rawNodeCoords.get(nid);
-      if (!pt) continue;
-      const d = fastEquirectMeters(centerLat, centerLng, pt.lat, pt.lng);
-      if (d < minD) minD = d;
-    }
-    wayMinDistMap.set(way.id, minD);
-  }
-
-  validWays.sort((a, b) => {
-    const aDist = wayMinDistMap.get(a.id) ?? 99999;
-    const bDist = wayMinDistMap.get(b.id) ?? 99999;
-    const bandDiff = Math.floor(aDist / 120) - Math.floor(bDist / 120);
-    if (bandDiff !== 0) return bandDiff;
-    const pDiff = getWayPriority(a) - getWayPriority(b);
-    if (pDiff !== 0) return pDiff;
-    return aDist - bDist;
-  });
-
-  const nodeRefCount = new Map<number, number>();
-  for (const way of validWays) {
-    for (const nid of way.nodes!) {
-      nodeRefCount.set(nid, (nodeRefCount.get(nid) || 0) + 1);
-    }
-  }
-
-  const nodeMap = new Map<string, OsmNode>();
-  const edgeMap = new Map<string, OsmEdge>();
 
   const MAX_EDGE_METERS = options?.maxEdgeMeters ?? 28.0;
   const TARGET_SUBDIV_METERS = options?.targetSubdivMeters ?? 24.0;
@@ -1150,6 +1231,48 @@ export function buildDenseRealOsmGraph(
   const roadBudget = options?.roadBudget ?? 2600;
   const railBudget = options?.railBudget ?? 420;
   const maxPerWayBudget = options?.maxPerWay ?? 95;
+
+  const minBoxLat = centerLat - BRIDGE_CLIP_LAT;
+  const maxBoxLat = centerLat + BRIDGE_CLIP_LAT;
+  const minBoxLng = centerLng - BRIDGE_CLIP_LNG;
+  const maxBoxLng = centerLng + BRIDGE_CLIP_LNG;
+
+  const validWays: OsmRawWay[] = [];
+  const wayMinDistMap = new Map<number, number>();
+  for (let i = 0; i < indexedWays.length; i++) {
+    const iw = indexedWays[i];
+    if (
+      iw.maxLat < minBoxLat ||
+      iw.minLat > maxBoxLat ||
+      iw.maxLng < minBoxLng ||
+      iw.minLng > maxBoxLng
+    ) {
+      continue;
+    }
+    const way = iw.way;
+    let minD = 99999;
+    for (const nid of way.nodes!) {
+      const pt = rawNodeCoords.get(nid);
+      if (!pt) continue;
+      const d = fastEquirectMeters(centerLat, centerLng, pt.lat, pt.lng);
+      if (d < minD) minD = d;
+    }
+    wayMinDistMap.set(way.id, minD);
+    validWays.push(way);
+  }
+
+  validWays.sort((a, b) => {
+    const aDist = wayMinDistMap.get(a.id) ?? 99999;
+    const bDist = wayMinDistMap.get(b.id) ?? 99999;
+    const bandDiff = Math.floor(aDist / 120) - Math.floor(bDist / 120);
+    if (bandDiff !== 0) return bandDiff;
+    const pDiff = getWayPriority(a) - getWayPriority(b);
+    if (pDiff !== 0) return pDiff;
+    return aDist - bDist;
+  });
+
+  const nodeMap = new Map<string, OsmNode>();
+  const edgeMap = new Map<string, OsmEdge>();
 
   const roadWays = validWays.filter((w) => !w.tags?.railway);
   const railWays = validWays.filter((w) => Boolean(w.tags?.railway));
@@ -1455,39 +1578,36 @@ export async function loadOsmRoadChunkDirect(
   if (!pending) {
     pending = (async () => {
       let hadLiveResponse = false;
-      const dLat1 = 0.0038;
-      const dLng1 = 0.0048;
-      let raw = await fetchOsmBbox(lat - dLat1, lng - dLng1, lat + dLat1, lng + dLng1);
+      const dLat1 = 0.0046;
+      const dLng1 = 0.0059;
+      let raw = await fetchOsmBbox(lat - dLat1, lng - dLng1, lat + dLat1, lng + dLng1, 8000);
       if (raw !== null) hadLiveResponse = true;
       let payload = raw ? buildDenseRealOsmGraph(raw, chunkKey, lat, lng) : null;
 
-      if (!payload || payload.osmEdges.length < 12) {
-        const dLat2 = 0.0045;
-        const dLng2 = 0.0058;
-        raw = await fetchOsmBbox(lat - dLat2, lng - dLng2, lat + dLat2, lng + dLng2);
+      if (hadLiveResponse && (!payload || payload.osmEdges.length < 4)) {
+        const dLat2 = 0.010;
+        const dLng2 = 0.013;
+        raw = await fetchOsmBbox(lat - dLat2, lng - dLng2, lat + dLat2, lng + dLng2, 8500);
+        if (raw !== null) {
+          hadLiveResponse = true;
+          payload = buildDenseRealOsmGraph(raw, chunkKey, lat, lng, {
+            clipLat: 0.011,
+            clipLng: 0.014,
+            maxEdgeMeters: 45,
+            targetSubdivMeters: 36,
+          });
+        }
+      } else if (!hadLiveResponse) {
+        // Retry once with same compact bbox on any healthy mirror/OSM0.6
+        raw = await fetchOsmBbox(lat - dLat1, lng - dLng1, lat + dLat1, lng + dLng1, 8500);
         if (raw !== null) {
           hadLiveResponse = true;
           payload = buildDenseRealOsmGraph(raw, chunkKey, lat, lng);
         }
       }
 
-      if (!payload || payload.osmEdges.length < 6) {
-        const dLat3 = 0.011;
-        const dLng3 = 0.014;
-        raw = await fetchOsmBbox(lat - dLat3, lng - dLng3, lat + dLat3, lng + dLng3);
-        if (raw !== null) {
-          hadLiveResponse = true;
-          payload = buildDenseRealOsmGraph(raw, chunkKey, lat, lng, {
-            clipLat: 0.012,
-            clipLng: 0.015,
-            maxEdgeMeters: 50,
-            targetSubdivMeters: 40,
-          });
-        }
-      }
-
       if (payload && payload.osmEdges.length > 0) {
-        chunkCache.set(chunkKey, payload);
+        setChunkCache(chunkKey, payload);
         return payload;
       }
 
@@ -1501,7 +1621,7 @@ export async function loadOsmRoadChunkDirect(
           wayCount: 0,
         };
         if (hadLiveResponse) {
-          chunkCache.set(chunkKey, emptyPayload);
+          setChunkCache(chunkKey, emptyPayload);
         }
         return emptyPayload;
       }
@@ -1521,6 +1641,136 @@ export async function loadOsmRoadChunkDirect(
     return buildFallbackStarterGrid(chunkKey, lat, lng);
   }
   return res;
+}
+
+export async function loadOsmRoadChunksBatchDirect(
+  coords: Array<{ lat: number; lng: number }>,
+  options?: { allowStarterFallback?: boolean }
+): Promise<ChunkPayload[]> {
+  const deduped: Array<{ key: string; lat: number; lng: number }> = [];
+  const seenKeys = new Set<string>();
+  for (const pt of coords) {
+    if (!Number.isFinite(pt.lat) || !Number.isFinite(pt.lng)) continue;
+    const key = quantizeChunkKey(pt.lat, pt.lng);
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    deduped.push({ key, lat: pt.lat, lng: pt.lng });
+  }
+  if (deduped.length === 0) return [];
+
+  const resultsByKey = new Map<string, ChunkPayload>();
+  const pendingCoords: Array<{ key: string; lat: number; lng: number }> = [];
+  const inFlightWaiters: Array<Promise<void>> = [];
+  for (const pt of deduped) {
+    const cached = chunkCache.get(pt.key);
+    if (cached && (cached.osmEdges.length > 0 || cached.usedLiveOverpass)) {
+      resultsByKey.set(pt.key, cached);
+      continue;
+    }
+    const existingFlight = inFlightChunks.get(pt.key);
+    if (existingFlight) {
+      inFlightWaiters.push(
+        existingFlight.then((val) => {
+          resultsByKey.set(pt.key, val);
+        }).catch(() => undefined)
+      );
+      continue;
+    }
+    pendingCoords.push(pt);
+  }
+
+  // Group nearby chunks into compact bounding-box clusters (<= 0.014 deg lat x 0.018 deg lng, max 8 chunks)
+  const clusters: Array<Array<{ key: string; lat: number; lng: number }>> = [];
+  for (const pt of pendingCoords) {
+    let targetCluster: Array<{ key: string; lat: number; lng: number }> | null = null;
+    for (const cl of clusters) {
+      if (cl.length >= 8) continue;
+      let minLat = pt.lat;
+      let maxLat = pt.lat;
+      let minLng = pt.lng;
+      let maxLng = pt.lng;
+      for (const item of cl) {
+        if (item.lat < minLat) minLat = item.lat;
+        if (item.lat > maxLat) maxLat = item.lat;
+        if (item.lng < minLng) minLng = item.lng;
+        if (item.lng > maxLng) maxLng = item.lng;
+      }
+      if (maxLat - minLat <= 0.014 && maxLng - minLng <= 0.018) {
+        targetCluster = cl;
+        break;
+      }
+    }
+    if (targetCluster) {
+      targetCluster.push(pt);
+    } else {
+      clusters.push([pt]);
+    }
+  }
+
+  const MAX_CONCURRENT_CLUSTERS = 2;
+  for (let start = 0; start < clusters.length; start += MAX_CONCURRENT_CLUSTERS) {
+    const wave = clusters.slice(start, start + MAX_CONCURRENT_CLUSTERS);
+    await Promise.allSettled(
+      wave.map(async (cluster) => {
+        if (cluster.length === 1) {
+          const single = await loadOsmRoadChunkDirect(cluster[0].lat, cluster[0].lng, options);
+          resultsByKey.set(cluster[0].key, single);
+          return;
+        }
+        let minLat = Infinity;
+        let maxLat = -Infinity;
+        let minLng = Infinity;
+        let maxLng = -Infinity;
+        for (const pt of cluster) {
+          if (pt.lat < minLat) minLat = pt.lat;
+          if (pt.lat > maxLat) maxLat = pt.lat;
+          if (pt.lng < minLng) minLng = pt.lng;
+          if (pt.lng > maxLng) maxLng = pt.lng;
+        }
+        const raw = await fetchOsmBbox(
+          minLat - 0.0048,
+          minLng - 0.0062,
+          maxLat + 0.0048,
+          maxLng + 0.0062,
+          10500
+        );
+        const failedPoints: Array<{ key: string; lat: number; lng: number }> = [];
+        if (raw) {
+          const preIndexed = prepareOsmElementsIndex(raw);
+          for (const pt of cluster) {
+            const payload = buildDenseRealOsmGraph(raw, pt.key, pt.lat, pt.lng, { preIndexed });
+            setChunkCache(pt.key, payload);
+            resultsByKey.set(pt.key, payload);
+          }
+        } else {
+          failedPoints.push(...cluster);
+        }
+
+        if (failedPoints.length > 0) {
+          for (let fStart = 0; fStart < failedPoints.length; fStart += 2) {
+            const fSlice = failedPoints.slice(fStart, fStart + 2);
+            const fallbacks = await Promise.allSettled(
+              fSlice.map((pt) => loadOsmRoadChunkDirect(pt.lat, pt.lng, options))
+            );
+            for (let k = 0; k < fallbacks.length; k++) {
+              const fb = fallbacks[k];
+              if (fb.status === 'fulfilled') {
+                resultsByKey.set(fSlice[k].key, fb.value);
+              }
+            }
+          }
+        }
+      })
+    );
+  }
+
+  if (inFlightWaiters.length > 0) {
+    await Promise.allSettled(inFlightWaiters);
+  }
+
+  return deduped
+    .map((pt) => resultsByKey.get(pt.key))
+    .filter((item): item is ChunkPayload => Boolean(item));
 }
 
 export async function loadOsmRegionInfoDirect(

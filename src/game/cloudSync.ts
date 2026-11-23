@@ -13,11 +13,20 @@ import {
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import {
+  CloudChunkPayloadRecord,
+  CloudGraphEncoding,
+  computeCloudGraphStructureSig,
+  countUnhydratedGraphMarks,
   DehydratedCloudSlot,
   dehydrateGameStateForCloud,
+  encodeCloudGraphChunks,
   estimateFirestoreDocBytes,
+  hydrateCloudPayloadAsync,
   isSaveSlotId,
-  rehydrateGameStateFromCloudPayload,
+  MAX_CHUNK_DOC_BYTES,
+  MAX_GRAPH_CHUNKS,
+  MAX_MARK_CHUNK_WITH_PAYLOAD_BYTES,
+  packCloudGraphV1,
   RestoredGraphMarks,
   SAVE_SLOT_IDS,
   SaveSlotId,
@@ -32,10 +41,11 @@ export interface CloudDownloadResult {
   marks: RestoredGraphMarks;
   chunkCoordCenters: Array<{ lat: number; lng: number }>;
   pendingChunkKeys: string[];
+  hasFullGraphSnapshot: boolean;
 }
 
 const MAX_META_CORE_BATCH_BYTES = 950 * 1024;
-const MAX_WRITE_BATCH_BYTES = 450 * 1024;
+const MAX_WRITE_BATCH_BYTES = 750 * 1024;
 const MAX_WRITE_BATCH_OPS = 100;
 
 const VALID_CLOUD_CORE_KEYS = new Set([
@@ -266,7 +276,12 @@ export async function fetchCloudSlotSummaries(
 
 const lastUploadedGraphSig = new Map<
   string,
-  { sig: string; chunkCount: number }
+  { marksSig: string; structureSig: string; chunkCount: number }
+>();
+
+const compressedGraphCache = new Map<
+  string,
+  { sig: string; encoding: CloudGraphEncoding; slices: string[] }
 >();
 
 function fnv1aHashUpdate(hash: number, str: string): number {
@@ -277,6 +292,14 @@ function fnv1aHashUpdate(hash: number, str: string): number {
   }
   h ^= 0xff;
   return Math.imul(h, 0x01000193) >>> 0;
+}
+
+function stringArraysEqual(a: unknown, b: string[]): boolean {
+  if (!Array.isArray(a) || a.length !== b.length) return false;
+  for (let i = 0; i < b.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }
 
 function computeGraphChunksSig(
@@ -326,13 +349,51 @@ export async function uploadSlotToCloud(
   const chunksCol = collection(db, 'users', uid, 'slots', slotId, 'chunks');
 
   try {
+    const cacheKey = `${uid}:${slotId}`;
+    const unhydrated = options?.pendingMarks
+      ? countUnhydratedGraphMarks(state, options.pendingMarks)
+      : { unhydratedNodes: 0, unhydratedEdges: 0 };
+    const isGraphCompleteEnoughForSnapshot =
+      (state.osmNodes || []).length > 0 &&
+      unhydrated.unhydratedNodes === 0 &&
+      unhydrated.unhydratedEdges === 0;
+
+    const structureSig = computeCloudGraphStructureSig(state, options?.pendingMarks);
+    let encodedGraph: { encoding: CloudGraphEncoding; slices: string[] } = {
+      encoding: 'none',
+      slices: [],
+    };
+    if (isGraphCompleteEnoughForSnapshot) {
+      const cachedComp = compressedGraphCache.get(cacheKey);
+      if (cachedComp && cachedComp.sig === structureSig) {
+        encodedGraph = { encoding: cachedComp.encoding, slices: cachedComp.slices };
+      } else {
+        const packedGraph = packCloudGraphV1(state, options?.pendingMarks);
+        const encRes = await encodeCloudGraphChunks(packedGraph);
+        encodedGraph = { encoding: encRes.encoding, slices: encRes.slices };
+        compressedGraphCache.set(cacheKey, {
+          sig: structureSig,
+          encoding: encRes.encoding,
+          slices: encRes.slices,
+        });
+      }
+    }
+
+    const hasGraphPayload = encodedGraph.encoding !== 'none' && encodedGraph.slices.length > 0;
     const dehydrated = dehydrateGameStateForCloud(slotId, state, {
       slotName: options?.slotName,
       clientSavedAt: options?.clientSavedAt,
       pendingMarks: options?.pendingMarks,
+      maxChunkBytes: hasGraphPayload ? MAX_MARK_CHUNK_WITH_PAYLOAD_BYTES : MAX_CHUNK_DOC_BYTES,
     });
-    const nextGraphSig = computeGraphChunksSig(dehydrated.graphChunks);
-    const cacheKey = `${uid}:${slotId}`;
+
+    const totalChunks = Math.min(
+      MAX_GRAPH_CHUNKS,
+      Math.max(dehydrated.graphChunks.length, encodedGraph.slices.length)
+    );
+    dehydrated.metaFields.graphChunkCount = totalChunks;
+
+    const nextMarksSig = computeGraphChunksSig(dehydrated.graphChunks);
     const prevGraphCached = lastUploadedGraphSig.get(cacheKey);
 
     let slotSnap = await getDoc(slotRef);
@@ -373,9 +434,10 @@ export async function uploadSlotToCloud(
       !options?.forceGraphSync &&
       slotExists &&
       Boolean(coreSnap?.exists()) &&
-      Number(slotData?.graphChunkCount) === dehydrated.graphChunks.length &&
+      Number(slotData?.graphChunkCount) === totalChunks &&
       Boolean(prevGraphCached) &&
-      prevGraphCached!.sig === nextGraphSig;
+      prevGraphCached!.marksSig === nextMarksSig &&
+      prevGraphCached!.structureSig === structureSig;
 
     const existingChunksSnap =
       slotExists && !canSkipChunks
@@ -412,12 +474,13 @@ export async function uploadSlotToCloud(
           connectedOsmNodes: dehydrated.metaFields.connectedOsmNodes,
           totalOsmEdgesBuilt: dehydrated.metaFields.totalOsmEdgesBuilt,
           tierLabel: dehydrated.metaFields.tierLabel,
-          graphChunkCount: dehydrated.metaFields.graphChunkCount,
+          graphChunkCount: totalChunks,
           clientSavedAt: dehydrated.metaFields.clientSavedAt,
           updatedAt: serverTimestamp(),
         }
       : {
           ...dehydrated.metaFields,
+          graphChunkCount: totalChunks,
           ownerUid: uid,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
@@ -484,6 +547,11 @@ export async function uploadSlotToCloud(
         );
       }
 
+      const canReuseExistingGraphPayloads =
+        !options?.forceGraphSync &&
+        Boolean(prevGraphCached) &&
+        prevGraphCached!.structureSig === structureSig;
+
       const nextChunkIds = new Set<string>();
       let chunkBatch = writeBatch(db);
       let batchOps = 0;
@@ -497,8 +565,17 @@ export async function uploadSlotToCloud(
         batchBytes = 0;
       };
 
-      for (const chunk of dehydrated.graphChunks) {
-        const chunkId = `graph_${chunk.chunkIndex}`;
+      for (let idx = 0; idx < totalChunks; idx++) {
+        const markChunk = dehydrated.graphChunks[idx] || {
+          chunkIndex: idx,
+          nodeIds: [],
+          edgeIds: [],
+        };
+        const slicePayload = idx < encodedGraph.slices.length ? encodedGraph.slices[idx] : '';
+        const sliceEncoding: CloudGraphEncoding =
+          slicePayload.length > 0 ? encodedGraph.encoding : 'none';
+
+        const chunkId = `graph_${idx}`;
         nextChunkIds.add(chunkId);
         const chunkRef = doc(db, 'users', uid, 'slots', slotId, 'chunks', chunkId);
         const prevChunkData = existingChunksById.get(chunkId);
@@ -506,20 +583,46 @@ export async function uploadSlotToCloud(
           Boolean(prevChunkData) &&
           isValidExistingDocShape(prevChunkData, uid) &&
           prevChunkData?.slotId === slotId &&
-          Number(prevChunkData?.chunkIndex) === chunk.chunkIndex;
+          Number(prevChunkData?.chunkIndex) === idx;
+
+        const payloadMatchesExisting =
+          canReuseExistingGraphPayloads &&
+          canUpdateChunk &&
+          prevChunkData?.graphEncoding === sliceEncoding &&
+          typeof prevChunkData?.graphPayload === 'string' &&
+          prevChunkData.graphPayload === slicePayload;
+
+        const marksMatchExisting =
+          canUpdateChunk &&
+          stringArraysEqual(prevChunkData?.nodeIds, markChunk.nodeIds) &&
+          stringArraysEqual(prevChunkData?.edgeIds, markChunk.edgeIds);
+
+        if (payloadMatchesExisting && marksMatchExisting) {
+          continue;
+        }
 
         const chunkPayload = canUpdateChunk
-          ? {
-              nodeIds: chunk.nodeIds,
-              edgeIds: chunk.edgeIds,
-              updatedAt: serverTimestamp(),
-            }
+          ? payloadMatchesExisting
+            ? {
+                nodeIds: markChunk.nodeIds,
+                edgeIds: markChunk.edgeIds,
+                updatedAt: serverTimestamp(),
+              }
+            : {
+                nodeIds: markChunk.nodeIds,
+                edgeIds: markChunk.edgeIds,
+                graphEncoding: sliceEncoding,
+                graphPayload: slicePayload,
+                updatedAt: serverTimestamp(),
+              }
           : {
               ownerUid: uid,
               slotId,
-              chunkIndex: chunk.chunkIndex,
-              nodeIds: chunk.nodeIds,
-              edgeIds: chunk.edgeIds,
+              chunkIndex: idx,
+              nodeIds: markChunk.nodeIds,
+              edgeIds: markChunk.edgeIds,
+              graphEncoding: sliceEncoding,
+              graphPayload: slicePayload,
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp(),
             };
@@ -562,10 +665,13 @@ export async function uploadSlotToCloud(
       }
 
       await flushChunkBatch();
-      lastUploadedGraphSig.set(cacheKey, {
-        sig: nextGraphSig,
-        chunkCount: dehydrated.graphChunks.length,
-      });
+      if (isGraphCompleteEnoughForSnapshot) {
+        lastUploadedGraphSig.set(cacheKey, {
+          marksSig: nextMarksSig,
+          structureSig,
+          chunkCount: totalChunks,
+        });
+      }
     }
 
     return {
@@ -604,20 +710,26 @@ export async function downloadCloudSlot(
 
     const metaData = slotSnap.data();
     const coreData = coreSnap.data() as unknown as DehydratedCloudSlot['coreFields'];
-    const graphChunks: Array<{ chunkIndex: number; nodeIds: string[]; edgeIds: string[] }> = [];
+    const graphChunks: CloudChunkPayloadRecord[] = [];
     chunksSnap.forEach((docSnap) => {
       const c = docSnap.data();
       graphChunks.push({
         chunkIndex: Number(c.chunkIndex) || 0,
         nodeIds: Array.isArray(c.nodeIds) ? (c.nodeIds as string[]) : [],
         edgeIds: Array.isArray(c.edgeIds) ? (c.edgeIds as string[]) : [],
+        graphEncoding: typeof c.graphEncoding === 'string' ? c.graphEncoding : undefined,
+        graphPayload: typeof c.graphPayload === 'string' ? c.graphPayload : undefined,
       });
     });
 
-    const { baseState, marks } = rehydrateGameStateFromCloudPayload(coreData, graphChunks);
+    const { baseState, marks, hasFullGraphSnapshot } = await hydrateCloudPayloadAsync(
+      coreData,
+      graphChunks
+    );
     const chunkCoordCenters: Array<{ lat: number; lng: number }> = [];
     const seen = new Set<string>();
-    for (const key of coreData.loadedOsmChunks || []) {
+    const allChunkKeys = hasFullGraphSnapshot ? baseState.loadedOsmChunks : coreData.loadedOsmChunks || [];
+    for (const key of allChunkKeys) {
       const parts = String(key).split('_');
       if (parts.length !== 2) continue;
       const lat = Number(parts[0]);
@@ -655,7 +767,7 @@ export async function downloadCloudSlot(
     };
 
     const pendingChunkKeys = Array.from(
-      new Set((coreData.loadedOsmChunks || []).map((k) => String(k || '').trim()).filter(Boolean))
+      new Set((allChunkKeys || []).map((k) => String(k || '').trim()).filter(Boolean))
     );
 
     return {
@@ -664,6 +776,7 @@ export async function downloadCloudSlot(
       marks,
       chunkCoordCenters,
       pendingChunkKeys,
+      hasFullGraphSnapshot,
     };
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, slotPath);

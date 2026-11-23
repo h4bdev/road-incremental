@@ -15,6 +15,7 @@ import {
   loadOsmProvinceDirect,
   loadOsmRegionInfoDirect,
   loadOsmRoadChunkDirect,
+  loadOsmRoadChunksBatchDirect,
   OsmRawWay,
   ProvincialRegionMeta,
   quantizeChunkKey,
@@ -39,15 +40,23 @@ export function resetBackendApiProbeForTests(): void {
   backendApiSupported = null;
 }
 
-async function tryFetchBackendJson<T>(url: string, timeoutMs: number): Promise<T | null> {
+async function tryFetchBackendJson<T>(
+  url: string,
+  timeoutMs: number,
+  init?: RequestInit
+): Promise<T | null> {
   if (backendApiSupported === false) return null;
 
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const res = await fetch(url, {
+      ...init,
       signal: controller.signal,
-      headers: { Accept: 'application/json' },
+      headers: {
+        Accept: 'application/json',
+        ...(init?.headers || {}),
+      },
     });
     clearTimeout(timer);
 
@@ -597,23 +606,27 @@ export function enumerateChunkKeysForBounds(bounds: {
   maxLng: number;
 }, maxTiles = 16): Array<{ key: string; lat: number; lng: number }> {
   const STEP = 1 / 300;
-  const startLat = Math.round(bounds.minLat * 300) / 300;
-  const endLat = Math.round(bounds.maxLat * 300) / 300;
-  const startLng = Math.round(bounds.minLng * 300) / 300;
-  const endLng = Math.round(bounds.maxLng * 300) / 300;
   const centerLat = (bounds.minLat + bounds.maxLat) / 2;
   const centerLng = (bounds.minLng + bounds.maxLng) / 2;
+  const cLatIdx = Math.round(centerLat * 300);
+  const cLngIdx = Math.round(centerLng * 300);
+
+  const maxHalfSteps = Math.max(8, Math.ceil(Math.sqrt(Math.max(1, maxTiles))) + 4);
+  const startLatIdx = Math.max(Math.round(bounds.minLat * 300), cLatIdx - maxHalfSteps);
+  const endLatIdx = Math.min(Math.round(bounds.maxLat * 300), cLatIdx + maxHalfSteps);
+  const startLngIdx = Math.max(Math.round(bounds.minLng * 300), cLngIdx - maxHalfSteps);
+  const endLngIdx = Math.min(Math.round(bounds.maxLng * 300), cLngIdx + maxHalfSteps);
 
   const list: Array<{ key: string; lat: number; lng: number; distSq: number }> = [];
-  for (let lat = startLat; lat <= endLat + 1e-6; lat += STEP) {
-    for (let lng = startLng; lng <= endLng + 1e-6; lng += STEP) {
+  for (let latIdx = startLatIdx; latIdx <= endLatIdx; latIdx++) {
+    const lat = latIdx * STEP;
+    const dLat = lat - centerLat;
+    for (let lngIdx = startLngIdx; lngIdx <= endLngIdx; lngIdx++) {
+      const lng = lngIdx * STEP;
       const key = quantizeChunkKey(lat, lng);
-      const dLat = lat - centerLat;
       const dLng = lng - centerLng;
       list.push({ key, lat, lng, distSq: dLat * dLat + dLng * dLng });
-      if (list.length > 64) break;
     }
-    if (list.length > 64) break;
   }
 
   list.sort((a, b) => a.distSq - b.distSq);
@@ -857,7 +870,7 @@ export async function fetchOsmRoadChunk(
     osmNodes?: OsmNode[];
     osmEdges?: OsmEdge[];
     usedLiveOverpass?: boolean;
-  }>(`/api/osm-roads?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}${fbParam}`, 9500);
+  }>(`/api/osm-roads?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}${fbParam}`, 14000);
 
   if (
     json &&
@@ -917,6 +930,123 @@ export async function fetchOsmRoadChunk(
   }
 
   return buildFallbackStarterGrid(chunkKey, lat, lng);
+}
+
+export async function fetchOsmRoadChunksBatch(
+  coords: Array<{ key?: string; lat: number; lng: number }>,
+  options?: { allowStarterFallback?: boolean }
+): Promise<
+  Array<{
+    chunkKey: string;
+    osmNodes: OsmNode[];
+    osmEdges: OsmEdge[];
+    usedLiveOverpass: boolean;
+  }>
+> {
+  if (coords.length === 0) return [];
+  const allowFallback = options?.allowStarterFallback !== false;
+  const keyed = coords.map((c) => ({
+    key: c.key || quantizeChunkKey(c.lat, c.lng),
+    lat: c.lat,
+    lng: c.lng,
+  }));
+
+  const cachedMap = await getCachedOsmTilesBatch(keyed.map((k) => k.key));
+  const resultMap = new Map<
+    string,
+    {
+      chunkKey: string;
+      osmNodes: OsmNode[];
+      osmEdges: OsmEdge[];
+      usedLiveOverpass: boolean;
+    }
+  >();
+  const uncached: Array<{ key: string; lat: number; lng: number }> = [];
+
+  for (const pt of keyed) {
+    const hit = cachedMap.get(pt.key);
+    if (hit && (hit.osmNodes.length > 0 || hit.usedLiveOverpass)) {
+      resultMap.set(pt.key, {
+        chunkKey: hit.tileKey,
+        osmNodes: hit.osmNodes,
+        osmEdges: hit.osmEdges,
+        usedLiveOverpass: hit.usedLiveOverpass,
+      });
+    } else {
+      uncached.push(pt);
+    }
+  }
+
+  if (uncached.length > 0) {
+    let fetchedChunks: Array<{
+      chunkKey: string;
+      osmNodes: OsmNode[];
+      osmEdges: OsmEdge[];
+      usedLiveOverpass: boolean;
+    }> | null = null;
+
+    const backendRes = await tryFetchBackendJson<{
+      chunks?: Array<{
+        chunkKey: string;
+        osmNodes: OsmNode[];
+        osmEdges: OsmEdge[];
+        usedLiveOverpass: boolean;
+      }>;
+    }>('/api/osm-roads-batch', 22000, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        coords: uncached.map((u) => ({ lat: u.lat, lng: u.lng })),
+        allowStarterFallback: allowFallback,
+      }),
+    });
+
+    if (backendRes && Array.isArray(backendRes.chunks)) {
+      fetchedChunks = backendRes.chunks;
+    } else {
+      try {
+        fetchedChunks = await loadOsmRoadChunksBatchDirect(
+          uncached.map((u) => ({ lat: u.lat, lng: u.lng })),
+          options
+        );
+      } catch {
+        fetchedChunks = [];
+      }
+    }
+
+    for (const chunk of fetchedChunks || []) {
+      if (chunk.osmNodes.length > 0 || chunk.usedLiveOverpass || !allowFallback) {
+        resultMap.set(chunk.chunkKey, {
+          chunkKey: chunk.chunkKey,
+          osmNodes: chunk.osmNodes,
+          osmEdges: chunk.osmEdges,
+          usedLiveOverpass: Boolean(chunk.usedLiveOverpass),
+        });
+        if (chunk.usedLiveOverpass) {
+          void putCachedOsmTile({
+            tileKey: chunk.chunkKey,
+            osmNodes: chunk.osmNodes,
+            osmEdges: chunk.osmEdges,
+            usedLiveOverpass: true,
+            updatedAt: Date.now(),
+          });
+        }
+      }
+    }
+  }
+
+  return keyed
+    .map((pt) => resultMap.get(pt.key))
+    .filter(
+      (
+        item
+      ): item is {
+        chunkKey: string;
+        osmNodes: OsmNode[];
+        osmEdges: OsmEdge[];
+        usedLiveOverpass: boolean;
+      } => Boolean(item)
+    );
 }
 
 export async function fetchProvincialRegionInfo(

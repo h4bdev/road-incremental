@@ -94,6 +94,7 @@ import {
   fetchNearbyProvincialRegions,
   fetchOsmProvincialRegion,
   fetchOsmRoadChunk,
+  fetchOsmRoadChunksBatch,
   fetchProvincialRegionInfo,
   generateCustomCityNetwork,
   hydrateProvincialRegionsFromCache,
@@ -119,6 +120,7 @@ import {
   SaveSlotId,
   SaveSlotSummary,
   saveLocalSlotGameState,
+  saveLocalSlotGraphToIndexedDb,
   setActiveSlotId,
   setCloudSyncBaseline,
   slotIndexFromId,
@@ -250,7 +252,12 @@ export default function App() {
   const checkedProvinceCellsRef = useRef<Set<string>>(new Set());
   const inFlightProvinceCellsRef = useRef<Set<string>>(new Set());
   const inFlightChunkKeysRef = useRef<Set<string>>(new Set());
-  const attemptedChunkKeysRef = useRef<Set<string>>(new Set());
+  const settledEmptyChunkKeysRef = useRef<Set<string>>(new Set());
+  const chunkRetryCooldownRef = useRef<Map<string, { fails: number; retryAfter: number }>>(new Map());
+  const queuedBatchCoordsRef = useRef<
+    Map<string, { key: string; lat: number; lng: number; owningRegionId?: string }>
+  >(new Map());
+  const batchDispatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingChunkQueueRef = useRef<
     Array<{
       chunkKey: string;
@@ -451,7 +458,9 @@ export default function App() {
           regionId: item.owningRegionId,
         });
       }
-      const merged = mergeOsmChunksBatch(prev, entries, { skipAutoSeed });
+      const skipEvaluate =
+        prev.stats.connectedOsmNodes > 0 && !skipAutoSeed && !pendingRestoredMarksRef.current;
+      const merged = mergeOsmChunksBatch(prev, entries, { skipAutoSeed, skipEvaluate });
       return applyRestoredGraphMarks(merged, pendingRestoredMarksRef.current);
     });
   }, []);
@@ -462,64 +471,163 @@ export default function App() {
         clearTimeout(chunkFlushTimerRef.current);
         chunkFlushTimerRef.current = null;
       }
+      if (batchDispatchTimerRef.current) {
+        clearTimeout(batchDispatchTimerRef.current);
+        batchDispatchTimerRef.current = null;
+      }
+      queuedBatchCoordsRef.current.clear();
       pendingChunkQueueRef.current = [];
     };
   }, []);
 
-  // Load OpenStreetMap dense street/rail chunk around coordinates (only for unlocked regions)
-  const handleLoadOsmChunk = useCallback(
-    async (lat: number, lng: number) => {
-      const curState = stateRef.current;
-      let owningRegionId: string | undefined;
-      if (curState) {
-        const regions = curState.provincialRegions || [];
-        const unlockedMatches = regions
-          .filter(
-            (r) =>
-              r.unlocked &&
-              lat >= r.bbox[0] - 0.002 &&
-              lat <= r.bbox[2] + 0.002 &&
-              lng >= r.bbox[1] - 0.002 &&
-              lng <= r.bbox[3] + 0.002
-          )
-          .sort(
-            (a, b) =>
-              (a.bbox[2] - a.bbox[0]) * (a.bbox[3] - a.bbox[1]) -
-              (b.bbox[2] - b.bbox[0]) * (b.bbox[3] - b.bbox[1])
-          );
-        const unlockedMatch = unlockedMatches[0];
-        if (!unlockedMatch && regions.some((r) => r.unlocked)) {
-          return;
-        }
-        owningRegionId = unlockedMatch?.regionId;
-      }
+  const dispatchQueuedOsmBatch = useCallback(async () => {
+    if (batchDispatchTimerRef.current) {
+      clearTimeout(batchDispatchTimerRef.current);
+      batchDispatchTimerRef.current = null;
+    }
+    const items = Array.from(queuedBatchCoordsRef.current.values());
+    queuedBatchCoordsRef.current.clear();
+    if (items.length === 0) return;
 
-      const key = chunkKeyForCoords(lat, lng);
-      if (inFlightChunkKeysRef.current.has(key) || attemptedChunkKeysRef.current.has(key)) return;
-      inFlightChunkKeysRef.current.add(key);
+    const WAVE_SIZE = 16;
+    for (let i = 0; i < items.length; i += WAVE_SIZE) {
+      const curState = stateRef.current;
+      const loadedSet = new Set(curState?.loadedOsmChunks || []);
+      const now = Date.now();
+      const wave = items.slice(i, i + WAVE_SIZE).filter((item) => {
+        if (inFlightChunkKeysRef.current.has(item.key)) return false;
+        if (settledEmptyChunkKeysRef.current.has(item.key)) return false;
+        if (loadedSet.has(item.key)) return false;
+        const cd = chunkRetryCooldownRef.current.get(item.key);
+        if (cd && cd.retryAfter > now) return false;
+        return true;
+      });
+      if (wave.length === 0) continue;
+
+      for (const item of wave) {
+        inFlightChunkKeysRef.current.add(item.key);
+      }
       setIsLoadingOsm(true);
       try {
-        const chunk = await fetchOsmRoadChunk(lat, lng, { allowStarterFallback: false });
-        attemptedChunkKeysRef.current.add(key);
-        if (chunk.osmNodes.length > 0 || chunk.osmEdges.length > 0) {
-          pendingChunkQueueRef.current.push({
-            chunkKey: chunk.chunkKey,
-            osmNodes: chunk.osmNodes,
-            osmEdges: chunk.osmEdges,
-            owningRegionId,
-          });
-          if (pendingChunkQueueRef.current.length >= 6) {
-            flushPendingOsmChunks();
-          } else if (!chunkFlushTimerRef.current) {
-            chunkFlushTimerRef.current = setTimeout(flushPendingOsmChunks, 65);
+        const fetched = await fetchOsmRoadChunksBatch(
+          wave.map((w) => ({ key: w.key, lat: w.lat, lng: w.lng })),
+          { allowStarterFallback: false }
+        );
+        const byKey = new Map(fetched.map((c) => [c.chunkKey, c]));
+        let queuedAny = false;
+        for (const item of wave) {
+          const chunk = byKey.get(item.key);
+          if (chunk && (chunk.osmNodes.length > 0 || chunk.osmEdges.length > 0)) {
+            chunkRetryCooldownRef.current.delete(item.key);
+            pendingChunkQueueRef.current.push({
+              chunkKey: chunk.chunkKey,
+              osmNodes: chunk.osmNodes,
+              osmEdges: chunk.osmEdges,
+              owningRegionId: item.owningRegionId,
+            });
+            queuedAny = true;
+          } else if (chunk && chunk.usedLiveOverpass) {
+            chunkRetryCooldownRef.current.delete(item.key);
+            settledEmptyChunkKeysRef.current.add(item.key);
+          } else {
+            const prevCd = chunkRetryCooldownRef.current.get(item.key);
+            const fails = (prevCd?.fails || 0) + 1;
+            const delayMs = 3000 * Math.min(8, Math.pow(2, fails - 1));
+            chunkRetryCooldownRef.current.set(item.key, {
+              fails,
+              retryAfter: Date.now() + delayMs,
+            });
           }
         }
+        if (queuedAny) {
+          flushPendingOsmChunks();
+        }
+      } catch {
+        const retryAt = Date.now() + 4000;
+        for (const item of wave) {
+          const prevCd = chunkRetryCooldownRef.current.get(item.key);
+          const fails = (prevCd?.fails || 0) + 1;
+          chunkRetryCooldownRef.current.set(item.key, {
+            fails,
+            retryAfter: Math.max(retryAt, Date.now() + 3000 * Math.min(8, Math.pow(2, fails - 1))),
+          });
+        }
       } finally {
-        inFlightChunkKeysRef.current.delete(key);
+        for (const item of wave) {
+          inFlightChunkKeysRef.current.delete(item.key);
+        }
         setIsLoadingOsm(inFlightChunkKeysRef.current.size > 0);
       }
+    }
+  }, [flushPendingOsmChunks]);
+
+  const handleLoadOsmChunksBatch = useCallback(
+    (coords: Array<{ lat: number; lng: number }>) => {
+      if (!coords || coords.length === 0) return;
+      const curState = stateRef.current;
+      const regions = curState?.provincialRegions || [];
+      const hasUnlockedRegion = regions.some((r) => r.unlocked);
+      const loadedSet = new Set(curState?.loadedOsmChunks || []);
+      const now = Date.now();
+
+      let added = 0;
+      for (let i = 0; i < coords.length; i++) {
+        const { lat, lng } = coords[i];
+        let owningRegionId: string | undefined;
+        if (curState) {
+          const unlockedMatches = regions
+            .filter(
+              (r) =>
+                r.unlocked &&
+                lat >= r.bbox[0] - 0.002 &&
+                lat <= r.bbox[2] + 0.002 &&
+                lng >= r.bbox[1] - 0.002 &&
+                lng <= r.bbox[3] + 0.002
+            )
+            .sort(
+              (a, b) =>
+                (a.bbox[2] - a.bbox[0]) * (a.bbox[3] - a.bbox[1]) -
+                (b.bbox[2] - b.bbox[0]) * (b.bbox[3] - b.bbox[1])
+            );
+          const unlockedMatch = unlockedMatches[0];
+          if (!unlockedMatch && hasUnlockedRegion) continue;
+          owningRegionId = unlockedMatch?.regionId;
+        }
+
+        const key = chunkKeyForCoords(lat, lng);
+        if (
+          loadedSet.has(key) ||
+          inFlightChunkKeysRef.current.has(key) ||
+          settledEmptyChunkKeysRef.current.has(key) ||
+          queuedBatchCoordsRef.current.has(key)
+        ) {
+          continue;
+        }
+        const cd = chunkRetryCooldownRef.current.get(key);
+        if (cd && cd.retryAfter > now) continue;
+
+        queuedBatchCoordsRef.current.set(key, { key, lat, lng, owningRegionId });
+        added++;
+      }
+
+      if (added === 0) return;
+      if (queuedBatchCoordsRef.current.size >= 12) {
+        void dispatchQueuedOsmBatch();
+      } else if (!batchDispatchTimerRef.current) {
+        batchDispatchTimerRef.current = setTimeout(() => {
+          void dispatchQueuedOsmBatch();
+        }, 55);
+      }
     },
-    [flushPendingOsmChunks]
+    [dispatchQueuedOsmBatch]
+  );
+
+  // Load OpenStreetMap dense street/rail chunk around coordinates (delegates to coalesced batch loader)
+  const handleLoadOsmChunk = useCallback(
+    async (lat: number, lng: number) => {
+      handleLoadOsmChunksBatch([{ lat, lng }]);
+    },
+    [handleLoadOsmChunksBatch]
   );
 
   // Discover adjacent cities & auto-load ALL nodes/edges once for unlocked cities
@@ -729,7 +837,13 @@ export default function App() {
       checkedProvinceCellsRef.current.clear();
       inFlightProvinceCellsRef.current.clear();
       inFlightChunkKeysRef.current.clear();
-      attemptedChunkKeysRef.current.clear();
+      settledEmptyChunkKeysRef.current.clear();
+      chunkRetryCooldownRef.current.clear();
+      if (batchDispatchTimerRef.current) {
+        clearTimeout(batchDispatchTimerRef.current);
+        batchDispatchTimerRef.current = null;
+      }
+      queuedBatchCoordsRef.current.clear();
       if (chunkFlushTimerRef.current) {
         clearTimeout(chunkFlushTimerRef.current);
         chunkFlushTimerRef.current = null;
@@ -892,7 +1006,13 @@ export default function App() {
       checkedProvinceCellsRef.current.clear();
       inFlightProvinceCellsRef.current.clear();
       inFlightChunkKeysRef.current.clear();
-      attemptedChunkKeysRef.current.clear();
+      settledEmptyChunkKeysRef.current.clear();
+      chunkRetryCooldownRef.current.clear();
+      if (batchDispatchTimerRef.current) {
+        clearTimeout(batchDispatchTimerRef.current);
+        batchDispatchTimerRef.current = null;
+      }
+      queuedBatchCoordsRef.current.clear();
       if (chunkFlushTimerRef.current) {
         clearTimeout(chunkFlushTimerRef.current);
         chunkFlushTimerRef.current = null;
@@ -1033,31 +1153,32 @@ export default function App() {
           slice: Array<{ key: string; lat: number; lng: number }>,
           allowRetryQueue: boolean
         ) => {
-          const results = await Promise.allSettled(
-            slice.map((pt) => fetchOsmRoadChunk(pt.lat, pt.lng, { allowStarterFallback: false }))
-          );
+          const batchResults = await fetchOsmRoadChunksBatch(slice, {
+            allowStarterFallback: false,
+          });
           if (loadingSessionRef.current !== sessionId) return;
 
+          const byKey = new Map(batchResults.map((r) => [r.chunkKey, r]));
           const payloads: Array<{
             chunkKey: string;
             osmNodes: GameState['osmNodes'];
             osmEdges: GameState['osmEdges'];
           }> = [];
 
-          for (let j = 0; j < results.length; j++) {
-            const res = results[j];
+          for (let j = 0; j < slice.length; j++) {
             const pt = slice[j];
-            if (res.status === 'fulfilled' && res.value.osmNodes.length > 0) {
-              if (res.value.usedLiveOverpass || !allowRetryQueue) {
+            const res = byKey.get(pt.key);
+            if (res && res.osmNodes.length > 0) {
+              if (res.usedLiveOverpass || !allowRetryQueue) {
                 payloads.push({
-                  chunkKey: res.value.chunkKey,
-                  osmNodes: res.value.osmNodes,
-                  osmEdges: res.value.osmEdges,
+                  chunkKey: res.chunkKey,
+                  osmNodes: res.osmNodes,
+                  osmEdges: res.osmEdges,
                 });
               } else {
                 retryQueue.push(pt);
               }
-            } else if (allowRetryQueue) {
+            } else if (allowRetryQueue && (!res || !res.usedLiveOverpass)) {
               retryQueue.push(pt);
             }
           }
@@ -1081,9 +1202,9 @@ export default function App() {
           }
         };
 
-        for (let i = 0; i < chunkCoords.length; i += 4) {
+        for (let i = 0; i < chunkCoords.length; i += 12) {
           if (loadingSessionRef.current !== sessionId) return;
-          const slice = chunkCoords.slice(i, i + 4);
+          const slice = chunkCoords.slice(i, i + 12);
           await runBatch(slice, true);
           done += slice.length;
           const frac = Math.min(1, done / Math.max(1, total));
@@ -1092,10 +1213,10 @@ export default function App() {
         }
 
         if (retryQueue.length > 0 && loadingSessionRef.current === sessionId) {
-          await new Promise((r) => setTimeout(r, 650));
-          for (let i = 0; i < retryQueue.length; i += 2) {
+          await new Promise((r) => setTimeout(r, 450));
+          for (let i = 0; i < retryQueue.length; i += 4) {
             if (loadingSessionRef.current !== sessionId) return;
-            const slice = retryQueue.slice(i, i + 2);
+            const slice = retryQueue.slice(i, i + 4);
             await runBatch(slice, false);
           }
         }
@@ -1384,11 +1505,21 @@ export default function App() {
           },
         };
 
+        const cloudUnhydrated = countUnhydratedGraphMarks(initialCloudState, downloaded.marks);
+        const isInstantSnapshotReady =
+          downloaded.hasFullGraphSnapshot &&
+          (initialCloudState.osmNodes || []).length > 0 &&
+          cloudUnhydrated.unhydratedNodes === 0 &&
+          cloudUnhydrated.unhydratedEdges === 0;
+
+        pendingRestoredMarksRef.current = isInstantSnapshotReady ? null : downloaded.marks;
+
         // Persist cloud snapshot & sync baseline locally immediately so reloading mid-stream never creates false divergence
         saveLocalSlotGameState(slotId, initialCloudState, {
           slotName: downloaded.summary.slotName,
           savedAt: downloaded.summary.clientSavedAt,
-          pendingMarks: downloaded.marks,
+          forceGraphWrite: downloaded.hasFullGraphSnapshot,
+          pendingMarks: pendingRestoredMarksRef.current,
         });
         setCloudSyncBaseline(slotId, downloaded.summary.clientSavedAt);
         setSyncBaseMap(getCloudSyncBaselineMap());
@@ -1399,6 +1530,17 @@ export default function App() {
         setCloudSlots((prev) => ({ ...prev, [slotId]: downloaded.summary }));
         void updateCloudActiveSlot(user.uid, slotId, user).catch(() => undefined);
         setBusySlotId(null);
+
+        if (isInstantSnapshotReady) {
+          void saveLocalSlotGraphToIndexedDb(slotId, initialCloudState).catch(() => undefined);
+          completeLoadingSession(sessionId, '클라우드 도로망 복원 완료');
+          setIsLoadingOsm(false);
+          void discoverNearbyProvinces(
+            initialCloudState.startingCity.lat,
+            initialCloudState.startingCity.lng
+          );
+          return;
+        }
 
         // Background progressive cloud hydration (IndexedDB hits first -> ALL missing chunks streamed)
         void (async () => {
@@ -1460,7 +1602,7 @@ export default function App() {
               });
             }
 
-            // Stream remaining uncached unlocked regions + ALL remaining uncached chunk tiles
+            // Stream remaining uncached unlocked regions + ALL remaining uncached chunk tiles without cap
             const missingRegions = (stateRef.current?.provincialRegions || unlockedRegions)
               .filter(
                 (r) =>
@@ -1468,7 +1610,7 @@ export default function App() {
                   (!r.hasRealOsmBoundary ||
                     !(stateRef.current?.loadedOsmRegions || []).includes(r.regionId))
               )
-              .slice(0, 6);
+              .sort((a, b) => Number(Boolean(b.isStartingRegion)) - Number(Boolean(a.isStartingRegion)));
 
             const refLat = vpBounds
               ? (vpBounds.minLat + vpBounds.maxLat) / 2
@@ -1496,10 +1638,10 @@ export default function App() {
             );
             const regionEndPct = 48 + Math.max(0, regionSharePct);
 
-            // Stream missing unlocked regions in batches of 2
-            for (let i = 0; i < missingRegions.length; i += 2) {
+            // Stream missing unlocked regions in parallel batches of 4
+            for (let i = 0; i < missingRegions.length; i += 4) {
               if (loadingSessionRef.current !== sessionId) return;
-              const slice = missingRegions.slice(i, i + 2);
+              const slice = missingRegions.slice(i, i + 4);
               const results = await Promise.allSettled(
                 slice.map((r) =>
                   fetchOsmProvincialRegion(r.centerLat, r.centerLng, r.regionName, r.regionId).then(
@@ -1565,7 +1707,7 @@ export default function App() {
               );
             }
 
-            // Stream ALL remaining uncached chunk tiles without truncation
+            // Stream ALL remaining uncached chunk tiles without truncation via clustered batch fetching
             await streamMissingChunksProgressive(
               sessionId,
               remainingChunkCoords,
@@ -1588,11 +1730,26 @@ export default function App() {
               saveLocalSlotGameState(slotId, finalState, {
                 slotName: downloaded.summary.slotName,
                 savedAt: downloaded.summary.clientSavedAt,
+                forceGraphWrite: true,
                 pendingMarks: pendingRestoredMarksRef.current,
               });
+              void saveLocalSlotGraphToIndexedDb(slotId, finalState).catch(() => undefined);
               setCloudSyncBaseline(slotId, downloaded.summary.clientSavedAt);
               setSyncBaseMap(getCloudSyncBaselineMap());
               setLocalSlots(listLocalSlotSummaries());
+
+              // Silently upgrade legacy cloud saves to compressed full-graph snapshots once fully hydrated
+              if (
+                !downloaded.hasFullGraphSnapshot &&
+                pendingRestoredMarksRef.current === null &&
+                (finalState.osmNodes || []).length > 0
+              ) {
+                void syncSlotToCloud(user, slotId, finalState, downloaded.summary.slotName, {
+                  forceGraphSync: true,
+                  fixedTimestamp: downloaded.summary.clientSavedAt,
+                });
+              }
+
               void discoverNearbyProvinces(
                 finalState.startingCity.lat,
                 finalState.startingCity.lng
@@ -1626,6 +1783,7 @@ export default function App() {
       launchLoadedSlotState,
       mergeHydratedGraphPreservingLiveProgress,
       openConflictModal,
+      syncSlotToCloud,
       updateLoadingSession,
     ]
   );
@@ -1757,7 +1915,8 @@ export default function App() {
       saveLocalSlotGameState(slotId, downloaded.baseState, {
         slotName: downloaded.summary.slotName,
         savedAt: downloaded.summary.clientSavedAt,
-        pendingMarks: downloaded.marks,
+        forceGraphWrite: downloaded.hasFullGraphSnapshot,
+        pendingMarks: downloaded.hasFullGraphSnapshot ? null : downloaded.marks,
       });
       setCloudSyncBaseline(slotId, downloaded.summary.clientSavedAt);
       setSyncBaseMap(getCloudSyncBaselineMap());
@@ -1900,7 +2059,13 @@ export default function App() {
         }
 
         const ck = chunkKeyForCoords(n.lat, n.lng);
-        if (!loadedSet.has(ck) && !attemptedChunkKeysRef.current.has(ck) && !chunkSeen.has(ck)) {
+        const cd = chunkRetryCooldownRef.current.get(ck);
+        if (
+          !loadedSet.has(ck) &&
+          !settledEmptyChunkKeysRef.current.has(ck) &&
+          (!cd || cd.retryAfter <= Date.now()) &&
+          !chunkSeen.has(ck)
+        ) {
           chunkSeen.set(ck, [n.lat, n.lng]);
         }
       }
@@ -1908,16 +2073,28 @@ export default function App() {
       provSeen.forEach(([lat, lng]) => {
         void handleAutoLoadProvince(lat, lng);
       });
+
+      const batchCoords: Array<{ lat: number; lng: number }> = [];
       chunkSeen.forEach(([lat, lng]) => {
-        void handleLoadOsmChunk(lat, lng);
+        batchCoords.push({ lat, lng });
       });
 
-      const proximityChunks = getProximityAdjacentChunksToLoad(cur, 5);
+      const proximityChunks = getProximityAdjacentChunksToLoad(cur, 12);
+      const now = Date.now();
       for (let i = 0; i < proximityChunks.length; i++) {
         const c = proximityChunks[i];
-        if (!attemptedChunkKeysRef.current.has(c.key)) {
-          void handleLoadOsmChunk(c.lat, c.lng);
+        const cd = chunkRetryCooldownRef.current.get(c.key);
+        if (
+          !settledEmptyChunkKeysRef.current.has(c.key) &&
+          !chunkSeen.has(c.key) &&
+          (!cd || cd.retryAfter <= now)
+        ) {
+          chunkSeen.set(c.key, [c.lat, c.lng]);
+          batchCoords.push({ lat: c.lat, lng: c.lng });
         }
+      }
+      if (batchCoords.length > 0) {
+        handleLoadOsmChunksBatch(batchCoords);
       }
     }, 180);
 
@@ -1929,7 +2106,7 @@ export default function App() {
     gameState?.loadedOsmChunks,
     gameState?.provincialRegions,
     handleAutoLoadProvince,
-    handleLoadOsmChunk,
+    handleLoadOsmChunksBatch,
   ]);
 
   // Safety net: if playing with 0 OSM nodes and no active loader, retry loading starting city automatically
@@ -2387,6 +2564,8 @@ export default function App() {
   const handleReloadOsm = useCallback(() => {
     const cur = stateRef.current;
     if (!cur) return;
+    settledEmptyChunkKeysRef.current.clear();
+    chunkRetryCooldownRef.current.clear();
     void loadFullStartingCityIntoState(cur.startingCity.lat, cur.startingCity.lng);
   }, [loadFullStartingCityIntoState]);
 
@@ -2460,6 +2639,7 @@ export default function App() {
             isLoadingOsm={isLoadingOsm}
             onReloadOsm={handleReloadOsm}
             onLoadOsmChunk={handleLoadOsmChunk}
+            onLoadOsmChunksBatch={handleLoadOsmChunksBatch}
             onViewportChange={handleViewportChange}
             onConnectOsmPath={handleConnectOsmPath}
             onSelectIsolatedSeed={handleSelectIsolatedSeed}

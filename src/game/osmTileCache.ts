@@ -228,11 +228,49 @@ export async function putCachedOsmTile(tile: CachedOsmTile): Promise<void> {
     updatedAt: tile.updatedAt || Date.now(),
   };
   memTiles.set(tile.tileKey, record);
-  if (memTiles.size > 400) {
+  if (memTiles.size > 800) {
     const oldestKey = memTiles.keys().next().value;
     if (oldestKey) memTiles.delete(oldestKey);
   }
   await runIdbPut(STORE_TILES, record);
+}
+
+export async function putCachedOsmTilesBatch(tiles: CachedOsmTile[]): Promise<void> {
+  const valid: CachedOsmTile[] = [];
+  const now = Date.now();
+  for (let i = 0; i < tiles.length; i++) {
+    const tile = tiles[i];
+    if (!tile.tileKey || !Array.isArray(tile.osmNodes) || tile.osmNodes.length === 0) continue;
+    const record: CachedOsmTile = {
+      ...tile,
+      updatedAt: tile.updatedAt || now,
+    };
+    memTiles.set(tile.tileKey, record);
+    valid.push(record);
+  }
+  while (memTiles.size > 800) {
+    const oldestKey = memTiles.keys().next().value;
+    if (!oldestKey) break;
+    memTiles.delete(oldestKey);
+  }
+  if (valid.length === 0) return;
+  const db = await openCacheDb();
+  if (!db) return;
+
+  await new Promise<void>((resolve) => {
+    try {
+      const tx = db.transaction(STORE_TILES, 'readwrite');
+      const store = tx.objectStore(STORE_TILES);
+      for (let i = 0; i < valid.length; i++) {
+        store.put(valid[i]);
+      }
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
 }
 
 export async function getCachedOsmRegion(regionId: string): Promise<CachedOsmRegion | null> {

@@ -331,4 +331,63 @@ test('fetchOsmRoadChunk and fetchOsmProvincialRegion return empty graph (no phan
   }
 });
 
+test('loadOsmRoadChunksBatchDirect clusters nearby coordinates into one Overpass request', async () => {
+  const { loadOsmRoadChunksBatchDirect } = await import('./osmCore');
+  const originalFetch = globalThis.fetch;
+
+  let clusterFetchCount = 0;
+  const mockNodes: Array<{ type: 'node'; id: number; lat: number; lon: number }> = [];
+  const mockWays: Array<{ type: 'way'; id: number; nodes: number[]; tags: Record<string, string> }> = [];
+  let nextId = 1000;
+  // Build 2 dense horizontal + vertical streets per tile on fresh coordinates
+  const baseCoords = [
+    { lat: 36.5, lng: 127.5 },
+    { lat: 36.5, lng: 127.5033 },
+    { lat: 36.5033, lng: 127.5 },
+    { lat: 36.5033, lng: 127.5033 },
+    { lat: 36.5067, lng: 127.5067 },
+  ];
+  for (let c = 0; c < baseCoords.length; c++) {
+    const { lat, lng } = baseCoords[c];
+    const rowA: number[] = [];
+    const colA: number[] = [];
+    for (let k = -2; k <= 2; k++) {
+      const nId1 = nextId++;
+      mockNodes.push({ type: 'node', id: nId1, lat: lat + k * 0.0005, lon: lng });
+      colA.push(nId1);
+      const nId2 = nextId++;
+      mockNodes.push({ type: 'node', id: nId2, lat, lon: lng + k * 0.0006 });
+      rowA.push(nId2);
+    }
+    mockWays.push({ type: 'way', id: nextId++, nodes: colA, tags: { highway: 'primary', name: `남북대로_${c}` } });
+    mockWays.push({ type: 'way', id: nextId++, nodes: rowA, tags: { highway: 'secondary', name: `동서로_${c}` } });
+  }
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes('overpass-api.de')) {
+      clusterFetchCount++;
+      return new Response(
+        JSON.stringify({ elements: [...mockNodes, ...mockWays] }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    return new Response('Not found', { status: 404 });
+  }) as typeof fetch;
+
+  try {
+    const results = await loadOsmRoadChunksBatchDirect(baseCoords, { allowStarterFallback: false });
+    assert.equal(results.length, 5);
+    assert.equal(
+      clusterFetchCount,
+      1,
+      `Expected 1 clustered fetchOsmBbox invocation for 5 adjacent tiles, got ${clusterFetchCount}`
+    );
+    assert.ok(results.every((r) => r.osmNodes.length > 0 && r.usedLiveOverpass));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
 

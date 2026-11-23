@@ -42,7 +42,7 @@ import {
   resolveCompatibleOsmMode,
   resolveProximityBridgeInfo,
 } from '../game/rules';
-import { haversineKm } from '../game/osmService';
+import { enumerateChunkKeysForBounds, haversineKm } from '../game/osmService';
 import { formatMoneyCompact } from '../game/format';
 import {
   buildSimplifiedOverviewCurves,
@@ -62,6 +62,7 @@ interface WorldMapProps {
   isLoadingOsm?: boolean;
   onReloadOsm?: () => void;
   onLoadOsmChunk?: (lat: number, lng: number) => void;
+  onLoadOsmChunksBatch?: (coords: Array<{ lat: number; lng: number }>) => void;
   onViewportChange?: (bounds: ViewportBounds, zoom: number) => void;
   onConnectOsmPath: (fromId: string, toId: string) => void;
   onSelectIsolatedSeed?: (nodeId: string) => void;
@@ -184,6 +185,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
   isLoadingOsm = false,
   onReloadOsm,
   onLoadOsmChunk,
+  onLoadOsmChunksBatch,
   onViewportChange,
   onConnectOsmPath,
   onSelectIsolatedSeed,
@@ -204,6 +206,8 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
   const previewGeoJsonRef = useRef<GeoJsonData>(EMPTY_FC);
   const nodesGeoJsonRef = useRef<GeoJsonData>(EMPTY_FC);
   const hoverNodeGeoJsonRef = useRef<GeoJsonData>(EMPTY_FC);
+  const renderedBoundsRef = useRef<ViewportBounds | null>(null);
+  const prevBuiltSigRef = useRef<string>('');
 
   const [viewportBounds, setViewportBounds] = useState<ViewportBounds | null>(null);
   const [isOverviewZoom, setIsOverviewZoom] = useState(false);
@@ -266,6 +270,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
 
   const callbacksRef = useRef({
     onLoadOsmChunk,
+    onLoadOsmChunksBatch,
     onViewportChange,
     onConnectOsmPath,
     onSelectIsolatedSeed,
@@ -273,6 +278,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
   });
   callbacksRef.current = {
     onLoadOsmChunk,
+    onLoadOsmChunksBatch,
     onViewportChange,
     onConnectOsmPath,
     onSelectIsolatedSeed,
@@ -729,17 +735,31 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       return best;
     };
 
+    const computeRawViewportBounds = (): ViewportBounds => {
+      const b = map.getBounds();
+      const sw = b.getSouthWest();
+      const ne = b.getNorthEast();
+      return {
+        minLat: Math.max(-85, sw.lat),
+        maxLat: Math.min(85, ne.lat),
+        minLng: Math.max(-180, sw.lng),
+        maxLng: Math.min(180, ne.lng),
+      };
+    };
+
     const computePaddedViewportBounds = (): ViewportBounds => {
       const b = map.getBounds();
       const sw = b.getSouthWest();
       const ne = b.getNorthEast();
-      const pad = 0.008;
+      const spanLat = Math.abs(ne.lat - sw.lat);
       const spanLng = Math.abs(ne.lng - sw.lng);
-      const minLng = spanLng > 340 ? -180 : Math.max(-180, sw.lng - pad);
-      const maxLng = spanLng > 340 ? 180 : Math.min(180, ne.lng + pad);
+      const padLat = Math.max(0.035, spanLat * 0.75);
+      const padLng = Math.max(0.045, (spanLng > 340 ? 0 : spanLng) * 0.75);
+      const minLng = spanLng > 340 ? -180 : Math.max(-180, sw.lng - padLng);
+      const maxLng = spanLng > 340 ? 180 : Math.min(180, ne.lng + padLng);
       return {
-        minLat: Math.max(-85, sw.lat - pad),
-        maxLat: Math.min(85, ne.lat + pad),
+        minLat: Math.max(-85, sw.lat - padLat),
+        maxLat: Math.min(85, ne.lat + padLat),
         minLng,
         maxLng,
       };
@@ -758,21 +778,38 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       });
     };
 
-    const syncViewportState = () => {
-      const bounds = computePaddedViewportBounds();
+    const syncViewportState = (forceRefresh = false) => {
+      const raw = computeRawViewportBounds();
+      const prevRendered = renderedBoundsRef.current;
       const z = map.getZoom();
-      setViewportBounds((prev) => {
-        if (
-          prev &&
-          Math.abs(prev.minLat - bounds.minLat) < 0.0015 &&
-          Math.abs(prev.maxLat - bounds.maxLat) < 0.0015 &&
-          Math.abs(prev.minLng - bounds.minLng) < 0.0015 &&
-          Math.abs(prev.maxLng - bounds.maxLng) < 0.0015
-        ) {
-          return prev;
-        }
-        return bounds;
-      });
+
+      // While panning inside the already-rendered padded buffer, skip React/GeoJSON updates completely
+      if (
+        !forceRefresh &&
+        prevRendered &&
+        raw.minLat >= prevRendered.minLat + 0.002 &&
+        raw.maxLat <= prevRendered.maxLat - 0.002 &&
+        raw.minLng >= prevRendered.minLng + 0.002 &&
+        raw.maxLng <= prevRendered.maxLng - 0.002
+      ) {
+        callbacksRef.current.onViewportChange?.(prevRendered, z);
+        return;
+      }
+
+      const bounds = computePaddedViewportBounds();
+      if (
+        prevRendered &&
+        Math.abs(prevRendered.minLat - bounds.minLat) < 0.0015 &&
+        Math.abs(prevRendered.maxLat - bounds.maxLat) < 0.0015 &&
+        Math.abs(prevRendered.minLng - bounds.minLng) < 0.0015 &&
+        Math.abs(prevRendered.maxLng - bounds.maxLng) < 0.0015
+      ) {
+        callbacksRef.current.onViewportChange?.(prevRendered, z);
+        return;
+      }
+
+      renderedBoundsRef.current = bounds;
+      setViewportBounds(bounds);
       callbacksRef.current.onViewportChange?.(bounds, z);
     };
 
@@ -943,31 +980,76 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       moveEndTimer = setTimeout(() => {
         const curMap = mapInstanceRef.current;
         if (!curMap) return;
-        syncViewportState();
-        if (!callbacksRef.current.onLoadOsmChunk) return;
+        syncViewportState(true);
         if (curMap.getZoom() < OVERVIEW_ZOOM_THRESHOLD) return;
-        const center = curMap.getCenter();
+        const rawBounds = computeRawViewportBounds();
+        const prefetchBounds: ViewportBounds = {
+          minLat: Math.max(-85, rawBounds.minLat - 0.010),
+          maxLat: Math.min(85, rawBounds.maxLat + 0.010),
+          minLng: Math.max(-180, rawBounds.minLng - 0.014),
+          maxLng: Math.min(180, rawBounds.maxLng + 0.014),
+        };
         const gs = gameStateRef.current;
-        const inUnlocked = (gs.provincialRegions || []).some(
-          (r) => r.unlocked && isPointInRegionBoundary(center.lat, center.lng, r, 0.002)
-        );
-        if (!inUnlocked) return;
-        let nearbyCount = 0;
-        for (const n of gs.osmNodes || []) {
-          if (
-            Math.abs(n.lat - center.lat) <= 0.008 &&
-            Math.abs(n.lng - center.lng) <= 0.008
-          ) {
-            nearbyCount++;
-            if (nearbyCount >= 6) break;
+        const unlockedRegions = (gs.provincialRegions || []).filter((r) => r.unlocked);
+        if (unlockedRegions.length === 0) return;
+
+        // Prioritize currently visible on-screen chunks first, then moderate prefetch halo
+        const screenChunks = enumerateChunkKeysForBounds(rawBounds, 20);
+        const haloChunks = enumerateChunkKeysForBounds(prefetchBounds, 28);
+        const orderedCandidates: Array<{ key: string; lat: number; lng: number }> = [];
+        const seenKeys = new Set<string>();
+        for (let i = 0; i < screenChunks.length; i++) {
+          const c = screenChunks[i];
+          if (!seenKeys.has(c.key)) {
+            seenKeys.add(c.key);
+            orderedCandidates.push(c);
           }
         }
-        if (nearbyCount < 6) {
-          callbacksRef.current.onLoadOsmChunk(center.lat, center.lng);
+        for (let i = 0; i < haloChunks.length; i++) {
+          const c = haloChunks[i];
+          if (!seenKeys.has(c.key)) {
+            seenKeys.add(c.key);
+            orderedCandidates.push(c);
+          }
         }
-      }, 160);
+
+        const loadedSet = new Set(gs.loadedOsmChunks || []);
+        const missingCoords: Array<{ lat: number; lng: number }> = [];
+
+        for (let i = 0; i < orderedCandidates.length && missingCoords.length < 24; i++) {
+          const c = orderedCandidates[i];
+          if (loadedSet.has(c.key)) continue;
+          const inUnlocked = unlockedRegions.some((r) =>
+            isPointInRegionBoundary(c.lat, c.lng, r, 0.005)
+          );
+          if (inUnlocked) {
+            missingCoords.push({ lat: c.lat, lng: c.lng });
+          }
+        }
+
+        if (missingCoords.length > 0) {
+          if (callbacksRef.current.onLoadOsmChunksBatch) {
+            callbacksRef.current.onLoadOsmChunksBatch(missingCoords);
+          } else if (callbacksRef.current.onLoadOsmChunk) {
+            for (let i = 0; i < Math.min(missingCoords.length, 4); i++) {
+              callbacksRef.current.onLoadOsmChunk(missingCoords[i].lat, missingCoords[i].lng);
+            }
+          }
+        }
+      }, 110);
     };
     map.on('moveend', onMoveEnd);
+
+    let moveThrottleTimer: ReturnType<typeof setTimeout> | null = null;
+    const onMapMove = () => {
+      if (moveThrottleTimer) return;
+      moveThrottleTimer = setTimeout(() => {
+        moveThrottleTimer = null;
+        if (!mapInstanceRef.current) return;
+        syncViewportState(false);
+      }, 180);
+    };
+    map.on('move', onMapMove);
 
     mapInstanceRef.current = map;
 
@@ -976,6 +1058,12 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
         clearTimeout(moveEndTimer);
         moveEndTimer = null;
       }
+      if (moveThrottleTimer) {
+        clearTimeout(moveThrottleTimer);
+        moveThrottleTimer = null;
+      }
+      map.off('move', onMapMove);
+      map.off('moveend', onMoveEnd);
       if (hoverRafId !== 0) {
         cancelAnimationFrame(hoverRafId);
         hoverRafId = 0;
@@ -1255,6 +1343,21 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
 
   useEffect(() => {
     const builtEdges = getBuiltOsmEdgesForState(gameState);
+    const builtLen = builtEdges.length;
+    const builtSig = `${builtLen}:${gameState.stats.totalOsmEdgesBuilt}:${
+      builtLen > 0 ? builtEdges[0].id : ''
+    }:${builtLen > 0 ? builtEdges[builtLen - 1].id : ''}:${unlockedRegionsKey}:${
+      builtSkeleton?.length || 0
+    }:${(gameState.osmEdges || []).length === 0 ? 'empty' : 'graph'}`;
+
+    if (builtSig === prevBuiltSigRef.current && builtLen > 0) {
+      if (isOverviewZoomRef.current) {
+        overviewDataVersionRef.current += 1;
+      }
+      return;
+    }
+    prevBuiltSigRef.current = builtSig;
+
     const features: Array<Record<string, unknown>> = [];
 
     for (const edge of builtEdges) {
@@ -1546,14 +1649,15 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
 
       const mode = getOsmNodeMode(gameState, node.id);
       const isRail = mode === 'rail';
-      const { hasBuiltEdge, hasUnbuiltEdge } = getOsmNodeConnectionFlags(
+      const { hasBuiltEdge, hasUnbuiltEdge, hasUnexploredNeighbor } = getOsmNodeConnectionFlags(
         gameState,
         node.id,
         frontierDistances,
         hasAnyConnected
       );
 
-      const hideDot = node.connected && hasBuiltEdge && !isSelected;
+      const isTerminalWithUnexplored = node.connected && hasBuiltEdge && hasUnexploredNeighbor;
+      const hideDot = node.connected && hasBuiltEdge && !isSelected && !isTerminalWithUnexplored;
       if (hideDot && !hasUnbuiltEdge) {
         return;
       }
@@ -1580,6 +1684,10 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
         ? 5.3
         : isStartHub
         ? 5.4
+        : isTerminalWithUnexplored
+        ? isRail
+          ? 3.8
+          : 4.2
         : hideDot
         ? 5.2
         : (isRail ? 3.2 : 3.8) * visual.radiusScale;
@@ -1591,9 +1699,17 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
           ? 8.0
           : isStartHub
           ? 8.2
+          : isTerminalWithUnexplored
+          ? 6.4
           : 5.6 * visual.radiusScale) + touchBoost;
-      const haloWidth = isSelected || isStartHub || isPendingSeed ? 2.2 : 1.5;
-      const strokeWidth = hideDot ? 0 : isSelected || isStartHub || isPendingSeed ? 2.2 : 1.5;
+      const haloWidth = isSelected || isStartHub || isPendingSeed ? 2.2 : isTerminalWithUnexplored ? 1.8 : 1.5;
+      const strokeWidth = hideDot
+        ? 0
+        : isSelected || isStartHub || isPendingSeed
+        ? 2.2
+        : isTerminalWithUnexplored
+        ? 1.8
+        : 1.5;
 
       const pendingFill =
         mode === 'rail' ? '#0284c7' : mode === 'mixed' ? '#9333ea' : '#f59e0b';

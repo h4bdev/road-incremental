@@ -9,6 +9,7 @@ import {
   loadOsmRoadChunkDirect,
   loadOsmRoadChunksBatchDirect,
 } from './src/game/osmCore.ts';
+import { searchCitiesUnified } from './src/game/citySearch.ts';
 
 async function startServer() {
   const app = express();
@@ -16,6 +17,20 @@ async function startServer() {
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true });
+  });
+
+  app.get('/api/city-search', async (req, res) => {
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    if (!q) {
+      res.json({ results: [] });
+      return;
+    }
+    try {
+      const results = await searchCitiesUnified(q);
+      res.json({ results });
+    } catch {
+      res.json({ results: [] });
+    }
   });
 
   app.get('/api/osm-roads', async (req, res) => {

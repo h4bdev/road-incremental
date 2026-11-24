@@ -110,51 +110,34 @@ export function haversineKm(lat1: number, lon1: number, lat2: number, lon2: numb
   return Math.round(R * c * 1000) / 1000;
 }
 
+import { searchCitiesUnified } from './citySearch';
+
 /**
- * Search any real-world city or town via OpenStreetMap Nominatim
+ * Search any real-world city or town via OpenStreetMap Nominatim, Photon, and curated catalog.
+ * Solves browser CORS restrictions by routing through /api/city-search with client-side Photon & catalog fallbacks.
  */
 export async function searchCityNominatim(query: string): Promise<StartingCity[]> {
   const trimmed = query.trim();
   if (!trimmed) return [];
 
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5000);
-    const url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=5&q=${encodeURIComponent(
-      trimmed
-    )}`;
-
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: { Accept: 'application/json' },
-    });
-    clearTimeout(timer);
-
-    if (!res.ok) return [];
-    const data: NominatimPlace[] = await res.json();
-
-    return data.map((item) => {
-      const shortName =
-        item.name ||
-        item.address?.city ||
-        item.address?.town ||
-        item.address?.village ||
-        item.display_name.split(',')[0];
-      const country = item.address?.country || item.display_name.split(',').slice(-1)[0]?.trim() || '세계';
-      return {
-        id: `custom_${item.place_id}`,
-        name: shortName,
-        country,
-        lat: parseFloat(item.lat),
-        lng: parseFloat(item.lon),
-        zoom: 12,
-        description: `${shortName} (${country}) 실제 1:1 OSM 좌표 기반 시작 거점`,
-        isCustom: true,
-      };
-    });
-  } catch {
-    return [];
+  // 1. Try backend proxy /api/city-search (handles User-Agent, Accept-Language, and server caching)
+  const backendRes = await tryFetchBackendJson<{ results?: StartingCity[] }>(
+    `/api/city-search?q=${encodeURIComponent(trimmed)}`,
+    6500
+  );
+  if (backendRes && Array.isArray(backendRes.results) && backendRes.results.length > 0) {
+    return backendRes.results;
   }
+
+  // 2. Direct client fallback (Photon CORS-enabled geocoding + comprehensive local catalog)
+  try {
+    const results = await searchCitiesUnified(trimmed);
+    if (results.length > 0) return results;
+  } catch {
+    // Ignore and fall through
+  }
+
+  return [];
 }
 
 /**

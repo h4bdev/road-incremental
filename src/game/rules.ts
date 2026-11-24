@@ -2362,7 +2362,11 @@ export function getOsmNodeConnectionFlags(
     } else {
       const isFrontierPair =
         !hasAnyConnected ||
-        (frontierDistances.has(e.fromNodeId) && frontierDistances.has(e.toNodeId));
+        (frontierDistances.has(e.fromNodeId) && frontierDistances.has(e.toNodeId)) ||
+        ((graphIdx.nodeById.get(e.fromNodeId)?.connected || frontierDistances.has(e.fromNodeId)) &&
+         (graphIdx.nodeById.get(e.toNodeId)?.connected || frontierDistances.has(e.toNodeId)) &&
+         isNodeInUnlockedRegion(state, graphIdx.nodeById.get(e.fromNodeId)!) &&
+         isNodeInUnlockedRegion(state, graphIdx.nodeById.get(e.toNodeId)!));
       if (isFrontierPair) {
         hasUnbuiltEdge = true;
         if (!hasUnexploredNeighbor) {

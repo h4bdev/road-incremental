@@ -1693,8 +1693,8 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       );
 
       const isTerminalWithUnexplored = node.connected && hasBuiltEdge && hasUnexploredNeighbor;
-      const hideDot = node.connected && hasBuiltEdge && !isSelected && !isTerminalWithUnexplored;
-      if (hideDot && !hasUnbuiltEdge) {
+      const hideDot = node.connected && hasBuiltEdge && !isSelected && !isTerminalWithUnexplored && !hasUnbuiltEdge;
+      if (hideDot) {
         return;
       }
 

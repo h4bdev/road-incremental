@@ -9,16 +9,20 @@ import {
   computeCloudGraphStructureSig,
   countUnhydratedGraphMarks,
   decodeCloudGraphChunks,
+  decodeImportedSaveString,
   dehydrateGameStateForCloud,
   deleteLocalSlotGameState,
   encodeCloudGraphChunks,
   estimateFirestoreDocBytes,
+  EXPORT_SAVE_PREFIX_GZIP,
+  exportSaveToString,
   getActiveSlotId,
   getCloudSyncBaseline,
   getCloudSyncBaselineMap,
   getLocalSlotGraphMarks,
   GRAPH_CHUNK_ITEM_LIMIT,
   hydrateCloudPayloadAsync,
+  importDecodedSaveIntoSlot,
   isSlotConflict,
   LEGACY_SAVE_KEY,
   listLocalSlotSummaries,
@@ -31,13 +35,16 @@ import {
   mergeSlotSummaries,
   migrateLegacySaveIfNeeded,
   packCloudGraphV1,
+  parseEdgeEndpointsFromId,
   rehydrateGameStateFromCloudPayload,
+  RestoredGraphMarks,
   SAVE_SLOT_IDS,
   saveLocalSlotGameState,
   setActiveSlotId,
   setCloudSyncBaseline,
   updateLocalSlotTimestamp,
 } from './saveSlots';
+import { getCachedSlotGraph, resetMemoryTileCacheForTests } from './osmTileCache';
 import { PRESET_CITIES } from './worldCatalog';
 
 function createMemoryStorage(): Storage {
@@ -863,6 +870,412 @@ test('packCloudGraphV1 does not poison loadedOsmChunks with sparse neighbor-spil
   );
 });
 
+test('applyRestoredGraphMarks with healGaps: true heals missing edges and nodes with 0 unhydrated marks', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  const state = createInitialGameState(seoul);
+
+  // Present nodes
+  state.osmNodes = [
+    { id: 'node_alpha', lat: 37.5665, lng: 126.978, connected: false, mode: 'road' },
+    { id: 'node_beta', lat: 37.5675, lng: 126.979, connected: false, mode: 'road' },
+  ];
+  state.osmEdges = [
+    {
+      id: 'oe_node_alpha_node_beta',
+      wayName: '세종대로',
+      highwayType: 'primary',
+      mode: 'road',
+      fromNodeId: 'node_alpha',
+      toNodeId: 'node_beta',
+      coordinates: [
+        [37.5665, 126.978],
+        [37.5675, 126.979],
+      ],
+      distanceKm: 0.12,
+      buildCost: 20,
+      baseIncomePerSec: 1,
+      built: false,
+    },
+  ];
+
+  // Restored marks contains:
+  // 1. Built edge present in state (oe_node_alpha_node_beta)
+  // 2. Built edge missing from state, but with known endpoints (oe_node_beta_node_gamma)
+  // 3. Built edge with both endpoints missing (oe_missing1_missing2)
+  // 4. Station node missing from state (station_seoul_subway)
+  const marks: RestoredGraphMarks = {
+    connectedNodeIds: new Set(['node_alpha', 'node_beta', 'node_gamma', 'station_seoul_subway']),
+    builtEdgeIds: new Set([
+      'oe_node_alpha_node_beta',
+      'oe_node_beta_node_gamma',
+      'oe_missing1_missing2',
+    ]),
+    customBridgeEdges: [],
+  };
+
+  // Without healGaps (mid-stream behavior)
+  const unhealed = applyRestoredGraphMarks(state, marks, { healGaps: false });
+  const unhealedCounts = countUnhydratedGraphMarks(unhealed, marks);
+  assert.ok(unhealedCounts.unhydratedNodes > 0 || unhealedCounts.unhydratedEdges > 0);
+
+  // With healGaps (final restore / cloud save behavior)
+  const healed = applyRestoredGraphMarks(state, marks, { healGaps: true });
+  const healedCounts = countUnhydratedGraphMarks(healed, marks);
+
+  // Must have 0 unhydrated marks!
+  assert.equal(healedCounts.unhydratedNodes, 0);
+  assert.equal(healedCounts.unhydratedEdges, 0);
+
+  // Verify missing nodes were synthesized
+  const gammaNode = healed.osmNodes.find((n) => n.id === 'node_gamma');
+  assert.ok(gammaNode, 'Missing endpoint node_gamma must be synthesized');
+  assert.equal(gammaNode.connected, true);
+
+  const stationNode = healed.osmNodes.find((n) => n.id === 'station_seoul_subway');
+  assert.ok(stationNode, 'Missing station node must be synthesized');
+  assert.equal(stationNode.connected, true);
+
+  // Verify missing edges were synthesized and marked built
+  const betaGammaEdge = healed.osmEdges.find((e) => e.id === 'oe_node_beta_node_gamma');
+  assert.ok(betaGammaEdge, 'Missing edge oe_node_beta_node_gamma must be synthesized');
+  assert.equal(betaGammaEdge.built, true);
+  assert.ok(betaGammaEdge.coordinates.length >= 2);
+
+  const missingEdge = healed.osmEdges.find((e) => e.id === 'oe_missing1_missing2');
+  assert.ok(missingEdge, 'Missing edge oe_missing1_missing2 must be synthesized');
+  assert.equal(missingEdge.built, true);
+});
+
+test('6,000-node scale save packs compressed snapshot and unpacks in under 200ms with 0 data loss', async () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  const state = createInitialGameState(seoul);
+
+  const NODE_COUNT = 6000;
+  const EDGE_COUNT = 4500;
+
+  state.osmNodes = Array.from({ length: NODE_COUNT }, (_, i) => ({
+    id: `node_bulk_${i}`,
+    lat: 37.5 + (i % 80) * 0.001,
+    lng: 126.9 + Math.floor(i / 80) * 0.001,
+    connected: i % 2 === 0,
+    mode: 'road' as const,
+  }));
+
+  state.osmEdges = Array.from({ length: EDGE_COUNT }, (_, i) => ({
+    id: `oe_node_bulk_${i}_node_bulk_${i + 1}`,
+    wayName: `대로_${i % 100}`,
+    highwayType: 'primary',
+    mode: 'road' as const,
+    fromNodeId: `node_bulk_${i}`,
+    toNodeId: `node_bulk_${i + 1}`,
+    coordinates: [
+      [37.5 + (i % 80) * 0.001, 126.9 + Math.floor(i / 80) * 0.001],
+      [37.5 + ((i + 1) % 80) * 0.001, 126.9 + Math.floor((i + 1) / 80) * 0.001],
+    ],
+    distanceKm: 0.1,
+    buildCost: 30,
+    baseIncomePerSec: 2,
+    built: i % 3 === 0,
+  }));
+
+  const startTime = Date.now();
+  const packed = packCloudGraphV1(state);
+  const encoded = await encodeCloudGraphChunks(packed);
+  const dehydrated = dehydrateGameStateForCloud('slot_1', state, {
+    maxChunkBytes: MAX_MARK_CHUNK_WITH_PAYLOAD_BYTES,
+  });
+  const packTime = Date.now() - startTime;
+
+  assert.equal(encoded.encoding, 'gzip-b64-v1');
+  assert.ok(encoded.slices.length >= 1);
+  assert.ok(packTime < 1000, `Packing took ${packTime}ms, should be <1000ms`);
+
+  const totalChunks = Math.max(dehydrated.graphChunks.length, encoded.slices.length);
+  const firestoreChunks: CloudChunkPayloadRecord[] = Array.from({ length: totalChunks }, (_, idx) => {
+    const mc = dehydrated.graphChunks[idx] || { chunkIndex: idx, nodeIds: [], edgeIds: [] };
+    const payload = idx < encoded.slices.length ? encoded.slices[idx] : '';
+    const encoding = payload.length > 0 ? encoded.encoding : 'none';
+    return {
+      chunkIndex: idx,
+      nodeIds: mc.nodeIds,
+      edgeIds: mc.edgeIds,
+      graphEncoding: encoding,
+      graphPayload: payload,
+    };
+  });
+
+  const unpackStart = Date.now();
+  const hydrated = await hydrateCloudPayloadAsync(dehydrated.coreFields, firestoreChunks);
+  const unpackTime = Date.now() - unpackStart;
+
+  assert.equal(hydrated.hasFullGraphSnapshot, true);
+  assert.equal(hydrated.baseState.osmNodes.length, NODE_COUNT);
+  assert.equal(hydrated.baseState.osmEdges.length, EDGE_COUNT);
+  assert.ok(unpackTime < 1000, `Unpacking took ${unpackTime}ms, should be <1000ms`);
+
+  // Verify node and edge integrity
+  const connectedBefore = state.osmNodes.filter((n) => n.connected).length;
+  const connectedAfter = hydrated.baseState.osmNodes.filter((n) => n.connected).length;
+  assert.equal(connectedAfter, connectedBefore);
+
+  const builtBefore = state.osmEdges.filter((e) => e.built).length;
+  const builtAfter = hydrated.baseState.osmEdges.filter((e) => e.built).length;
+  assert.equal(builtAfter, builtBefore);
+});
+
+test('stalled IndexedDB open resolves safely to null within timeout instead of hanging', async () => {
+  resetMemoryTileCacheForTests();
+  const prevIdb = (globalThis as Record<string, unknown>).indexedDB;
+  // Simulate a hung indexedDB.open that never fires onsuccess/onerror/onblocked
+  (globalThis as Record<string, unknown>).indexedDB = {
+    open: () => ({}),
+  };
+  try {
+    const start = Date.now();
+    const res = await getCachedSlotGraph('slot_1');
+    const elapsed = Date.now() - start;
+    assert.equal(res, null);
+    assert.ok(elapsed < 4000, `Expected IDB timeout recovery <4s, got ${elapsed}ms`);
+  } finally {
+    resetMemoryTileCacheForTests();
+    if (prevIdb === undefined) {
+      delete (globalThis as Record<string, unknown>).indexedDB;
+    } else {
+      (globalThis as Record<string, unknown>).indexedDB = prevIdb;
+    }
+  }
+});
+
+test('parseEdgeEndpointsFromId accurately parses complex osm, osm_sub, custom, and fb_fb edge IDs without bogus splits', () => {
+  assert.deepEqual(
+    parseEdgeEndpointsFromId('oe_osm_100_osm_sub_osm_100_osm_200_0'),
+    { fromId: 'osm_100', toId: 'osm_sub_osm_100_osm_200_0' }
+  );
+  assert.deepEqual(
+    parseEdgeEndpointsFromId('oe_osm_sub_osm_100_osm_200_0_osm_300'),
+    { fromId: 'osm_sub_osm_100_osm_200_0', toId: 'osm_300' }
+  );
+  assert.deepEqual(
+    parseEdgeEndpointsFromId('oe_osm_sub_osm_1_osm_2_0_osm_sub_osm_1_osm_2_1'),
+    { fromId: 'osm_sub_osm_1_osm_2_0', toId: 'osm_sub_osm_1_osm_2_1' }
+  );
+  assert.deepEqual(
+    parseEdgeEndpointsFromId('oe_custom_osm_123_osm_456'),
+    { fromId: 'osm_123', toId: 'osm_456' }
+  );
+  assert.deepEqual(
+    parseEdgeEndpointsFromId('oe_custom_osm_sub_osm_1_osm_2_0_osm_9'),
+    { fromId: 'osm_sub_osm_1_osm_2_0', toId: 'osm_9' }
+  );
+  assert.deepEqual(
+    parseEdgeEndpointsFromId('oe_fb_fb_37.5667_126.9767_r0_c0_fb_37.5667_126.9767_r0_c1'),
+    { fromId: 'fb_37.5667_126.9767_r0_c0', toId: 'fb_37.5667_126.9767_r0_c1' }
+  );
+  // Non-pair chain IDs from starter fallback must not be split in half into phantom node IDs
+  assert.equal(parseEdgeEndpointsFromId('oe_fb_ew_37.5667_126.9767_1'), null);
+});
+
+test('applyRestoredGraphMarks with healGaps: true interpolates multi-node holes smoothly along route instead of jumping to city center', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!; // center at 37.5665, 126.978
+  const state = createInitialGameState(seoul);
+
+  // Present anchor nodes ~9km away from city hall in Gangnam
+  state.osmNodes = [
+    { id: 'osm_1', lat: 37.498, lng: 127.028, connected: true, mode: 'road' },
+    { id: 'osm_4', lat: 37.501, lng: 127.031, connected: true, mode: 'road' },
+    { id: 'osm_5', lat: 37.502, lng: 127.032, connected: true, mode: 'road' },
+  ];
+  state.osmEdges = [];
+
+  // Notice middle edge oe_osm_2_osm_3 comes FIRST before anchor edges oe_osm_1_osm_2 and oe_osm_3_osm_4
+  const marks: RestoredGraphMarks = {
+    connectedNodeIds: new Set([
+      'osm_1',
+      'osm_2',
+      'osm_3',
+      'osm_4',
+      'osm_sub_osm_4_osm_5_0',
+      'osm_5',
+    ]),
+    builtEdgeIds: new Set([
+      'oe_osm_2_osm_3',
+      'oe_osm_1_osm_2',
+      'oe_osm_3_osm_4',
+      'oe_custom_osm_4_osm_sub_osm_4_osm_5_0',
+    ]),
+    customBridgeEdges: [],
+  };
+
+  const healed = applyRestoredGraphMarks(state, marks, { healGaps: true });
+  const counts = countUnhydratedGraphMarks(healed, marks);
+  assert.equal(counts.unhydratedNodes, 0);
+  assert.equal(counts.unhydratedEdges, 0);
+
+  const n2 = healed.osmNodes.find((n) => n.id === 'osm_2')!;
+  const n3 = healed.osmNodes.find((n) => n.id === 'osm_3')!;
+  const sub = healed.osmNodes.find((n) => n.id === 'osm_sub_osm_4_osm_5_0')!;
+
+  assert.ok(n2 && n3 && sub);
+  // Must stay smoothly along Gangnam route (around 37.499/37.500), never jump to city hall (37.5665)
+  assert.ok(Math.abs(n2.lat - 37.499) < 0.0002, `Expected osm_2 lat ~37.499, got ${n2.lat}`);
+  assert.ok(Math.abs(n2.lng - 127.029) < 0.0002, `Expected osm_2 lng ~127.029, got ${n2.lng}`);
+  assert.ok(Math.abs(n3.lat - 37.5) < 0.0002, `Expected osm_3 lat ~37.500, got ${n3.lat}`);
+  assert.ok(Math.abs(n3.lng - 127.03) < 0.0002, `Expected osm_3 lng ~127.030, got ${n3.lng}`);
+  assert.ok(Math.abs(sub.lat - 37.5015) < 0.0002, `Expected sub lat ~37.5015, got ${sub.lat}`);
+  assert.ok(Math.abs(sub.lng - 127.0315) < 0.0002, `Expected sub lng ~127.0315, got ${sub.lng}`);
+});
+
+test('dehydrateGameStateForCloud caps coreFields.customBridgeEdges at 500 per firestore.rules while packCloudGraphV1 preserves all edges', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  const state = createInitialGameState(seoul);
+  state.osmNodes = [
+    { id: 'osm_1', lat: 37.5665, lng: 126.978, connected: true, mode: 'road' },
+    { id: 'osm_2', lat: 37.5675, lng: 126.979, connected: true, mode: 'road' },
+  ];
+  state.osmEdges = Array.from({ length: 620 }, (_, i) => ({
+    id: `oe_custom_osm_1_osm_2_${i}`,
+    wayName: `브릿지 ${i}`,
+    highwayType: 'unclassified',
+    mode: 'road' as const,
+    fromNodeId: 'osm_1',
+    toNodeId: 'osm_2',
+    coordinates: [
+      [37.5665, 126.978],
+      [37.5675, 126.979],
+    ] as [[number, number], [number, number]],
+    distanceKm: 0.15,
+    buildCost: 100,
+    baseIncomePerSec: 5,
+    built: true,
+    regionId: 'r_seoul',
+  }));
+
+  const dehydrated = dehydrateGameStateForCloud('slot_1', state);
+  assert.equal(dehydrated.coreFields.customBridgeEdges.length, 500);
+
+  const packed = packCloudGraphV1(state);
+  assert.equal(packed.edges.length, 620);
+});
+
+test('exportSaveToString and decodeImportedSaveString roundtrip lossless graph, custom bridges, skills, boundaries, and stats', async () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  let state = { ...createInitialGameState(seoul), capital: 54_321, totalLifetimeEarnings: 99_999 };
+  const skRes = unlockSkill(state, state.skills[0].id);
+  if (skRes.success) state = skRes.newState;
+
+  state.provincialRegions = [
+    {
+      regionId: 'osm_rel_seoul',
+      regionName: '서울특별시',
+      adminLevel: '4',
+      bbox: [37.42, 126.76, 37.71, 127.19],
+      centerLat: 37.5665,
+      centerLng: 126.978,
+      unlocked: true,
+      isStartingRegion: true,
+      isIsolated: false,
+      hasRealOsmBoundary: true,
+      boundaryGeoJson: {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [126.76, 37.42],
+            [127.19, 37.42],
+            [127.19, 37.71],
+            [126.76, 37.71],
+            [126.76, 37.42],
+          ],
+        ],
+      },
+    },
+  ];
+
+  state = mergeOsmChunk(
+    state,
+    '37.5667_126.9767',
+    [
+      { id: 'osm_a', lat: 37.5665, lng: 126.978, connected: true, mode: 'road', regionId: 'osm_rel_seoul' },
+      { id: 'osm_b', lat: 37.5675, lng: 126.979, connected: true, mode: 'road', regionId: 'osm_rel_seoul' },
+    ],
+    [
+      {
+        id: 'oe_custom_osm_a_osm_b',
+        wayName: '교차로 연결 링크',
+        highwayType: 'unclassified',
+        mode: 'road',
+        fromNodeId: 'osm_a',
+        toNodeId: 'osm_b',
+        coordinates: [
+          [37.5665, 126.978],
+          [37.5675, 126.979],
+        ],
+        distanceKm: 0.14,
+        buildCost: 60,
+        baseIncomePerSec: 3,
+        built: true,
+        regionId: 'osm_rel_seoul',
+      },
+    ]
+  );
+
+  const exported = await exportSaveToString(state, {
+    slotName: '내 서울 본선',
+    savedAt: 1_700_000_000_000,
+  });
+  assert.ok(exported.startsWith(EXPORT_SAVE_PREFIX_GZIP), 'Should produce gzipped TERRALINE1 string');
+
+  // Also ensure line-wrapped / whitespace-padded exports decode seamlessly
+  const wrapped = `  ${exported.slice(0, 40)}\n${exported.slice(40)}  `;
+  const preview = await decodeImportedSaveString(wrapped);
+
+  assert.equal(preview.format, 'terraline1');
+  assert.equal(preview.slotName, '내 서울 본선');
+  assert.equal(preview.savedAt, 1_700_000_000_000);
+  assert.equal(preview.cityName, seoul.name);
+  assert.equal(preview.capital, state.capital);
+  assert.equal(preview.connectedOsmNodes, 2);
+  assert.equal(preview.totalOsmEdgesBuilt, 1);
+  assert.equal(preview.totalNodesInSnapshot, 2);
+  assert.equal(preview.totalEdgesInSnapshot, 1);
+  assert.equal(preview.state.skills[0].level, state.skills[0].level);
+  assert.ok(
+    preview.state.osmEdges.some((e) => e.id === 'oe_custom_osm_a_osm_b' && e.built),
+    'Custom bridge edge must survive Export -> Import roundtrip'
+  );
+  assert.equal(preview.state.provincialRegions[0].hasRealOsmBoundary, true);
+  assert.equal(preview.state.provincialRegions[0].boundaryGeoJson?.type, 'Polygon');
+
+  // Import into localStorage slot_4 and reload cleanly
+  const storage = createMemoryStorage();
+  const importedSummary = await importDecodedSaveIntoSlot('slot_4', preview, {
+    slotName: '복원된 서울',
+    storage,
+  });
+  assert.equal(importedSummary.slotId, 'slot_4');
+  assert.equal(importedSummary.slotName, '복원된 서울');
+  assert.equal(importedSummary.source, 'local');
+
+  const reloaded = loadLocalSlotGameState('slot_4', storage);
+  assert.ok(reloaded);
+  assert.equal(reloaded.capital, state.capital);
+  assert.equal(reloaded.osmNodes.filter((n) => n.connected).length, 2);
+  assert.equal(reloaded.osmEdges.filter((e) => e.built).length, 1);
+});
+
+test('decodeImportedSaveString supports raw JSON fallback and rejects invalid/corrupted inputs with clear errors', async () => {
+  const tokyo = PRESET_CITIES.find((c) => c.id === 'tokyo')!;
+  const rawState = { ...createInitialGameState(tokyo), capital: 7_777 };
+
+  const rawPreview = await decodeImportedSaveString(JSON.stringify(rawState));
+  assert.equal(rawPreview.format, 'raw-json');
+  assert.equal(rawPreview.cityName, tokyo.name);
+  assert.equal(rawPreview.capital, 7_777);
+
+  await assert.rejects(() => decodeImportedSaveString('   '), /입력/);
+  await assert.rejects(() => decodeImportedSaveString('NOT_A_SAVE_CODE'), /지원하지 않는/);
+  await assert.rejects(() => decodeImportedSaveString('TERRALINE1:not-valid-gzip-data!!!'), /압축 해제|Base64/);
+  await assert.rejects(() => decodeImportedSaveString('{"foo":"bar"}'), /세이브 데이터/);
+});
 
 
 

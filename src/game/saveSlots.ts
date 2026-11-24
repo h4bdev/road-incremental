@@ -16,6 +16,7 @@ import { backfillMinigamesState } from './minigames';
 import {
   GameState,
   OsmEdge,
+  OsmNode,
   ProvincialRegion,
   StartingCity,
 } from './types';
@@ -23,6 +24,7 @@ import {
 export const SAVE_SLOT_IDS = ['slot_1', 'slot_2', 'slot_3', 'slot_4', 'slot_5'] as const;
 export type SaveSlotId = (typeof SAVE_SLOT_IDS)[number];
 export const MAX_SAVE_SLOTS = SAVE_SLOT_IDS.length;
+export { getCachedSlotGraph } from './osmTileCache';
 
 export const LEGACY_SAVE_KEY = 'TERRALINE_SAVE_V4';
 export const SLOT_STORAGE_PREFIX = 'ROAD_INC_SAVE_SLOT_V1_';
@@ -955,7 +957,8 @@ export function loadLocalSlotGameState(slotId: SaveSlotId, storage?: Storage): G
 export async function hydrateLocalSlotGraphFromIndexedDb(
   slotId: SaveSlotId,
   currentState: GameState,
-  storage?: Storage
+  storage?: Storage,
+  options?: { preferCurrentStateCore?: boolean }
 ): Promise<GameState | null> {
   if (!hasIndexedDb()) return null;
   const snapshot = await getCachedSlotGraph(slotId);
@@ -963,13 +966,17 @@ export async function hydrateLocalSlotGraphFromIndexedDb(
 
   const st = getSafeStorage(storage);
   let core: CompactLocalCoreV2;
-  try {
-    const rawCoreV2 = st?.getItem(`${SLOT_CORE_V2_PREFIX}${slotId}`);
-    core = rawCoreV2
-      ? (JSON.parse(rawCoreV2) as CompactLocalCoreV2)
-      : packLocalCoreV2(currentState);
-  } catch {
+  if (options?.preferCurrentStateCore) {
     core = packLocalCoreV2(currentState);
+  } else {
+    try {
+      const rawCoreV2 = st?.getItem(`${SLOT_CORE_V2_PREFIX}${slotId}`);
+      core = rawCoreV2
+        ? (JSON.parse(rawCoreV2) as CompactLocalCoreV2)
+        : packLocalCoreV2(currentState);
+    } catch {
+      core = packLocalCoreV2(currentState);
+    }
   }
 
   const graphV2: CompactLocalGraphV2 = {
@@ -1623,39 +1630,45 @@ function base64ToUint8(b64: string): Uint8Array {
   return bytes;
 }
 
-async function readAllStreamBytes(readable: ReadableStream<Uint8Array>): Promise<Uint8Array> {
-  const reader = readable.getReader();
-  const parts: Uint8Array[] = [];
-  let totalLen = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value && value.length > 0) {
-      parts.push(value);
-      totalLen += value.length;
-    }
-  }
-  const out = new Uint8Array(totalLen);
-  let offset = 0;
-  for (let i = 0; i < parts.length; i++) {
-    out.set(parts[i], offset);
-    offset += parts[i].length;
-  }
-  return out;
+function withStreamTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(fallback);
+      }
+    }, ms);
+    promise.then(
+      (val) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(val);
+        }
+      },
+      () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(fallback);
+        }
+      }
+    );
+  });
 }
 
 async function gzipBytes(raw: Uint8Array): Promise<Uint8Array | null> {
   if (typeof CompressionStream === 'undefined') return null;
   try {
-    const cs = new CompressionStream('gzip');
-    const readPromise = readAllStreamBytes(cs.readable);
-    const writer = cs.writable.getWriter();
-    const writePromise = (async () => {
-      await writer.write(new Uint8Array(raw));
-      await writer.close();
+    const task = (async () => {
+      const copy = new Uint8Array(raw.byteLength);
+      copy.set(raw);
+      const compressedStream = new Blob([copy]).stream().pipeThrough(new CompressionStream('gzip'));
+      const buf = await new Response(compressedStream).arrayBuffer();
+      return new Uint8Array(buf);
     })();
-    const [compressed] = await Promise.all([readPromise, writePromise]);
-    return compressed;
+    return await withStreamTimeout(task, 5000, null);
   } catch {
     return null;
   }
@@ -1664,15 +1677,16 @@ async function gzipBytes(raw: Uint8Array): Promise<Uint8Array | null> {
 async function gunzipBytes(compressed: Uint8Array): Promise<Uint8Array | null> {
   if (typeof DecompressionStream === 'undefined') return null;
   try {
-    const ds = new DecompressionStream('gzip');
-    const readPromise = readAllStreamBytes(ds.readable);
-    const writer = ds.writable.getWriter();
-    const writePromise = (async () => {
-      await writer.write(new Uint8Array(compressed));
-      await writer.close();
+    const task = (async () => {
+      const copy = new Uint8Array(compressed.byteLength);
+      copy.set(compressed);
+      const decompressedStream = new Blob([copy])
+        .stream()
+        .pipeThrough(new DecompressionStream('gzip'));
+      const buf = await new Response(decompressedStream).arrayBuffer();
+      return new Uint8Array(buf);
     })();
-    const [raw] = await Promise.all([readPromise, writePromise]);
-    return raw;
+    return await withStreamTimeout(task, 5000, null);
   } catch {
     return null;
   }
@@ -1919,9 +1933,127 @@ export async function hydrateCloudPayloadAsync(
   };
 }
 
+const SINGLE_NODE_TOKEN_PATTERNS: RegExp[] = [
+  /^(osm_sub_osm_[a-zA-Z0-9-]+_osm_[a-zA-Z0-9-]+_\d+)(?:_(.+))?$/,
+  /^(osm_(?!sub_)[a-zA-Z0-9-]+)(?:_(.+))?$/,
+  /^(fb_-?\d+(?:\.\d+)?_-?\d+(?:\.\d+)?_r\d+_c\d+)(?:_(.+))?$/,
+  /^(fb_r_-?\d+(?:\.\d+)?_-?\d+(?:\.\d+)?_-?\d+_-?\d+)(?:_(.+))?$/,
+  /^(fb_rail_-?\d+(?:\.\d+)?_-?\d+(?:\.\d+)?_-?\d+)(?:_(.+))?$/,
+  /^(reg_center_(?:curated_[a-z0-9_]+|osm_rel_-?\d+|fb_reg_[^_]+_[^_]+))(?:_(.+))?$/,
+  /^(node_bulk_\d+)(?:_(.+))?$/,
+  /^((?:node|wn|rn|sub)_[a-zA-Z0-9-]+)(?:_(.+))?$/,
+  /^([a-zA-Z0-9-]+_center)(?:_(.+))?$/,
+];
+
+const SIMPLE_NODE_TOKEN_RE = /^[a-zA-Z][a-zA-Z0-9-]*$/;
+const RESERVED_PREFIX_TOKENS = new Set(['osm', 'fb', 'node', 'wn', 'rn', 'sub', 'reg', 'custom']);
+
+function matchLeadingNodeToken(str: string): { id: string; rest: string } | null {
+  for (let i = 0; i < SINGLE_NODE_TOKEN_PATTERNS.length; i++) {
+    const m = str.match(SINGLE_NODE_TOKEN_PATTERNS[i]);
+    if (m) {
+      return { id: m[1], rest: m[2] || '' };
+    }
+  }
+  const simpleMatch = str.match(/^([a-zA-Z][a-zA-Z0-9-]*)(?:_(.+))?$/);
+  if (simpleMatch && !RESERVED_PREFIX_TOKENS.has(simpleMatch[1])) {
+    return { id: simpleMatch[1], rest: simpleMatch[2] || '' };
+  }
+  return null;
+}
+
+function isValidSingleNodeToken(id: string): boolean {
+  const m = matchLeadingNodeToken(id);
+  return Boolean(m && m.rest === '');
+}
+
+function parseNodePairFromString(
+  pairStr: string,
+  knownNodeIds?: ReadonlySet<string> | ReadonlyMap<string, unknown>
+): { fromId: string; toId: string } | null {
+  if (!pairStr) return null;
+
+  if (knownNodeIds && knownNodeIds.size > 0) {
+    let halfKnown: { fromId: string; toId: string } | null = null;
+    for (let idx = pairStr.indexOf('_'); idx !== -1; idx = pairStr.indexOf('_', idx + 1)) {
+      const left = pairStr.slice(0, idx);
+      const right = pairStr.slice(idx + 1);
+      if (!left || !right) continue;
+      const hasLeft = knownNodeIds.has(left);
+      const hasRight = knownNodeIds.has(right);
+      if (hasLeft && hasRight) {
+        return { fromId: left, toId: right };
+      }
+      if (!halfKnown) {
+        if (
+          (hasLeft && isValidSingleNodeToken(right)) ||
+          (hasRight && isValidSingleNodeToken(left))
+        ) {
+          halfKnown = { fromId: left, toId: right };
+        }
+      }
+    }
+    if (halfKnown) return halfKnown;
+  }
+
+  const first = matchLeadingNodeToken(pairStr);
+  if (first && first.rest) {
+    const second = matchLeadingNodeToken(first.rest);
+    if (second && second.rest === '') {
+      return { fromId: first.id, toId: second.id };
+    }
+  }
+
+  const firstIdx = pairStr.indexOf('_');
+  if (firstIdx > 0 && pairStr.indexOf('_', firstIdx + 1) === -1) {
+    const left = pairStr.slice(0, firstIdx);
+    const right = pairStr.slice(firstIdx + 1);
+    if (
+      SIMPLE_NODE_TOKEN_RE.test(left) &&
+      SIMPLE_NODE_TOKEN_RE.test(right) &&
+      !RESERVED_PREFIX_TOKENS.has(left) &&
+      !RESERVED_PREFIX_TOKENS.has(right)
+    ) {
+      return { fromId: left, toId: right };
+    }
+  }
+
+  return null;
+}
+
+export function parseEdgeEndpointsFromId(
+  edgeId: string,
+  knownNodeIds?: ReadonlySet<string> | ReadonlyMap<string, unknown>
+): { fromId: string; toId: string } | null {
+  if (!edgeId.startsWith('oe_')) return null;
+  const raw = edgeId.slice(3); // strip 'oe_'
+  if (!raw) return null;
+
+  if (raw.startsWith('custom_')) {
+    return parseNodePairFromString(raw.slice(7), knownNodeIds);
+  }
+  if (raw.startsWith('fb_fb_')) {
+    return parseNodePairFromString(raw.slice(3), knownNodeIds);
+  }
+  return parseNodePairFromString(raw, knownNodeIds);
+}
+
+function parseOsmSubParents(nodeId: string): [string, string] | null {
+  const m = nodeId.match(/^osm_sub_(osm_[a-zA-Z0-9-]+)_(osm_[a-zA-Z0-9-]+)_\d+$/);
+  return m ? [m[1], m[2]] : null;
+}
+
+function fastEquirectKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = (((lng2 - lng1) * Math.PI) / 180) * Math.cos(((lat1 + lat2) * Math.PI) / 360);
+  const dist = 6371 * Math.sqrt(dLat * dLat + dLng * dLng);
+  return Math.max(0.008, Math.round(dist * 1000) / 1000);
+}
+
 export function applyRestoredGraphMarks(
   state: GameState,
-  marks: RestoredGraphMarks | null | undefined
+  marks: RestoredGraphMarks | null | undefined,
+  options?: { healGaps?: boolean }
 ): GameState {
   if (!marks) return state;
   const { connectedNodeIds, builtEdgeIds, customBridgeEdges } = marks;
@@ -1933,42 +2065,476 @@ export function applyRestoredGraphMarks(
     return state;
   }
 
-  let nodesChanged = false;
-  const nextNodes = state.osmNodes.map((n) => {
-    if (!n.connected && connectedNodeIds.has(n.id)) {
-      nodesChanged = true;
-      return { ...n, connected: true };
+  const healGaps = Boolean(options?.healGaps);
+
+  if (!healGaps) {
+    let nodesChanged = false;
+    const nextNodes = state.osmNodes.map((n) => {
+      if (!n.connected && connectedNodeIds.has(n.id)) {
+        nodesChanged = true;
+        return { ...n, connected: true };
+      }
+      return n;
+    });
+
+    const existingEdgeIds = new Set(state.osmEdges.map((e) => e.id));
+    const missingCustomEdges = customBridgeEdges.filter((e) => !existingEdgeIds.has(e.id));
+
+    let edgesChanged = missingCustomEdges.length > 0;
+    const nextEdges = [...state.osmEdges, ...missingCustomEdges].map((e) => {
+      if (!e.built && builtEdgeIds.has(e.id)) {
+        edgesChanged = true;
+        return { ...e, built: true };
+      }
+      return e;
+    });
+
+    if (!nodesChanged && !edgesChanged) {
+      const minNodes = Math.max(state.stats.connectedOsmNodes, connectedNodeIds.size);
+      const minEdges = Math.max(state.stats.totalOsmEdgesBuilt, builtEdgeIds.size);
+      if (minNodes !== state.stats.connectedOsmNodes || minEdges !== state.stats.totalOsmEdgesBuilt) {
+        return {
+          ...state,
+          stats: {
+            ...state.stats,
+            connectedOsmNodes: minNodes,
+            totalOsmEdgesBuilt: minEdges,
+          },
+        };
+      }
+      return state;
     }
-    return n;
-  });
 
-  const existingEdgeIds = new Set(state.osmEdges.map((e) => e.id));
-  const missingCustomEdges = customBridgeEdges.filter((e) => !existingEdgeIds.has(e.id));
+    const nextState: GameState = {
+      ...state,
+      osmNodes: nextNodes,
+      osmEdges: nextEdges,
+    };
 
-  let edgesChanged = missingCustomEdges.length > 0;
-  const nextEdges = [...state.osmEdges, ...missingCustomEdges].map((e) => {
-    if (!e.built && builtEdgeIds.has(e.id)) {
-      edgesChanged = true;
-      return { ...e, built: true };
-    }
-    return e;
-  });
+    const evaluated =
+      state.skills.length > 0 && state.provincialRegions.length > 0
+        ? evaluateLinesAndAchievements(nextState).newState
+        : scopeGameStateToStartingCity(nextState);
 
-  if (!nodesChanged && !edgesChanged) {
-    const minNodes = Math.max(state.stats.connectedOsmNodes, connectedNodeIds.size);
-    const minEdges = Math.max(state.stats.totalOsmEdgesBuilt, builtEdgeIds.size);
-    if (minNodes !== state.stats.connectedOsmNodes || minEdges !== state.stats.totalOsmEdgesBuilt) {
+    const { unhydratedNodes, unhydratedEdges } = countUnhydratedGraphMarks(evaluated, marks);
+    if (unhydratedNodes > 0 || unhydratedEdges > 0) {
       return {
-        ...state,
+        ...evaluated,
         stats: {
-          ...state.stats,
-          connectedOsmNodes: minNodes,
-          totalOsmEdgesBuilt: minEdges,
+          ...evaluated.stats,
+          connectedOsmNodes: Math.max(evaluated.stats.connectedOsmNodes, connectedNodeIds.size),
+          totalOsmEdgesBuilt: Math.max(evaluated.stats.totalOsmEdgesBuilt, builtEdgeIds.size),
         },
       };
     }
-    return state;
+    return evaluated;
   }
+
+  // --- Network Gap Healing Path: Active on final restore or cloud upload ---
+  const nodeMap = new Map<string, OsmNode>();
+  for (const n of state.osmNodes || []) {
+    nodeMap.set(n.id, n.connected || !connectedNodeIds.has(n.id) ? n : { ...n, connected: true });
+  }
+
+  const edgeMap = new Map<string, OsmEdge>();
+  for (const e of state.osmEdges || []) {
+    edgeMap.set(e.id, e.built || !builtEdgeIds.has(e.id) ? e : { ...e, built: true });
+  }
+
+  for (const ce of customBridgeEdges) {
+    if (!edgeMap.has(ce.id)) {
+      edgeMap.set(ce.id, { ...ce, built: ce.built || builtEdgeIds.has(ce.id) });
+    } else {
+      const existing = edgeMap.get(ce.id)!;
+      if (!existing.built && (ce.built || builtEdgeIds.has(ce.id))) {
+        edgeMap.set(ce.id, { ...existing, built: true });
+      }
+    }
+  }
+
+  // Ensure endpoints of built edges already present in nodeMap are marked connected
+  for (const e of edgeMap.values()) {
+    if (!e.built) continue;
+    const nf = nodeMap.get(e.fromNodeId);
+    if (nf && !nf.connected) nodeMap.set(nf.id, { ...nf, connected: true });
+    const nt = nodeMap.get(e.toNodeId);
+    if (nt && !nt.connected) nodeMap.set(nt.id, { ...nt, connected: true });
+  }
+
+  const knownNodeIds = new Set<string>(nodeMap.keys());
+  for (const nid of connectedNodeIds) knownNodeIds.add(nid);
+
+  const missingEdges: Array<{ id: string; fromId: string; toId: string }> = [];
+  for (const eid of builtEdgeIds) {
+    if (edgeMap.has(eid)) continue;
+    const endpoints = parseEdgeEndpointsFromId(eid, knownNodeIds);
+    if (!endpoints || endpoints.fromId === endpoints.toId) continue;
+    missingEdges.push({ id: eid, fromId: endpoints.fromId, toId: endpoints.toId });
+  }
+
+  const anchorLat = state.startingCity?.lat ?? 37.5665;
+  const anchorLng = state.startingCity?.lng ?? 126.978;
+  const defaultRegionId = state.provincialRegions?.[0]?.regionId;
+
+  if (missingEdges.length > 0) {
+    const existingAdj = new Map<string, Array<{ neighborId: string; mode: 'road' | 'rail' }>>();
+    for (const e of edgeMap.values()) {
+      let lFrom = existingAdj.get(e.fromNodeId);
+      if (!lFrom) {
+        lFrom = [];
+        existingAdj.set(e.fromNodeId, lFrom);
+      }
+      lFrom.push({ neighborId: e.toNodeId, mode: e.mode });
+      let lTo = existingAdj.get(e.toNodeId);
+      if (!lTo) {
+        lTo = [];
+        existingAdj.set(e.toNodeId, lTo);
+      }
+      lTo.push({ neighborId: e.fromNodeId, mode: e.mode });
+    }
+
+    const missingAdj = new Map<string, Set<string>>();
+    const missingNodeIds = new Set<string>();
+    for (const me of missingEdges) {
+      const hasFrom = nodeMap.has(me.fromId);
+      const hasTo = nodeMap.has(me.toId);
+      if (hasFrom && hasTo) continue;
+      if (!hasFrom) missingNodeIds.add(me.fromId);
+      if (!hasTo) missingNodeIds.add(me.toId);
+      let adjF = missingAdj.get(me.fromId);
+      if (!adjF) {
+        adjF = new Set();
+        missingAdj.set(me.fromId, adjF);
+      }
+      adjF.add(me.toId);
+      let adjT = missingAdj.get(me.toId);
+      if (!adjT) {
+        adjT = new Set();
+        missingAdj.set(me.toId, adjT);
+      }
+      adjT.add(me.fromId);
+    }
+
+    // Group missing nodes into connected components and place via multi-source BFS + harmonic relaxation
+    const visitedMissing = new Set<string>();
+    let orphanCompCounter = 0;
+
+    for (const seedMissingId of missingNodeIds) {
+      if (visitedMissing.has(seedMissingId)) continue;
+      const compMissing: string[] = [];
+      const compAnchors = new Set<string>();
+      const q = [seedMissingId];
+      visitedMissing.add(seedMissingId);
+
+      for (let head = 0; head < q.length; head++) {
+        const curr = q[head];
+        compMissing.push(curr);
+        const nbrs = missingAdj.get(curr);
+        if (!nbrs) continue;
+        for (const nbr of nbrs) {
+          if (nodeMap.has(nbr)) {
+            compAnchors.add(nbr);
+          } else if (missingNodeIds.has(nbr) && !visitedMissing.has(nbr)) {
+            visitedMissing.add(nbr);
+            q.push(nbr);
+          }
+        }
+      }
+
+      const compPos = new Map<string, { lat: number; lng: number }>();
+      const compRegion = new Map<string, string | undefined>();
+      const compMode = new Map<string, 'road' | 'rail'>();
+
+      const inferAnchorMode = (anchorId: string): 'road' | 'rail' => {
+        const aNode = nodeMap.get(anchorId)!;
+        if (aNode.mode === 'rail') return 'rail';
+        if (aNode.mode === 'mixed') {
+          const inc = existingAdj.get(anchorId);
+          if (inc && inc.length > 0 && inc.every((x) => x.mode === 'rail')) {
+            return 'rail';
+          }
+        }
+        return 'road';
+      };
+
+      // Also check osm_sub parent nodes in nodeMap for any missing node in component
+      const parentAnchorPos = new Map<string, { lat: number; lng: number; regionId?: string; mode: 'road' | 'rail' }>();
+      for (const mId of compMissing) {
+        const parents = parseOsmSubParents(mId);
+        if (!parents) continue;
+        const pA = nodeMap.get(parents[0]);
+        const pB = nodeMap.get(parents[1]);
+        if (pA && pB) {
+          parentAnchorPos.set(mId, {
+            lat: (pA.lat + pB.lat) / 2,
+            lng: (pA.lng + pB.lng) / 2,
+            regionId: pA.regionId || pB.regionId,
+            mode: pA.mode === 'rail' && pB.mode === 'rail' ? 'rail' : 'road',
+          });
+        }
+      }
+
+      if (compAnchors.size > 0) {
+        // Multi-source BFS from known anchor nodes in nodeMap
+        const bfsQueue: Array<{ id: string; srcAnchorId: string; dist: number; parentId: string }> = [];
+        const bfsSeen = new Set<string>();
+        for (const aId of compAnchors) {
+          const aNode = nodeMap.get(aId)!;
+          const nbrs = missingAdj.get(aId);
+          if (!nbrs) continue;
+          const aMode = inferAnchorMode(aId);
+          for (const nbr of nbrs) {
+            if (!missingNodeIds.has(nbr) || bfsSeen.has(nbr)) continue;
+            bfsSeen.add(nbr);
+            compPos.set(nbr, { lat: aNode.lat, lng: aNode.lng });
+            compRegion.set(nbr, aNode.regionId || defaultRegionId);
+            compMode.set(nbr, aMode);
+            bfsQueue.push({ id: nbr, srcAnchorId: aId, dist: 1, parentId: aId });
+          }
+        }
+
+        for (let head = 0; head < bfsQueue.length; head++) {
+          const item = bfsQueue[head];
+          const srcNode = nodeMap.get(item.srcAnchorId)!;
+          const nbrs = missingAdj.get(item.id);
+          if (!nbrs) continue;
+          for (const nbr of nbrs) {
+            if (!missingNodeIds.has(nbr) || bfsSeen.has(nbr)) continue;
+            bfsSeen.add(nbr);
+            compPos.set(nbr, { lat: srcNode.lat, lng: srcNode.lng });
+            compRegion.set(nbr, compRegion.get(item.id));
+            compMode.set(nbr, compMode.get(item.id) || 'road');
+            bfsQueue.push({
+              id: nbr,
+              srcAnchorId: item.srcAnchorId,
+              dist: item.dist + 1,
+              parentId: item.id,
+            });
+          }
+        }
+
+        // Seed any missing node that has exact osm_sub parent midpoint
+        for (const [mId, pInfo] of parentAnchorPos.entries()) {
+          compPos.set(mId, { lat: pInfo.lat, lng: pInfo.lng });
+          if (pInfo.regionId) compRegion.set(mId, pInfo.regionId);
+          compMode.set(mId, pInfo.mode);
+        }
+
+        if (compAnchors.size >= 2 || parentAnchorPos.size > 0) {
+          // Harmonic / neighbor-centroid relaxation interpolates missing chains smoothly along the route
+          const iterations = Math.min(72, Math.max(24, compMissing.length * 4));
+          for (let iter = 0; iter < iterations; iter++) {
+            for (let i = 0; i < compMissing.length; i++) {
+              const mId = compMissing[i];
+              const nbrs = missingAdj.get(mId);
+              if (!nbrs || nbrs.size < 2) continue;
+              let sumLat = 0;
+              let sumLng = 0;
+              let cnt = 0;
+              for (const nbr of nbrs) {
+                const aNode = nodeMap.get(nbr);
+                const p = aNode || compPos.get(nbr);
+                if (p) {
+                  sumLat += p.lat;
+                  sumLng += p.lng;
+                  cnt++;
+                }
+              }
+              const parentHint = parentAnchorPos.get(mId);
+              if (parentHint) {
+                sumLat += parentHint.lat;
+                sumLng += parentHint.lng;
+                cnt++;
+              }
+              if (cnt >= 2) {
+                compPos.set(mId, { lat: sumLat / cnt, lng: sumLng / cnt });
+              }
+            }
+          }
+
+          // Gently extend any degree-1 spurs attached to the bridged component so they don't collapse to 0m
+          for (const item of bfsQueue) {
+            const mId = item.id;
+            const nbrs = missingAdj.get(mId);
+            if (!nbrs || nbrs.size !== 1 || parentAnchorPos.has(mId)) continue;
+            const onlyNbr = Array.from(nbrs)[0];
+            const nbrPos = nodeMap.get(onlyNbr) || compPos.get(onlyNbr);
+            if (!nbrPos) continue;
+            let stepLat = 0.00022;
+            let stepLng = 0.00022;
+            const nbrAdj = existingAdj.get(onlyNbr);
+            if (nbrAdj && nbrAdj.length > 0) {
+              const prevN = nodeMap.get(nbrAdj[0].neighborId);
+              if (prevN) {
+                const dLat = nbrPos.lat - prevN.lat;
+                const dLng = nbrPos.lng - prevN.lng;
+                const mag = Math.hypot(dLat, dLng);
+                if (mag > 1e-6) {
+                  stepLat = (dLat / mag) * 0.00022;
+                  stepLng = (dLng / mag) * 0.00022;
+                }
+              }
+            }
+            compPos.set(mId, {
+              lat: nbrPos.lat + stepLat,
+              lng: nbrPos.lng + stepLng,
+            });
+          }
+        } else {
+          // Single-anchor spur chain: step locally away from the single anchor in BFS order
+          const singleAnchorId = Array.from(compAnchors)[0];
+          const singleAnchor = nodeMap.get(singleAnchorId)!;
+          let dirLat = 0.00022;
+          let dirLng = 0.00022;
+          const inc = existingAdj.get(singleAnchorId);
+          if (inc && inc.length > 0) {
+            const prevNode = nodeMap.get(inc[0].neighborId);
+            if (prevNode) {
+              const dLat = singleAnchor.lat - prevNode.lat;
+              const dLng = singleAnchor.lng - prevNode.lng;
+              const mag = Math.hypot(dLat, dLng);
+              if (mag > 1e-6) {
+                dirLat = (dLat / mag) * 0.00022;
+                dirLng = (dLng / mag) * 0.00022;
+              }
+            }
+          }
+          for (let k = 0; k < bfsQueue.length; k++) {
+            const item = bfsQueue[k];
+            const pPos = nodeMap.get(item.parentId) || compPos.get(item.parentId) || singleAnchor;
+            // Slightly fan sibling branches if multiple stubs originate from the same node
+            const angleOffset = (k % 3 === 0 ? 0 : k % 3 === 1 ? 0.35 : -0.35) * item.dist;
+            const cosA = Math.cos(angleOffset);
+            const sinA = Math.sin(angleOffset);
+            const stepLat = dirLat * cosA - dirLng * sinA;
+            const stepLng = dirLat * sinA + dirLng * cosA;
+            compPos.set(item.id, {
+              lat: pPos.lat + stepLat,
+              lng: pPos.lng + stepLng,
+            });
+          }
+        }
+      } else if (parentAnchorPos.size > 0) {
+        // Component has no direct missing-edge anchor, but has osm_sub parent coords
+        const seeds = Array.from(parentAnchorPos.entries());
+        const baseLat = seeds[0][1].lat;
+        const baseLng = seeds[0][1].lng;
+        for (let i = 0; i < compMissing.length; i++) {
+          const mId = compMissing[i];
+          const pInfo = parentAnchorPos.get(mId);
+          compPos.set(mId, {
+            lat: pInfo ? pInfo.lat : baseLat + (i % 8) * 0.0002,
+            lng: pInfo ? pInfo.lng : baseLng + Math.floor(i / 8) * 0.0002,
+          });
+          compRegion.set(mId, pInfo?.regionId || seeds[0][1].regionId || defaultRegionId);
+          compMode.set(mId, pInfo?.mode || seeds[0][1].mode || 'road');
+        }
+      } else {
+        // Truly unanchored orphan component: cluster cleanly locally instead of scattering across grid
+        orphanCompCounter++;
+        const baseLat = anchorLat + (orphanCompCounter % 32) * 0.00025;
+        const baseLng = anchorLng + Math.floor(orphanCompCounter / 32) * 0.00025;
+        for (let i = 0; i < compMissing.length; i++) {
+          const mId = compMissing[i];
+          compPos.set(mId, {
+            lat: baseLat + (i % 10) * 0.0002,
+            lng: baseLng + Math.floor(i / 10) * 0.0002,
+          });
+          compRegion.set(mId, defaultRegionId);
+          compMode.set(mId, 'road');
+        }
+      }
+
+      for (const mId of compMissing) {
+        const pos = compPos.get(mId) || { lat: anchorLat, lng: anchorLng };
+        nodeMap.set(mId, {
+          id: mId,
+          lat: Number(pos.lat.toFixed(6)),
+          lng: Number(pos.lng.toFixed(6)),
+          connected: true,
+          mode: compMode.get(mId) || 'road',
+          regionId: compRegion.get(mId) ?? defaultRegionId,
+          label: '복원 연결점',
+        });
+      }
+    }
+
+    for (const me of missingEdges) {
+      if (edgeMap.has(me.id)) continue;
+      const fromNode = nodeMap.get(me.fromId);
+      const toNode = nodeMap.get(me.toId);
+      if (!fromNode || !toNode) continue;
+      if (!fromNode.connected) {
+        nodeMap.set(fromNode.id, { ...fromNode, connected: true });
+      }
+      if (!toNode.connected) {
+        nodeMap.set(toNode.id, { ...toNode, connected: true });
+      }
+      const distKm = fastEquirectKm(fromNode.lat, fromNode.lng, toNode.lat, toNode.lng);
+      const isRail =
+        (fromNode.mode === 'rail' && (toNode.mode === 'rail' || toNode.mode === 'mixed')) ||
+        (toNode.mode === 'rail' && (fromNode.mode === 'rail' || fromNode.mode === 'mixed'));
+      edgeMap.set(me.id, {
+        id: me.id,
+        wayName: '복원 연결선',
+        highwayType: isRail ? 'subway' : 'primary',
+        mode: isRail ? 'rail' : 'road',
+        fromNodeId: fromNode.id,
+        toNodeId: toNode.id,
+        coordinates: [
+          [fromNode.lat, fromNode.lng],
+          [toNode.lat, toNode.lng],
+        ],
+        distanceKm: distKm,
+        buildCost: Math.max(20, Math.round(distKm * (isRail ? 450 : 250))),
+        baseIncomePerSec: Math.max(1, Math.round(distKm * (isRail ? 12 : 6))),
+        built: true,
+        regionId: fromNode.regionId || toNode.regionId || defaultRegionId,
+      });
+    }
+  }
+
+  // Ensure any isolated connectedNodeIds also exist in nodeMap
+  let isolatedCounter = 0;
+  for (const nid of connectedNodeIds) {
+    if (!nodeMap.has(nid)) {
+      const parents = parseOsmSubParents(nid);
+      const pA = parents ? nodeMap.get(parents[0]) : undefined;
+      const pB = parents ? nodeMap.get(parents[1]) : undefined;
+      let sLat: number;
+      let sLng: number;
+      let regId = defaultRegionId;
+      let nodeMode: 'road' | 'rail' = 'road';
+      if (pA && pB) {
+        sLat = (pA.lat + pB.lat) / 2;
+        sLng = (pA.lng + pB.lng) / 2;
+        regId = pA.regionId || pB.regionId || defaultRegionId;
+        nodeMode = pA.mode === 'rail' && pB.mode === 'rail' ? 'rail' : 'road';
+      } else if (pA || pB) {
+        const p = (pA || pB)!;
+        sLat = p.lat + 0.00018;
+        sLng = p.lng + 0.00018;
+        regId = p.regionId || defaultRegionId;
+        nodeMode = p.mode === 'rail' ? 'rail' : 'road';
+      } else {
+        isolatedCounter++;
+        sLat = anchorLat + (isolatedCounter % 50) * 0.0002;
+        sLng = anchorLng + Math.floor(isolatedCounter / 50) * 0.0002;
+      }
+      nodeMap.set(nid, {
+        id: nid,
+        lat: Number(sLat.toFixed(6)),
+        lng: Number(sLng.toFixed(6)),
+        connected: true,
+        mode: nodeMode,
+        regionId: regId,
+        label: '복원 환승점',
+      });
+    }
+  }
+
+  const nextNodes = Array.from(nodeMap.values());
+  const nextEdges = Array.from(edgeMap.values());
 
   const nextState: GameState = {
     ...state,
@@ -2167,3 +2733,252 @@ export function mergeSlotSummaries(
   }
   return merged;
 }
+
+export const EXPORT_SAVE_PREFIX_GZIP = 'TERRALINE1:';
+export const EXPORT_SAVE_PREFIX_JSON = 'TERRALINE_JSON1:';
+
+export interface ExportedSaveBundleV1 {
+  v: 1;
+  slotName: string;
+  savedAt: number;
+  core: CompactLocalCoreV2;
+  graph: CompactLocalGraphV2;
+}
+
+export interface DecodedImportPreview {
+  format: 'terraline1' | 'terraline-json1' | 'raw-json';
+  slotName: string;
+  savedAt: number;
+  cityName: string;
+  cityCountry: string;
+  capital: number;
+  mapped1to1Km: number;
+  connectedOsmNodes: number;
+  totalOsmEdgesBuilt: number;
+  totalNodesInSnapshot: number;
+  totalEdgesInSnapshot: number;
+  tierLabel: string;
+  state: GameState;
+}
+
+export async function exportSaveToString(
+  state: GameState,
+  options?: {
+    slotName?: string;
+    savedAt?: number;
+    pendingMarks?: RestoredGraphMarks | null;
+  }
+): Promise<string> {
+  const workingState =
+    options?.pendingMarks &&
+    (options.pendingMarks.connectedNodeIds.size > 0 || options.pendingMarks.builtEdgeIds.size > 0)
+      ? applyRestoredGraphMarks(state, options.pendingMarks, { healGaps: true })
+      : state;
+
+  const core = packLocalCoreV2(workingState, null);
+  const graph = packLocalGraphV2(workingState, { includeCustomBridges: true });
+  const savedAt = Math.max(0, Math.floor(options?.savedAt ?? Date.now()));
+  const slotName = (
+    options?.slotName?.trim() ||
+    `${workingState.startingCity?.name || '도시'} 세이브`
+  ).slice(0, 60);
+
+  const bundle: ExportedSaveBundleV1 = {
+    v: 1,
+    slotName,
+    savedAt,
+    core,
+    graph,
+  };
+
+  const json = JSON.stringify(bundle);
+  const rawBytes = utf8Encoder.encode(json);
+  const compressed = await gzipBytes(rawBytes);
+
+  if (compressed && compressed.length > 0) {
+    return `${EXPORT_SAVE_PREFIX_GZIP}${uint8ToBase64(compressed)}`;
+  }
+  return `${EXPORT_SAVE_PREFIX_JSON}${uint8ToBase64(rawBytes)}`;
+}
+
+export async function decodeImportedSaveString(
+  rawText: string
+): Promise<DecodedImportPreview> {
+  const trimmed = (rawText || '').trim();
+  if (!trimmed) {
+    throw new Error('세이브 코드를 입력하거나 파일을 선택해 주세요.');
+  }
+
+  let format: DecodedImportPreview['format'];
+  let jsonText = '';
+
+  if (trimmed.startsWith(EXPORT_SAVE_PREFIX_GZIP)) {
+    format = 'terraline1';
+    const b64 = trimmed.slice(EXPORT_SAVE_PREFIX_GZIP.length).replace(/\s+/g, '');
+    if (!b64) {
+      throw new Error('세이브 코드 본문이 비어 있습니다.');
+    }
+    let bytes: Uint8Array;
+    try {
+      bytes = base64ToUint8(b64);
+    } catch {
+      throw new Error('올바른 Base64 세이브 코드가 아닙니다. 일부 문자가 누락되었을 수 있습니다.');
+    }
+    const raw = await gunzipBytes(bytes);
+    if (!raw) {
+      throw new Error('세이브 코드 압축 해제에 실패했습니다. 코드가 손상되었거나 잘렸습니다.');
+    }
+    jsonText = utf8Decoder.decode(raw);
+  } else if (trimmed.startsWith(EXPORT_SAVE_PREFIX_JSON)) {
+    format = 'terraline-json1';
+    const b64 = trimmed.slice(EXPORT_SAVE_PREFIX_JSON.length).replace(/\s+/g, '');
+    if (!b64) {
+      throw new Error('세이브 코드 본문이 비어 있습니다.');
+    }
+    try {
+      const bytes = base64ToUint8(b64);
+      jsonText = utf8Decoder.decode(bytes);
+    } catch {
+      throw new Error('세이브 코드 디코딩에 실패했습니다. 일부 문자가 누락되었을 수 있습니다.');
+    }
+  } else if (trimmed.startsWith('{')) {
+    format = 'raw-json';
+    jsonText = trimmed;
+  } else {
+    throw new Error(
+      '지원하지 않는 세이브 형식입니다. TERRALINE1: 로 시작하는 세이브 코드나 JSON 파일을 사용해 주세요.'
+    );
+  }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(jsonText) as Record<string, unknown>;
+  } catch {
+    throw new Error('세이브 데이터의 JSON 구문이 손상되어 읽을 수 없습니다.');
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('세이브 데이터 구조가 올바르지 않습니다.');
+  }
+
+  let hydrated: GameState | null = null;
+  let importedSlotName = '';
+  let importedSavedAt = Date.now();
+
+  if (
+    parsed.v === 1 &&
+    parsed.core &&
+    typeof parsed.core === 'object' &&
+    (parsed.core as CompactLocalCoreV2).v === 2
+  ) {
+    const bundle = parsed as unknown as ExportedSaveBundleV1;
+    const city = bundle.core?.startingCity;
+    if (
+      !city ||
+      typeof city.id !== 'string' ||
+      !city.id.trim() ||
+      typeof city.name !== 'string' ||
+      !city.name.trim() ||
+      !Number.isFinite(city.lat) ||
+      !Number.isFinite(city.lng)
+    ) {
+      throw new Error('세이브 파일에 유효한 시작 도시 정보가 없습니다.');
+    }
+
+    const graphObj =
+      bundle.graph && typeof bundle.graph === 'object' && Array.isArray(bundle.graph.nodes) && Array.isArray(bundle.graph.edges)
+        ? bundle.graph
+        : null;
+
+    const unpacked = unpackLocalV2ToRawGameState(bundle.core, graphObj);
+    const baseHydrated = hydrateRawGameState(unpacked, { trustedV2: true });
+    if (!baseHydrated) {
+      throw new Error('세이브 데이터를 게임 상태로 복원하지 못했습니다.');
+    }
+
+    const marks: RestoredGraphMarks = {
+      connectedNodeIds: new Set(bundle.core.connectedNodeIds || []),
+      builtEdgeIds: new Set(bundle.core.builtEdgeIds || []),
+      customBridgeEdges: Array.isArray(bundle.core.customBridgeEdges)
+        ? bundle.core.customBridgeEdges
+        : [],
+    };
+
+    hydrated =
+      marks.connectedNodeIds.size > 0 || marks.builtEdgeIds.size > 0
+        ? applyRestoredGraphMarks(baseHydrated, marks, { healGaps: true })
+        : baseHydrated;
+
+    importedSlotName = typeof bundle.slotName === 'string' ? bundle.slotName.trim() : '';
+    importedSavedAt = Number.isFinite(bundle.savedAt) && bundle.savedAt > 0
+      ? Math.floor(bundle.savedAt)
+      : hydrated.lastTickTimestamp || Date.now();
+  } else {
+    const rawCandidate = parsed as unknown as GameState;
+    if (
+      !rawCandidate.startingCity ||
+      typeof rawCandidate.startingCity.name !== 'string' ||
+      !Number.isFinite(rawCandidate.startingCity.lat) ||
+      !Number.isFinite(rawCandidate.startingCity.lng)
+    ) {
+      throw new Error('인식할 수 있는 Road Incremental 세이브 데이터가 아닙니다.');
+    }
+    hydrated = hydrateRawGameState(rawCandidate);
+    importedSavedAt =
+      Number.isFinite(rawCandidate.lastTickTimestamp) && rawCandidate.lastTickTimestamp > 0
+        ? Math.floor(rawCandidate.lastTickTimestamp)
+        : Date.now();
+  }
+
+  if (!hydrated) {
+    throw new Error('세이브 데이터를 게임 상태로 복원하지 못했습니다.');
+  }
+
+  const rank = getNodeTierRank(hydrated.stats?.connectedOsmNodes || 0);
+  const cityName = (hydrated.startingCity.name || '도시').trim() || '도시';
+
+  return {
+    format,
+    slotName: (importedSlotName || `${cityName} 세이브`).slice(0, 60),
+    savedAt: importedSavedAt,
+    cityName,
+    cityCountry: hydrated.startingCity.country || '',
+    capital: Math.max(0, Number(hydrated.capital) || 0),
+    mapped1to1Km: Math.max(0, Number(hydrated.stats?.mapped1to1Km) || 0),
+    connectedOsmNodes: Math.max(0, Math.floor(hydrated.stats?.connectedOsmNodes || 0)),
+    totalOsmEdgesBuilt: Math.max(0, Math.floor(hydrated.stats?.totalOsmEdgesBuilt || 0)),
+    totalNodesInSnapshot: (hydrated.osmNodes || []).length,
+    totalEdgesInSnapshot: (hydrated.osmEdges || []).length,
+    tierLabel: rank.label,
+    state: hydrated,
+  };
+}
+
+export async function importDecodedSaveIntoSlot(
+  slotId: SaveSlotId,
+  preview: DecodedImportPreview,
+  options?: {
+    slotName?: string;
+    storage?: Storage;
+  }
+): Promise<SaveSlotSummary> {
+  const slotName = (
+    options?.slotName?.trim() ||
+    defaultSlotName(slotId, preview.cityName)
+  ).slice(0, 60);
+
+  const summary = saveLocalSlotGameState(slotId, preview.state, {
+    slotName,
+    storage: options?.storage,
+    savedAt: Date.now(),
+    forceGraphWrite: true,
+    pendingMarks: null,
+  });
+
+  if (!options?.storage) {
+    await saveLocalSlotGraphToIndexedDb(slotId, preview.state).catch(() => undefined);
+  }
+
+  return summary;
+}
+

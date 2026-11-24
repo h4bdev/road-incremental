@@ -1,7 +1,6 @@
 import React from 'react';
 import {
   Award,
-  Cloud,
   Gamepad2,
   Globe,
   HelpCircle,
@@ -36,8 +35,6 @@ interface HUDProps {
   activeModal: ModalTab;
   hasMapBottomCard?: boolean;
   activeSlotIndex: number;
-  isSignedIn: boolean;
-  isSyncing?: boolean;
   tutorialOpen?: boolean;
   onSelectModal: (tab: ModalTab) => void;
   onDispatchClick: () => void;
@@ -51,8 +48,6 @@ const HUDComponent: React.FC<HUDProps> = ({
   activeModal,
   hasMapBottomCard = false,
   activeSlotIndex,
-  isSignedIn,
-  isSyncing = false,
   tutorialOpen = false,
   onSelectModal,
   onDispatchClick,
@@ -151,19 +146,15 @@ const HUDComponent: React.FC<HUDProps> = ({
           <button
             data-testid="hud-save-slots-button"
             onClick={() => toggleTab('saves')}
-            aria-label="저장 슬롯 및 계정"
-            title="저장 슬롯 (1~5) · 자금 조정 · 클라우드 동기화"
+            aria-label="저장 슬롯 및 내보내기/가져오기"
+            title="저장 슬롯 (1~5) · 내보내기 / 가져오기 · 자금 조정"
             className={`relative min-w-[36px] min-h-[36px] sm:min-w-0 sm:min-h-0 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
               activeModal === 'saves'
                 ? 'bg-sky-600 text-white'
                 : 'text-slate-200 hover:text-white hover:bg-slate-800'
             }`}
           >
-            {isSignedIn ? (
-              <Cloud className={`w-4 h-4 sm:w-3.5 sm:h-3.5 ${isSyncing ? 'animate-pulse text-sky-300' : 'text-emerald-400'}`} />
-            ) : (
-              <Save className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-sky-400" />
-            )}
+            <Save className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-sky-400" />
             <span className="hidden md:inline">슬롯 {activeSlotIndex}</span>
             {hasLegacyInflatedCapital && (
               <span

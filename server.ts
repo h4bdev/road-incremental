@@ -38,7 +38,7 @@ async function startServer() {
       allowStarterFallback?: boolean;
       bypassCache?: boolean;
     };
-    const rawCoords = Array.isArray(body?.coords) ? body.coords.slice(0, 24) : [];
+    const rawCoords = Array.isArray(body?.coords) ? body.coords.slice(0, 64) : [];
     const validCoords = rawCoords
       .map((c) => ({ lat: Number(c?.lat), lng: Number(c?.lng) }))
       .filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lng));

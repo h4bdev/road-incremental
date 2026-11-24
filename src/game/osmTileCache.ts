@@ -64,6 +64,38 @@ const memSlotGraphs = new Map<string, CachedSlotGraphSnapshot>();
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 let idbDisabled = false;
 
+const IDB_OPEN_TIMEOUT_MS = 2500;
+const IDB_READ_TIMEOUT_MS = 2000;
+const IDB_WRITE_TIMEOUT_MS = 3000;
+
+function withIdbTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(fallback);
+      }
+    }, ms);
+    promise.then(
+      (val) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(val);
+        }
+      },
+      () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(fallback);
+        }
+      }
+    );
+  });
+}
+
 export function hasIndexedDb(): boolean {
   return !idbDisabled && typeof indexedDB !== 'undefined';
 }
@@ -72,7 +104,7 @@ function openCacheDb(): Promise<IDBDatabase | null> {
   if (!hasIndexedDb()) return Promise.resolve(null);
   if (dbPromise) return dbPromise;
 
-  dbPromise = new Promise<IDBDatabase | null>((resolve) => {
+  const rawOpenPromise = new Promise<IDBDatabase | null>((resolve) => {
     try {
       const req = indexedDB.open(DB_NAME, DB_VERSION);
       req.onupgradeneeded = (ev) => {
@@ -95,6 +127,9 @@ function openCacheDb(): Promise<IDBDatabase | null> {
           db.close();
           dbPromise = null;
         };
+        db.onclose = () => {
+          dbPromise = null;
+        };
         resolve(db);
       };
       req.onerror = () => {
@@ -103,68 +138,94 @@ function openCacheDb(): Promise<IDBDatabase | null> {
         resolve(null);
       };
       req.onblocked = () => {
+        dbPromise = null;
         resolve(null);
       };
     } catch {
       idbDisabled = true;
+      dbPromise = null;
       resolve(null);
     }
+  });
+
+  dbPromise = withIdbTimeout(rawOpenPromise, IDB_OPEN_TIMEOUT_MS, null).then((db) => {
+    if (!db) {
+      dbPromise = null;
+    }
+    return db;
   });
 
   return dbPromise;
 }
 
 function runIdbGet<T>(storeName: string, key: string): Promise<T | null> {
-  return openCacheDb().then((db) => {
-    if (!db) return null;
-    return new Promise<T | null>((resolve) => {
-      try {
-        const tx = db.transaction(storeName, 'readonly');
-        const store = tx.objectStore(storeName);
-        const req = store.get(key);
-        req.onsuccess = () => resolve((req.result as T | undefined) ?? null);
-        req.onerror = () => resolve(null);
-      } catch {
-        resolve(null);
-      }
-    });
-  });
+  return withIdbTimeout(
+    openCacheDb().then((db) => {
+      if (!db) return null;
+      return new Promise<T | null>((resolve) => {
+        try {
+          const tx = db.transaction(storeName, 'readonly');
+          const store = tx.objectStore(storeName);
+          const req = store.get(key);
+          req.onsuccess = () => resolve((req.result as T | undefined) ?? null);
+          req.onerror = () => resolve(null);
+          tx.onerror = () => resolve(null);
+          tx.onabort = () => resolve(null);
+        } catch {
+          dbPromise = null;
+          resolve(null);
+        }
+      });
+    }),
+    IDB_READ_TIMEOUT_MS,
+    null
+  );
 }
 
 function runIdbPut<T>(storeName: string, value: T): Promise<void> {
-  return openCacheDb().then((db) => {
-    if (!db) return;
-    return new Promise<void>((resolve) => {
-      try {
-        const tx = db.transaction(storeName, 'readwrite');
-        const store = tx.objectStore(storeName);
-        store.put(value);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => resolve();
-        tx.onabort = () => resolve();
-      } catch {
-        resolve();
-      }
-    });
-  });
+  return withIdbTimeout(
+    openCacheDb().then((db) => {
+      if (!db) return;
+      return new Promise<void>((resolve) => {
+        try {
+          const tx = db.transaction(storeName, 'readwrite');
+          const store = tx.objectStore(storeName);
+          store.put(value);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+          tx.onabort = () => resolve();
+        } catch {
+          dbPromise = null;
+          resolve();
+        }
+      });
+    }),
+    IDB_WRITE_TIMEOUT_MS,
+    undefined
+  );
 }
 
 function runIdbDelete(storeName: string, key: string): Promise<void> {
-  return openCacheDb().then((db) => {
-    if (!db) return;
-    return new Promise<void>((resolve) => {
-      try {
-        const tx = db.transaction(storeName, 'readwrite');
-        const store = tx.objectStore(storeName);
-        store.delete(key);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => resolve();
-        tx.onabort = () => resolve();
-      } catch {
-        resolve();
-      }
-    });
-  });
+  return withIdbTimeout(
+    openCacheDb().then((db) => {
+      if (!db) return;
+      return new Promise<void>((resolve) => {
+        try {
+          const tx = db.transaction(storeName, 'readwrite');
+          const store = tx.objectStore(storeName);
+          store.delete(key);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+          tx.onabort = () => resolve();
+        } catch {
+          dbPromise = null;
+          resolve();
+        }
+      });
+    }),
+    IDB_WRITE_TIMEOUT_MS,
+    undefined
+  );
 }
 
 export async function getCachedOsmTile(tileKey: string): Promise<CachedOsmTile | null> {
@@ -198,27 +259,32 @@ export async function getCachedOsmTilesBatch(
   const db = await openCacheDb();
   if (!db) return result;
 
-  await new Promise<void>((resolve) => {
-    try {
-      const tx = db.transaction(STORE_TILES, 'readonly');
-      const store = tx.objectStore(STORE_TILES);
-      for (const key of missing) {
-        const req = store.get(key);
-        req.onsuccess = () => {
-          const val = req.result as CachedOsmTile | undefined;
-          if (val && Array.isArray(val.osmNodes) && val.osmNodes.length > 0) {
-            memTiles.set(key, val);
-            result.set(key, val);
-          }
-        };
+  await withIdbTimeout(
+    new Promise<void>((resolve) => {
+      try {
+        const tx = db.transaction(STORE_TILES, 'readonly');
+        const store = tx.objectStore(STORE_TILES);
+        for (const key of missing) {
+          const req = store.get(key);
+          req.onsuccess = () => {
+            const val = req.result as CachedOsmTile | undefined;
+            if (val && Array.isArray(val.osmNodes) && val.osmNodes.length > 0) {
+              memTiles.set(key, val);
+              result.set(key, val);
+            }
+          };
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+        tx.onabort = () => resolve();
+      } catch {
+        dbPromise = null;
+        resolve();
       }
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
-      tx.onabort = () => resolve();
-    } catch {
-      resolve();
-    }
-  });
+    }),
+    IDB_READ_TIMEOUT_MS,
+    undefined
+  );
 
   return result;
 }
@@ -259,20 +325,25 @@ export async function putCachedOsmTilesBatch(tiles: CachedOsmTile[]): Promise<vo
   const db = await openCacheDb();
   if (!db) return;
 
-  await new Promise<void>((resolve) => {
-    try {
-      const tx = db.transaction(STORE_TILES, 'readwrite');
-      const store = tx.objectStore(STORE_TILES);
-      for (let i = 0; i < valid.length; i++) {
-        store.put(valid[i]);
+  await withIdbTimeout(
+    new Promise<void>((resolve) => {
+      try {
+        const tx = db.transaction(STORE_TILES, 'readwrite');
+        const store = tx.objectStore(STORE_TILES);
+        for (let i = 0; i < valid.length; i++) {
+          store.put(valid[i]);
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+        tx.onabort = () => resolve();
+      } catch {
+        dbPromise = null;
+        resolve();
       }
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
-      tx.onabort = () => resolve();
-    } catch {
-      resolve();
-    }
-  });
+    }),
+    IDB_WRITE_TIMEOUT_MS,
+    undefined
+  );
 }
 
 export async function getCachedOsmRegion(regionId: string): Promise<CachedOsmRegion | null> {
@@ -306,27 +377,32 @@ export async function getCachedOsmRegionsByIds(
   const db = await openCacheDb();
   if (!db) return result;
 
-  await new Promise<void>((resolve) => {
-    try {
-      const tx = db.transaction(STORE_REGIONS, 'readonly');
-      const store = tx.objectStore(STORE_REGIONS);
-      for (const id of missing) {
-        const req = store.get(id);
-        req.onsuccess = () => {
-          const val = req.result as CachedOsmRegion | undefined;
-          if (val) {
-            memRegions.set(id, val);
-            result.set(id, val);
-          }
-        };
+  await withIdbTimeout(
+    new Promise<void>((resolve) => {
+      try {
+        const tx = db.transaction(STORE_REGIONS, 'readonly');
+        const store = tx.objectStore(STORE_REGIONS);
+        for (const id of missing) {
+          const req = store.get(id);
+          req.onsuccess = () => {
+            const val = req.result as CachedOsmRegion | undefined;
+            if (val) {
+              memRegions.set(id, val);
+              result.set(id, val);
+            }
+          };
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+        tx.onabort = () => resolve();
+      } catch {
+        dbPromise = null;
+        resolve();
       }
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
-      tx.onabort = () => resolve();
-    } catch {
-      resolve();
-    }
-  });
+    }),
+    IDB_READ_TIMEOUT_MS,
+    undefined
+  );
 
   return result;
 }
@@ -341,27 +417,32 @@ export async function getAllCachedOsmRegions(): Promise<CachedOsmRegion[]> {
     return Array.from(byId.values());
   }
 
-  await new Promise<void>((resolve) => {
-    try {
-      const tx = db.transaction(STORE_REGIONS, 'readonly');
-      const store = tx.objectStore(STORE_REGIONS);
-      const req = store.getAll();
-      req.onsuccess = () => {
-        const rows = (req.result as CachedOsmRegion[] | undefined) || [];
-        for (const val of rows) {
-          if (val && val.regionId) {
-            memRegions.set(val.regionId, val);
-            byId.set(val.regionId, val);
+  await withIdbTimeout(
+    new Promise<void>((resolve) => {
+      try {
+        const tx = db.transaction(STORE_REGIONS, 'readonly');
+        const store = tx.objectStore(STORE_REGIONS);
+        const req = store.getAll();
+        req.onsuccess = () => {
+          const rows = (req.result as CachedOsmRegion[] | undefined) || [];
+          for (const val of rows) {
+            if (val && val.regionId) {
+              memRegions.set(val.regionId, val);
+              byId.set(val.regionId, val);
+            }
           }
-        }
-      };
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
-      tx.onabort = () => resolve();
-    } catch {
-      resolve();
-    }
-  });
+        };
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+        tx.onabort = () => resolve();
+      } catch {
+        dbPromise = null;
+        resolve();
+      }
+    }),
+    IDB_READ_TIMEOUT_MS,
+    undefined
+  );
 
   return Array.from(byId.values());
 }

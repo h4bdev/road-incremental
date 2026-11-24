@@ -1750,12 +1750,12 @@ export async function loadOsmRoadChunksBatchDirect(
     pendingCoords.push(pt);
   }
 
-  // Group nearby chunks into compact bounding-box clusters (<= 0.014 deg lat x 0.018 deg lng, max 8 chunks)
+  // Group nearby chunks into macro bounding-box clusters (<= 0.065 deg lat x 0.085 deg lng, max 48 chunks)
   const clusters: Array<Array<{ key: string; lat: number; lng: number }>> = [];
   for (const pt of pendingCoords) {
     let targetCluster: Array<{ key: string; lat: number; lng: number }> | null = null;
     for (const cl of clusters) {
-      if (cl.length >= 8) continue;
+      if (cl.length >= 48) continue;
       let minLat = pt.lat;
       let maxLat = pt.lat;
       let minLng = pt.lng;
@@ -1766,7 +1766,7 @@ export async function loadOsmRoadChunksBatchDirect(
         if (item.lng < minLng) minLng = item.lng;
         if (item.lng > maxLng) maxLng = item.lng;
       }
-      if (maxLat - minLat <= 0.014 && maxLng - minLng <= 0.018) {
+      if (maxLat - minLat <= 0.065 && maxLng - minLng <= 0.085) {
         targetCluster = cl;
         break;
       }
@@ -1778,7 +1778,7 @@ export async function loadOsmRoadChunksBatchDirect(
     }
   }
 
-  const MAX_CONCURRENT_CLUSTERS = 2;
+  const MAX_CONCURRENT_CLUSTERS = 4;
   for (let start = 0; start < clusters.length; start += MAX_CONCURRENT_CLUSTERS) {
     const wave = clusters.slice(start, start + MAX_CONCURRENT_CLUSTERS);
     await Promise.allSettled(
@@ -1803,7 +1803,7 @@ export async function loadOsmRoadChunksBatchDirect(
           minLng - 0.0062,
           maxLat + 0.0048,
           maxLng + 0.0062,
-          10500
+          12500
         );
         const failedPoints: Array<{ key: string; lat: number; lng: number }> = [];
         if (raw) {
@@ -1818,16 +1818,19 @@ export async function loadOsmRoadChunksBatchDirect(
         }
 
         if (failedPoints.length > 0) {
-          for (let fStart = 0; fStart < failedPoints.length; fStart += 2) {
-            const fSlice = failedPoints.slice(fStart, fStart + 2);
-            const fallbacks = await Promise.allSettled(
-              fSlice.map((pt) => loadOsmRoadChunkDirect(pt.lat, pt.lng, options))
-            );
-            for (let k = 0; k < fallbacks.length; k++) {
-              const fb = fallbacks[k];
-              if (fb.status === 'fulfilled') {
-                resultsByKey.set(fSlice[k].key, fb.value);
-              }
+          for (const pt of failedPoints) {
+            if (options?.allowStarterFallback !== false) {
+              const fb = buildFallbackStarterGrid(pt.key, pt.lat, pt.lng);
+              resultsByKey.set(pt.key, fb);
+            } else {
+              resultsByKey.set(pt.key, {
+                chunkKey: pt.key,
+                osmNodes: [],
+                osmEdges: [],
+                usedLiveOverpass: false,
+                source: 'osm-0.6-api',
+                wayCount: 0,
+              });
             }
           }
         }

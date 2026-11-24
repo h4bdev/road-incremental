@@ -1,73 +1,64 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  AlertTriangle,
+  ArrowLeftRight,
   Check,
-  Cloud,
-  CloudOff,
-  CloudUpload,
   Globe,
   HardDrive,
   Loader2,
-  LogIn,
-  LogOut,
   MapPin,
   Pencil,
   Play,
-  RefreshCw,
   Search,
   TrainTrack,
   Trash2,
+  X,
 } from 'lucide-react';
 import { StartingCity } from '../game/types';
 import { PRESET_CITIES } from '../game/worldCatalog';
 import { searchCityNominatim } from '../game/osmService';
 import {
+  DecodedImportPreview,
   SAVE_SLOT_IDS,
   SaveSlotId,
   SaveSlotSummary,
   slotIndexFromId,
 } from '../game/saveSlots';
-import { AccountViewInfo, formatSlotTime } from './SaveSlotsModal';
+import { formatSlotTime } from './SaveSlotsModal';
+import { SaveTransferPanel } from './SaveTransferPanel';
 import { formatMoneyCompact } from '../game/format';
 
 interface TitleScreenProps {
-  account: AccountViewInfo | null;
-  authLoading: boolean;
-  isSyncing: boolean;
-  syncError: string | null;
   activeSlotId: SaveSlotId;
   slots: Record<SaveSlotId, SaveSlotSummary | null>;
   busySlotId: SaveSlotId | null;
   loadingProgress?: { active: boolean; percent: number; label: string } | null;
-  onSignIn: () => Promise<void>;
-  onSignOut: () => Promise<void>;
-  onRefreshCloud: () => Promise<void>;
   onStartWithCity: (city: StartingCity, slotId: SaveSlotId) => Promise<void>;
   onLoadSlot: (slotId: SaveSlotId) => Promise<void>;
-  onResolveConflict?: (slotId: SaveSlotId) => void;
   onRenameSlot: (slotId: SaveSlotId, newName: string) => Promise<void>;
   onDeleteSlot: (slotId: SaveSlotId) => Promise<void>;
-  onUploadLocalSlotToCloud: (slotId: SaveSlotId) => Promise<void>;
+  onExportSlot: (slotId: SaveSlotId) => Promise<{
+    code: string;
+    summary: SaveSlotSummary;
+    fileName: string;
+  }>;
+  onImportSave: (
+    targetSlotId: SaveSlotId,
+    preview: DecodedImportPreview,
+    launchNow: boolean
+  ) => Promise<void>;
 }
 
 export const TitleScreen: React.FC<TitleScreenProps> = ({
-  account,
-  authLoading,
-  isSyncing,
-  syncError,
   activeSlotId,
   slots,
   busySlotId,
   loadingProgress,
-  onSignIn,
-  onSignOut,
-  onRefreshCloud,
   onStartWithCity,
   onLoadSlot,
-  onResolveConflict,
   onRenameSlot,
   onDeleteSlot,
-  onUploadLocalSlotToCloud,
+  onExportSlot,
+  onImportSave,
 }) => {
   const firstEmptySlot = useMemo(
     () => SAVE_SLOT_IDS.find((id) => !slots[id]) || activeSlotId,
@@ -84,6 +75,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   const [editingSlot, setEditingSlot] = useState<SaveSlotId | null>(null);
   const [draftName, setDraftName] = useState('');
   const [confirmDeleteSlot, setConfirmDeleteSlot] = useState<SaveSlotId | null>(null);
+  const [transferModalOpen, setTransferModalOpen] = useState(false);
 
   const savedSlotsList = useMemo(
     () => SAVE_SLOT_IDS.map((id) => slots[id]).filter((s): s is SaveSlotSummary => Boolean(s)),
@@ -93,7 +85,6 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   const hasAnySavedGame = savedSlotsList.length > 0;
 
   useEffect(() => {
-    // Auto-point new game target to first empty slot if current target got filled externally
     if (slots[targetNewSlotId] && firstEmptySlot !== targetNewSlotId && !slots[firstEmptySlot]) {
       setTargetNewSlotId(firstEmptySlot);
     }
@@ -112,6 +103,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (document.activeElement?.tagName === 'INPUT') return;
+      if (document.activeElement?.tagName === 'TEXTAREA') return;
       if (document.querySelector('[role="dialog"]')) return;
       if (e.code === 'Enter' || e.code === 'Space') {
         e.preventDefault();
@@ -145,91 +137,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col items-center justify-start px-3 py-3 sm:p-6 bg-[#090d16] text-slate-100 overflow-y-auto">
-      <div className="w-full max-w-4xl flex flex-col items-center py-1 sm:py-3">
-        {/* Account & Cloud Sync Top Bar */}
-        <div
-          data-testid="title-account-bar"
-          className="w-full mb-3 sm:mb-4 p-2.5 sm:px-4 sm:py-2.5 rounded-xl bg-slate-900/90 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
-        >
-          {authLoading ? (
-            <div className="flex items-center gap-2 text-xs text-slate-400">
-              <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
-              클라우드 계정 확인 중...
-            </div>
-          ) : account ? (
-            <>
-              <div className="flex items-center gap-2.5 min-w-0">
-                {account.photoURL ? (
-                  <img
-                    src={account.photoURL}
-                    alt={account.displayName}
-                    className="w-8 h-8 rounded-full border border-slate-700 shrink-0 object-cover"
-                    referrerPolicy="no-referrer"
-                  />
-                ) : (
-                  <div className="w-8 h-8 rounded-full bg-sky-600/30 border border-sky-500/40 flex items-center justify-center text-xs font-bold text-sky-300 shrink-0">
-                    {account.displayName.slice(0, 1).toUpperCase()}
-                  </div>
-                )}
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs sm:text-sm font-bold text-white truncate">
-                      {account.displayName}
-                    </span>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 shrink-0">
-                      클라우드 동기화 활성
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-slate-400 truncate">{account.email}</div>
-                </div>
-              </div>
-              <div className="flex items-center gap-1.5 shrink-0">
-                <button
-                  type="button"
-                  disabled={isSyncing}
-                  onClick={() => void onRefreshCloud()}
-                  className="min-h-[36px] px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1.5 cursor-pointer"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
-                  동기화 새로고침
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void onSignOut()}
-                  className="min-h-[36px] px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs flex items-center gap-1 cursor-pointer"
-                >
-                  <LogOut className="w-3.5 h-3.5" />
-                  로그아웃
-                </button>
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="flex items-center gap-2 min-w-0">
-                <CloudOff className="w-4 h-4 text-slate-400 shrink-0" />
-                <span className="text-xs text-slate-300">
-                  Google 계정으로 로그인하면 5개 저장 슬롯의 진척도가 클라우드에 자동 동기화됩니다.
-                </span>
-              </div>
-              <button
-                type="button"
-                data-testid="google-login-button"
-                onClick={() => void onSignIn()}
-                className="min-h-[38px] px-4 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
-              >
-                <LogIn className="w-3.5 h-3.5" />
-                Google 로그인
-              </button>
-            </>
-          )}
-        </div>
-
-        {syncError && (
-          <div className="w-full mb-3 rounded-lg bg-rose-950/60 border border-rose-500/40 px-3 py-2 text-xs text-rose-200">
-            {syncError}
-          </div>
-        )}
-
+      <div className="w-full max-w-4xl flex flex-col items-center py-2 sm:py-4">
         {/* Emblem + Brand */}
         <div className="w-11 h-11 sm:w-14 sm:h-14 rounded-2xl bg-sky-500/15 border border-sky-400/30 flex items-center justify-center mb-2 sm:mb-3">
           <svg
@@ -253,47 +161,59 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
         <h1 className="text-2xl sm:text-4xl md:text-5xl font-extrabold tracking-tight text-white font-heading text-center">
           Road <span className="text-sky-400">Incremental</span>
         </h1>
-        <p className="text-slate-300 text-xs sm:text-sm text-center max-w-xl mt-1.5 mb-3.5 sm:mb-5 leading-relaxed">
+        <p className="text-slate-300 text-xs sm:text-sm text-center max-w-xl mt-1.5 mb-4 sm:mb-5 leading-relaxed">
           1:1 실제 세계 지도 위에서 도로와 철도 노드를 연결하고, 자금을 모아 광역 행정구역을 개척하며 세계 교통망을 넓혀가는 인크리멘탈 게임.
         </p>
 
-        {/* 5 Save Slots Box */}
+        {/* 5 Local Save Slots Box */}
         <div
           data-testid="title-save-slots"
           className="w-full max-w-3xl mb-3.5 sm:mb-4 p-3 sm:p-4 rounded-2xl bg-[#101829] border border-slate-800 space-y-2.5"
         >
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div>
               <h2 className="text-sm sm:text-base font-bold text-slate-100">
                 저장 슬롯 ({savedSlotsList.length}/5 사용 중)
               </h2>
               <p className="text-[11px] sm:text-xs text-slate-400">
-                저장된 슬롯을 이어하거나, 새 도시를 시작할 슬롯 번호를 선택하세요.
+                로컬 슬롯을 바로 이어하거나, 세이브 코드·파일로 다른 기기 데이터를 가져올 수 있습니다.
               </p>
             </div>
-            {preferredResumeSlot && (
+            <div className="flex items-center gap-2 flex-wrap shrink-0">
               <button
                 type="button"
-                data-start="true"
-                disabled={busySlotId === preferredResumeSlot.slotId}
-                onClick={() => void onLoadSlot(preferredResumeSlot.slotId)}
-                className="min-h-[38px] px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap tabular-nums"
+                data-testid="title-transfer-button"
+                onClick={() => setTransferModalOpen(true)}
+                className="min-h-[38px] px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
               >
-                {busySlotId === preferredResumeSlot.slotId ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    {loadingProgress?.active
-                      ? `${loadingProgress.label} · ${loadingProgress.percent}%`
-                      : `슬롯 ${preferredResumeSlot.slotIndex} 불러오는 중...`}
-                  </>
-                ) : (
-                  <>
-                    <Play className="w-3.5 h-3.5 fill-current" />
-                    최근 슬롯 {preferredResumeSlot.slotIndex} 바로 이어하기
-                  </>
-                )}
+                <ArrowLeftRight className="w-3.5 h-3.5 text-sky-400" />
+                <span>세이브 가져오기 / 내보내기</span>
               </button>
-            )}
+
+              {preferredResumeSlot && (
+                <button
+                  type="button"
+                  data-start="true"
+                  disabled={busySlotId === preferredResumeSlot.slotId}
+                  onClick={() => void onLoadSlot(preferredResumeSlot.slotId)}
+                  className="min-h-[38px] px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap tabular-nums"
+                >
+                  {busySlotId === preferredResumeSlot.slotId ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      {loadingProgress?.active
+                        ? `${loadingProgress.label} · ${loadingProgress.percent}%`
+                        : `슬롯 ${preferredResumeSlot.slotIndex} 불러오는 중...`}
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-3.5 h-3.5 fill-current" />
+                      최근 슬롯 {preferredResumeSlot.slotIndex} 바로 이어하기
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
@@ -311,51 +231,23 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                   data-testid={`title-slot-${slotId}`}
                   onClick={() => setTargetNewSlotId(slotId)}
                   className={`rounded-xl border p-2.5 transition-colors cursor-pointer flex flex-col justify-between gap-2 ${
-                    summary?.hasConflict
-                      ? 'bg-amber-950/20 border-amber-500/70'
-                      : isSelectedTarget
+                    isSelectedTarget
                       ? 'bg-sky-500/10 border-sky-400/70'
                       : 'bg-slate-900/70 border-slate-800 hover:border-slate-700'
                   }`}
                 >
                   <div>
-                    <div className="flex items-center justify-between gap-1">
-                      <span className="text-[11px] font-bold text-slate-200 flex items-center gap-1">
-                        슬롯 {idx}
+                    <div className="flex items-center justify-between gap-1 text-[11px]">
+                      <span className="font-bold text-slate-200 flex items-center gap-1.5">
+                        <span>슬롯 {idx}</span>
                         {isSelectedTarget && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300">
-                            선택됨
-                          </span>
+                          <span className="text-sky-300 font-semibold">· 선택됨</span>
                         )}
                       </span>
                       {summary && (
-                        <span
-                          className={`text-[10px] px-1.5 py-0.5 rounded flex items-center gap-1 ${
-                            summary.hasConflict
-                              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold'
-                              : summary.source === 'synced'
-                              ? 'bg-emerald-500/15 text-emerald-300'
-                              : summary.source === 'cloud' || summary.hasNewerCloud
-                              ? 'bg-indigo-500/15 text-indigo-300'
-                              : 'bg-slate-800 text-slate-300'
-                          }`}
-                        >
-                          {summary.hasConflict ? (
-                            <AlertTriangle className="w-2.5 h-2.5" />
-                          ) : summary.source === 'local' ? (
-                            <HardDrive className="w-2.5 h-2.5" />
-                          ) : (
-                            <Cloud className="w-2.5 h-2.5" />
-                          )}
-                          {summary.hasConflict
-                            ? '충돌 · 선택'
-                            : summary.source === 'synced'
-                            ? '동기화'
-                            : summary.hasNewerCloud
-                            ? '클라우드 최신'
-                            : summary.source === 'cloud'
-                            ? '클라우드'
-                            : '로컬'}
+                        <span className="text-[10px] text-slate-400 flex items-center gap-1">
+                          <HardDrive className="w-2.5 h-2.5" />
+                          로컬
                         </span>
                       )}
                     </div>
@@ -433,58 +325,26 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                       className="flex items-center gap-1 pt-1 border-t border-slate-800/80"
                       onClick={(e) => e.stopPropagation()}
                     >
-                      {summary.hasConflict ? (
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() => {
-                            if (onResolveConflict) {
-                              onResolveConflict(slotId);
-                            } else {
-                              void onLoadSlot(slotId);
-                            }
-                          }}
-                          className="flex-1 min-h-[32px] px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
-                        >
-                          <AlertTriangle className="w-3 h-3" />
-                          <span>충돌 해결</span>
-                        </button>
-                      ) : (
-                        <>
-                          <button
-                            type="button"
-                            disabled={isBusy}
-                            onClick={() => void onLoadSlot(slotId)}
-                            className="flex-1 min-h-[32px] px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-[11px] font-semibold flex items-center justify-center gap-1 cursor-pointer tabular-nums"
-                          >
-                            {isBusy ? (
-                              <>
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                                <span>
-                                  {loadingProgress?.active ? `${loadingProgress.percent}%` : '불러오는 중'}
-                                </span>
-                              </>
-                            ) : (
-                              <>
-                                <Play className="w-3 h-3 fill-current" />
-                                <span>이어하기</span>
-                              </>
-                            )}
-                          </button>
-
-                          {account && summary.hasNewerLocal && (
-                            <button
-                              type="button"
-                              disabled={isBusy}
-                              title="로컬 저장본을 클라우드에 업로드"
-                              onClick={() => void onUploadLocalSlotToCloud(slotId)}
-                              className="min-h-[32px] px-2 py-1 rounded-lg bg-sky-600/80 hover:bg-sky-500 text-white text-[11px] flex items-center justify-center cursor-pointer"
-                            >
-                              <CloudUpload className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                        </>
-                      )}
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() => void onLoadSlot(slotId)}
+                        className="flex-1 min-h-[32px] px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-[11px] font-semibold flex items-center justify-center gap-1 cursor-pointer tabular-nums"
+                      >
+                        {isBusy ? (
+                          <>
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            <span>
+                              {loadingProgress?.active ? `${loadingProgress.percent}%` : '불러오는 중'}
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            <Play className="w-3 h-3 fill-current" />
+                            <span>이어하기</span>
+                          </>
+                        )}
+                      </button>
 
                       {confirmingDelete ? (
                         <>
@@ -693,6 +553,57 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
           지도 드래그·확대로 세계 탐색 · 도로·철도 노드를 차례로 클릭해 연결 · Enter 또는 Space로 시작
         </span>
       </div>
+
+      {/* Title Screen Export / Import Modal */}
+      {transferModalOpen && (
+        <div
+          className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-xs sm:p-4"
+          onClick={() => setTransferModalOpen(false)}
+        >
+          <section
+            role="dialog"
+            data-testid="title-transfer-modal"
+            aria-label="세이브 가져오기 및 내보내기"
+            onClick={(e) => e.stopPropagation()}
+            className="w-full sm:max-w-2xl max-h-[88dvh] bg-[#0b1220] border border-slate-800 rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+          >
+            <header className="px-4 py-3.5 border-b border-slate-800 flex items-center justify-between gap-2 bg-slate-950/70">
+              <div>
+                <h2 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                  <ArrowLeftRight className="w-4 h-4 text-sky-400" />
+                  세이브 가져오기 · 내보내기
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  세이브 코드나 파일(.txt / .json)을 불러와 원하는 슬롯에 복원하거나 현재 슬롯을 백업합니다.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTransferModalOpen(false)}
+                aria-label="닫기"
+                className="min-w-[40px] min-h-[40px] rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </header>
+            <div className="flex-1 overflow-y-auto p-3.5 sm:p-4">
+              <SaveTransferPanel
+                slots={slots}
+                defaultSlotId={activeSlotId}
+                initialMode="import"
+                isPlayingActiveSlot={false}
+                onExportSlot={onExportSlot}
+                onImportSave={async (targetSlotId, preview, launchNow) => {
+                  await onImportSave(targetSlotId, preview, launchNow);
+                  if (launchNow) {
+                    setTransferModalOpen(false);
+                  }
+                }}
+              />
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 };

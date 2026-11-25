@@ -37,6 +37,7 @@ import {
   getRegionUnlockCost,
   getUnseededIslandNodeIds,
   isNodeInUnlockedRegion,
+  isOsmNodePedestrianOnly,
   isPointInRegionBoundary,
   MAX_OSM_FRONTIER_DISTANCE,
   resolveCompatibleOsmMode,
@@ -563,7 +564,6 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
               ['!=', ['get', 'highwayType'], 'path'],
               ['!=', ['get', 'highwayType'], 'cycleway'],
               ['!=', ['get', 'highwayType'], 'track'],
-              ['!=', ['get', 'highwayType'], 'service'],
             ],
             layout: { 'line-cap': 'butt', 'line-join': 'round' },
             paint: {
@@ -585,7 +585,6 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
               ['==', ['get', 'highwayType'], 'path'],
               ['==', ['get', 'highwayType'], 'cycleway'],
               ['==', ['get', 'highwayType'], 'track'],
-              ['==', ['get', 'highwayType'], 'service'],
             ],
             layout: { 'line-cap': 'butt', 'line-join': 'round' },
             paint: {
@@ -630,8 +629,6 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
                 '#022c22',
                 ['==', ['get', 'highwayType'], 'track'],
                 '#022c22',
-                ['==', ['get', 'highwayType'], 'service'],
-                '#022c22',
                 '#291a05',
               ],
               'line-width': [
@@ -647,8 +644,6 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
                 ['==', ['get', 'highwayType'], 'cycleway'],
                 5.8,
                 ['==', ['get', 'highwayType'], 'track'],
-                5.8,
-                ['==', ['get', 'highwayType'], 'service'],
                 5.8,
                 6.8,
               ],
@@ -676,8 +671,6 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
                 '#34d399',
                 ['==', ['get', 'highwayType'], 'track'],
                 '#34d399',
-                ['==', ['get', 'highwayType'], 'service'],
-                '#34d399',
                 '#f59e0b',
               ],
               'line-width': [
@@ -693,8 +686,6 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
                 ['==', ['get', 'highwayType'], 'cycleway'],
                 3.0,
                 ['==', ['get', 'highwayType'], 'track'],
-                3.0,
-                ['==', ['get', 'highwayType'], 'service'],
                 3.0,
                 4.2,
               ],
@@ -1786,6 +1777,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
 
       const mode = getOsmNodeMode(gameState, node.id);
       const isRail = mode === 'rail';
+      const isPedestrian = !isRail && isOsmNodePedestrianOnly(gameState, node.id);
       const { hasBuiltEdge, hasUnbuiltEdge, hasUnexploredNeighbor } = getOsmNodeConnectionFlags(
         gameState,
         node.id,
@@ -1812,6 +1804,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
         isHovered: false,
         dimForSelection,
         hideDot,
+        isPedestrian,
       });
 
       const isStartHub = node.connected && !hasBuiltEdge && !isSelected;
@@ -1849,9 +1842,21 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
         : 1.5;
 
       const pendingFill =
-        mode === 'rail' ? '#0284c7' : mode === 'mixed' ? '#9333ea' : '#f59e0b';
+        mode === 'rail'
+          ? '#0284c7'
+          : mode === 'mixed'
+          ? '#9333ea'
+          : isPedestrian
+          ? '#059669'
+          : '#f59e0b';
       const pendingStroke =
-        mode === 'rail' ? '#67e8f9' : mode === 'mixed' ? '#e9d5ff' : '#fef08a';
+        mode === 'rail'
+          ? '#67e8f9'
+          : mode === 'mixed'
+          ? '#e9d5ff'
+          : isPedestrian
+          ? '#6ee7b7'
+          : '#fef08a';
 
       features.push({
         type: 'Feature',
@@ -1943,6 +1948,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
             ))));
 
     const mode = getOsmNodeMode(gameState, node.id);
+    const isPedestrian = mode === 'road' && isOsmNodePedestrianOnly(gameState, node.id);
     const isSelected = node.id === selectedOsmNodeId;
     const fDist = frontierDistances.get(node.id);
     const resolvedDist = node.connected ? 0 : isPendingSeed ? 1 : fDist ?? MAX_OSM_FRONTIER_DISTANCE;
@@ -1951,6 +1957,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       isHovered: true,
       dimForSelection: false,
       hideDot: false,
+      isPedestrian,
     });
     const touchBoost = isTouchRef.current ? 1.2 : 0;
     const baseRadius = isSelected ? 6.5 : 5.5;

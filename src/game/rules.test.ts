@@ -38,6 +38,7 @@ import {
   isCountryLevelRegion,
   isNodeInUnlockedRegion,
   isNodeInUnseededModeInUnlockedRegion,
+  isOsmNodePedestrianOnly,
   isPointInRegionBoundary,
   isSkillBlockedByExclusivePath,
   isSyntheticFallbackRegion,
@@ -2441,6 +2442,100 @@ test('findIncompleteLoadedChunksInViewport detects already-loaded chunks with sp
   const already = new Set([sparseKey, tipTruncatedKey]);
   assert.equal(findIncompleteLoadedChunksInViewport(state, screenChunks, already).length, 0);
 });
+
+test('isOsmNodePedestrianOnly identifies pedestrian/footway/path nodes while keeping service roads and mixed junctions as standard road', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  const state = {
+    ...createInitialGameState(seoul),
+    osmNodes: [
+      { id: 'n_road', lat: 37.5660, lng: 126.9780, connected: true, mode: 'road' as const, regionId: 'curated_kr_seoul' },
+      { id: 'n_srv', lat: 37.5662, lng: 126.9780, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul' },
+      { id: 'n_junc', lat: 37.5664, lng: 126.9780, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul' },
+      { id: 'n_ped1', lat: 37.5666, lng: 126.9782, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul' },
+      { id: 'n_ped2', lat: 37.5668, lng: 126.9784, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul' },
+    ],
+    osmEdges: [
+      {
+        id: 'e_srv',
+        wayName: '주차장 진입로',
+        highwayType: 'service',
+        mode: 'road' as const,
+        fromNodeId: 'n_road',
+        toNodeId: 'n_srv',
+        coordinates: [[37.5660, 126.9780], [37.5662, 126.9780]] as [[number, number], [number, number]],
+        distanceKm: 0.022,
+        buildCost: 20,
+        baseIncomePerSec: 1,
+        built: false,
+      },
+      {
+        id: 'e_res',
+        wayName: '일반 골목길',
+        highwayType: 'residential',
+        mode: 'road' as const,
+        fromNodeId: 'n_srv',
+        toNodeId: 'n_junc',
+        coordinates: [[37.5662, 126.9780], [37.5664, 126.9780]] as [[number, number], [number, number]],
+        distanceKm: 0.022,
+        buildCost: 20,
+        baseIncomePerSec: 1,
+        built: false,
+      },
+      {
+        id: 'e_foot',
+        wayName: '보행자 산책로',
+        highwayType: 'footway',
+        mode: 'road' as const,
+        fromNodeId: 'n_junc',
+        toNodeId: 'n_ped1',
+        coordinates: [[37.5664, 126.9780], [37.5666, 126.9782]] as [[number, number], [number, number]],
+        distanceKm: 0.028,
+        buildCost: 20,
+        baseIncomePerSec: 1,
+        built: false,
+      },
+      {
+        id: 'e_ped',
+        wayName: '보행자 광장길',
+        highwayType: 'pedestrian',
+        mode: 'road' as const,
+        fromNodeId: 'n_ped1',
+        toNodeId: 'n_ped2',
+        coordinates: [[37.5666, 126.9782], [37.5668, 126.9784]] as [[number, number], [number, number]],
+        distanceKm: 0.028,
+        buildCost: 20,
+        baseIncomePerSec: 1,
+        built: false,
+      },
+      {
+        id: 'e_bridge',
+        wayName: '교차로 연결 링크',
+        highwayType: 'unclassified',
+        mode: 'road' as const,
+        fromNodeId: 'n_road',
+        toNodeId: 'n_ped2',
+        coordinates: [[37.5660, 126.9780], [37.5668, 126.9784]] as [[number, number], [number, number]],
+        distanceKm: 0.09,
+        buildCost: 40,
+        baseIncomePerSec: 2,
+        built: true,
+      },
+    ],
+  };
+
+  assert.equal(isOsmNodePedestrianOnly(state, 'n_road'), false, 'Service road endpoint must stay standard orange road');
+  assert.equal(isOsmNodePedestrianOnly(state, 'n_srv'), false, 'Service + residential node must stay standard orange road');
+  assert.equal(isOsmNodePedestrianOnly(state, 'n_junc'), false, 'Junction with residential + footway stays standard orange road');
+  assert.equal(isOsmNodePedestrianOnly(state, 'n_ped1'), true, 'Pure footway/pedestrian node must be green');
+  assert.equal(isOsmNodePedestrianOnly(state, 'n_ped2'), true, 'Pedestrian node connected via custom bridge must remain green');
+
+  const roadStyle = getFrontierVisualStyle(1, 'road', { isPedestrian: false });
+  const pedStyle = getFrontierVisualStyle(1, 'road', { isPedestrian: true });
+  assert.notEqual(pedStyle.fillColor, roadStyle.fillColor);
+  assert.equal(pedStyle.fillColor, '#059669');
+  assert.equal(pedStyle.strokeColor, '#6ee7b7');
+});
+
 
 
 

@@ -2410,12 +2410,42 @@ export function getFrontierOsmEdgesForState(
   return result;
 }
 
+export const PEDESTRIAN_HIGHWAY_TYPES = new Set([
+  'pedestrian',
+  'footway',
+  'path',
+  'cycleway',
+  'track',
+]);
+
 export function getOsmNodeMode(
   state: GameState,
   nodeId: string
 ): 'road' | 'rail' | 'mixed' {
   const graphIdx = getOsmGraphIndex(state.osmNodes || [], state.osmEdges || []);
   return graphIdx.nodeModeMap.get(nodeId) || 'road';
+}
+
+export function isOsmNodePedestrianOnly(
+  state: GameState,
+  nodeId: string
+): boolean {
+  const graphIdx = getOsmGraphIndex(state.osmNodes || [], state.osmEdges || []);
+  const mode = graphIdx.nodeModeMap.get(nodeId) || 'road';
+  if (mode !== 'road') return false;
+  const incident = graphIdx.adjEdgesAll.get(nodeId);
+  if (!incident || incident.length === 0) return false;
+  let hasPedestrianEdge = false;
+  for (let i = 0; i < incident.length; i++) {
+    const e = incident[i];
+    if (CUSTOM_BRIDGE_WAY_NAMES.has(e.wayName)) continue;
+    if (e.mode !== 'road') return false;
+    if (!PEDESTRIAN_HIGHWAY_TYPES.has(e.highwayType)) {
+      return false;
+    }
+    hasPedestrianEdge = true;
+  }
+  return hasPedestrianEdge;
 }
 
 export function resolveCompatibleOsmMode(
@@ -3630,6 +3660,7 @@ export function getFrontierVisualStyle(
     isHovered?: boolean;
     dimForSelection?: boolean;
     hideDot?: boolean;
+    isPedestrian?: boolean;
   }
 ): FrontierVisualStyle {
   const d = Math.max(0, Math.min(MAX_OSM_FRONTIER_DISTANCE, Math.round(frontierDist)));
@@ -3637,8 +3668,9 @@ export function getFrontierVisualStyle(
   const isHovered = Boolean(options?.isHovered);
   const dimForSelection = Boolean(options?.dimForSelection);
   const hideDot = Boolean(options?.hideDot);
+  const isPedestrian = Boolean(options?.isPedestrian) && mode === 'road';
 
-  const modeCode = mode === 'mixed' ? 2 : mode === 'rail' ? 1 : 0;
+  const modeCode = isPedestrian ? 3 : mode === 'mixed' ? 2 : mode === 'rail' ? 1 : 0;
   const lutKey =
     (d << 6) |
     (modeCode << 4) |
@@ -3655,6 +3687,8 @@ export function getFrontierVisualStyle(
       ? '#10b981'
       : isHovered
       ? '#059669'
+      : isPedestrian
+      ? '#059669'
       : mode === 'mixed'
       ? '#9333ea'
       : mode === 'rail'
@@ -3666,6 +3700,8 @@ export function getFrontierVisualStyle(
       ? '#ffffff'
       : isHovered
       ? '#34d399'
+      : isPedestrian
+      ? '#6ee7b7'
       : mode === 'mixed'
       ? '#e9d5ff'
       : mode === 'rail'
@@ -3676,6 +3712,8 @@ export function getFrontierVisualStyle(
     isSelected
       ? '#ffffff'
       : isHovered
+      ? '#34d399'
+      : isPedestrian
       ? '#34d399'
       : mode === 'mixed'
       ? '#c084fc'

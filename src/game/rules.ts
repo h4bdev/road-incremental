@@ -109,22 +109,22 @@ const NODE_TIER_STEPS: Array<{
   { tier: 'Diamond', division: 'IV', minNodes: 570000, color: '#7dd3fc' },
   { tier: 'Diamond', division: 'V', minNodes: 710000, color: '#bae6fd' },
 
-  // Master I -> V (narrowed gap to Challenger: 125K steps)
-  { tier: 'Master', division: 'I', minNodes: 850000, color: '#9333ea' },
-  { tier: 'Master', division: 'II', minNodes: 975000, color: '#a855f7' },
-  { tier: 'Master', division: 'III', minNodes: 1100000, color: '#b76ef8' },
-  { tier: 'Master', division: 'IV', minNodes: 1225000, color: '#c084fc' },
-  { tier: 'Master', division: 'V', minNodes: 1350000, color: '#d8b4fe' },
+  // Master I -> V
+  { tier: 'Master', division: 'I', minNodes: 1200000, color: '#9333ea' },
+  { tier: 'Master', division: 'II', minNodes: 1600000, color: '#a855f7' },
+  { tier: 'Master', division: 'III', minNodes: 2100000, color: '#b76ef8' },
+  { tier: 'Master', division: 'IV', minNodes: 2700000, color: '#c084fc' },
+  { tier: 'Master', division: 'V', minNodes: 3400000, color: '#d8b4fe' },
 
   // Grandmaster I -> V
-  { tier: 'Grandmaster', division: 'I', minNodes: 1475000, color: '#e11d48' },
-  { tier: 'Grandmaster', division: 'II', minNodes: 1600000, color: '#f43f5e' },
-  { tier: 'Grandmaster', division: 'III', minNodes: 1725000, color: '#fb7185' },
-  { tier: 'Grandmaster', division: 'IV', minNodes: 1850000, color: '#fda4af' },
-  { tier: 'Grandmaster', division: 'V', minNodes: 1975000, color: '#ffe4e6' },
+  { tier: 'Grandmaster', division: 'I', minNodes: 4200000, color: '#e11d48' },
+  { tier: 'Grandmaster', division: 'II', minNodes: 5100000, color: '#f43f5e' },
+  { tier: 'Grandmaster', division: 'III', minNodes: 6100000, color: '#fb7185' },
+  { tier: 'Grandmaster', division: 'IV', minNodes: 7200000, color: '#fda4af' },
+  { tier: 'Grandmaster', division: 'V', minNodes: 8500000, color: '#ffe4e6' },
 
   // Terra Challenger
-  { tier: 'Terra Challenger', division: '', minNodes: 2100000, color: '#facc15' },
+  { tier: 'Terra Challenger', division: '', minNodes: 10000000, color: '#facc15' },
 ];
 
 export function getNodeTierRank(connectedNodes: number): NodeTierRankInfo {

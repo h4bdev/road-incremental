@@ -8,6 +8,7 @@ export interface ViewportBounds {
 }
 
 export const OVERVIEW_ZOOM_THRESHOLD = 11.5;
+export const UNEXPLORED_NODE_MIN_ZOOM = 13.6;
 
 export interface SimplifiedOverviewCurve {
   id: string;

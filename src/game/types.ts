@@ -97,6 +97,7 @@ export interface ProvincialRegion {
   bbox: [number, number, number, number]; // [minLat, minLng, maxLat, maxLng]
   boundaryGeoJson?: GeoJsonBoundary;
   hasRealOsmBoundary?: boolean;
+  exactBoundaryVersion?: number;
   centerLat: number;
   centerLng: number;
   unlocked: boolean;

@@ -20,6 +20,8 @@ import {
   slotIndexFromId,
 } from '../game/saveSlots';
 import { formatMoneyCompact } from '../game/format';
+import { SegmentedControl } from './ui/ModalShell';
+import { TierEmblem } from './ui/TierEmblem';
 
 export interface SaveTransferPanelProps {
   slots: Record<SaveSlotId, SaveSlotSummary | null>;
@@ -271,43 +273,40 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
   return (
     <div className="space-y-4">
       {/* Mode Switcher */}
-      <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-slate-900 border border-slate-800">
-        <button
-          type="button"
-          data-testid="transfer-tab-export"
-          onClick={() => setMode('export')}
-          className={`min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
-            mode === 'export'
-              ? 'bg-sky-600 text-white shadow'
-              : 'text-slate-300 hover:text-white hover:bg-slate-800/80'
-          }`}
-        >
-          <Download className="w-3.5 h-3.5 shrink-0" />
-          <span>세이브 내보내기 (Export)</span>
-        </button>
-        <button
-          type="button"
-          data-testid="transfer-tab-import"
-          onClick={() => setMode('import')}
-          className={`min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
-            mode === 'import'
-              ? 'bg-emerald-600 text-white shadow'
-              : 'text-slate-300 hover:text-white hover:bg-slate-800/80'
-          }`}
-        >
-          <Upload className="w-3.5 h-3.5 shrink-0" />
-          <span>세이브 가져오기 (Import)</span>
-        </button>
-      </div>
+      <SegmentedControl
+        fullWidth
+        value={mode}
+        onChange={setMode}
+        options={[
+          {
+            id: 'export',
+            testId: 'transfer-tab-export',
+            label: (
+              <>
+                <Download className="w-3.5 h-3.5 shrink-0" />
+                <span>세이브 내보내기 (Export)</span>
+              </>
+            ),
+          },
+          {
+            id: 'import',
+            testId: 'transfer-tab-import',
+            label: (
+              <>
+                <Upload className="w-3.5 h-3.5 shrink-0" />
+                <span>세이브 가져오기 (Import)</span>
+              </>
+            ),
+          },
+        ]}
+      />
 
       {mode === 'export' ? (
         <div className="space-y-3" data-testid="export-panel">
-          <div className="rounded-xl bg-slate-900/90 border border-slate-800 p-3.5 space-y-3">
+          <div className="rounded-xl bg-[#10182b] border border-white/[0.08] p-3.5 space-y-3">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
-                <h3 className="text-xs sm:text-sm font-bold text-white">
-                  내보낼 슬롯 선택
-                </h3>
+                <h3 className="text-xs sm:text-sm font-bold text-white">내보낼 슬롯 선택</h3>
                 <p className="text-[11px] text-slate-400">
                   도로망, 자금, 연구, 지역 경계, 타운 게임 진행도를 하나의 압축 코드 또는 .txt 파일로 백업합니다.
                 </p>
@@ -324,7 +323,7 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
                     setExportError(null);
                     setCopied(false);
                   }}
-                  className="min-h-[40px] px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-100 focus:outline-none focus:border-sky-500"
+                  className="min-h-[38px] px-2.5 py-1.5 rounded-lg bg-[#070b14] border border-white/[0.1] text-xs text-slate-100 focus:outline-none focus:border-sky-400"
                 >
                   {SAVE_SLOT_IDS.map((slotId) => {
                     const s = slots[slotId];
@@ -347,7 +346,7 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
                   data-testid="export-generate-btn"
                   disabled={!canExportSelected || isExporting}
                   onClick={() => void handleGenerateExport(exportSlotId)}
-                  className="min-h-[40px] px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                  className="min-h-[38px] px-3 py-1.5 rounded-lg bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-slate-950 text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 transition-colors"
                 >
                   {isExporting ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -360,7 +359,7 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
             </div>
 
             {!canExportSelected && (
-              <div className="rounded-lg bg-slate-950 border border-slate-800 p-3 text-xs text-slate-400">
+              <div className="rounded-lg bg-[#070b14] border border-white/[0.07] p-3 text-xs text-slate-400">
                 저장된 슬롯이 없습니다. 먼저 게임을 시작하거나 &ldquo;세이브 가져오기&rdquo; 탭에서 백업 코드를 불러오세요.
               </div>
             )}
@@ -407,7 +406,7 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
                     }
                   }}
                   aria-label="내보낸 세이브 코드"
-                  className="w-full p-2.5 rounded-lg bg-slate-950 border border-slate-700 text-[11px] leading-relaxed font-mono text-sky-200 focus:outline-none focus:border-sky-500 resize-none break-all"
+                  className="w-full p-2.5 rounded-lg bg-[#070b14] border border-white/[0.1] text-[11px] leading-relaxed font-mono text-sky-200 focus:outline-none focus:border-sky-400 resize-none break-all"
                 />
 
                 <div className="flex flex-wrap items-center gap-2">
@@ -415,10 +414,10 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
                     type="button"
                     data-testid="export-copy-btn"
                     onClick={() => void handleCopyCode()}
-                    className={`min-h-[40px] px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors ${
+                    className={`min-h-[38px] px-4 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors ${
                       copied
                         ? 'bg-emerald-600 text-white'
-                        : 'bg-sky-600 hover:bg-sky-500 text-white'
+                        : 'bg-sky-500 hover:bg-sky-400 text-slate-950'
                     }`}
                   >
                     {copied ? (
@@ -438,7 +437,7 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
                     type="button"
                     data-testid="export-download-btn"
                     onClick={handleDownloadFile}
-                    className="min-h-[40px] px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                    className="min-h-[38px] px-4 py-1.5 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.09] text-slate-100 text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors"
                   >
                     <Download className="w-4 h-4 text-sky-400" />
                     <span>.txt 파일로 저장</span>
@@ -450,7 +449,7 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
         </div>
       ) : (
         <div className="space-y-3" data-testid="import-panel">
-          <div className="rounded-xl bg-slate-900/90 border border-slate-800 p-3.5 space-y-3">
+          <div className="rounded-xl bg-[#10182b] border border-white/[0.08] p-3.5 space-y-3">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
                 <h3 className="text-xs sm:text-sm font-bold text-white">
@@ -474,7 +473,7 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
                   type="button"
                   data-testid="import-file-btn"
                   onClick={() => fileInputRef.current?.click()}
-                  className="min-h-[40px] px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  className="min-h-[38px] px-3 py-1.5 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.09] text-slate-100 text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors"
                 >
                   <FileUp className="w-3.5 h-3.5 text-emerald-400" />
                   <span>파일 선택</span>
@@ -506,7 +505,7 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
               }}
               placeholder="TERRALINE1:... 형식의 세이브 코드를 여기에 붙여넣으세요."
               aria-label="가져올 세이브 코드 입력"
-              className="w-full p-2.5 rounded-lg bg-slate-950 border border-slate-700 text-[11px] leading-relaxed font-mono text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-emerald-500 resize-y"
+              className="w-full p-2.5 rounded-lg bg-[#070b14] border border-white/[0.1] text-[11px] leading-relaxed font-mono text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-emerald-400 resize-y"
             />
 
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -516,7 +515,7 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
                   data-testid="import-validate-btn"
                   disabled={!importText.trim() || isDecoding}
                   onClick={() => void runDecode(importText)}
-                  className="min-h-[36px] px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  className="min-h-[36px] px-3 py-1.5 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.09] disabled:opacity-50 text-slate-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors"
                 >
                   {isDecoding ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
@@ -534,7 +533,7 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
                       setDecodeError(null);
                       setImportSuccess(null);
                     }}
-                    className="min-h-[36px] px-2.5 py-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 text-xs cursor-pointer"
+                    className="min-h-[36px] px-2.5 py-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-white/[0.06] text-xs cursor-pointer"
                   >
                     지우기
                   </button>
@@ -571,7 +570,7 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
             {preview && (
               <div
                 data-testid="import-preview-card"
-                className="rounded-xl bg-slate-950 border border-emerald-500/40 p-3.5 space-y-3"
+                className="rounded-xl bg-[#070b14] border border-emerald-500/40 p-3.5 space-y-3"
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
@@ -579,12 +578,17 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
                       <span>{preview.cityName}</span>
                       {preview.cityCountry && (
                         <span className="text-xs font-normal text-slate-400">
-                          {preview.cityCountry}
+                          · {preview.cityCountry}
                         </span>
                       )}
                     </div>
-                    <div className="text-[11px] text-slate-400 mt-0.5">
-                      저장 시각: {formatAbsoluteSaveTime(preview.savedAt)} · 등급 {preview.tierLabel}
+                    <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-1.5 flex-wrap">
+                      <span>저장 시각: {formatAbsoluteSaveTime(preview.savedAt)}</span>
+                      <span>·</span>
+                      <span className="inline-flex items-center gap-1 text-slate-200 font-medium">
+                        <TierEmblem tierOrLabel={preview.tierLabel} size="xs" />
+                        <span>등급 {preview.tierLabel}</span>
+                      </span>
                     </div>
                   </div>
                   <span className="text-xs font-semibold text-emerald-400">
@@ -593,25 +597,25 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
                 </div>
 
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono-numbers">
-                  <div className="rounded-lg bg-slate-900 border border-slate-800 px-2.5 py-2">
+                  <div className="rounded-lg bg-[#10182b] border border-white/[0.07] px-2.5 py-2">
                     <div className="text-[10px] text-slate-400">보유 자금</div>
                     <div className="font-bold text-emerald-400 mt-0.5 tabular-nums">
                       {formatMoneyCompact(preview.capital)}
                     </div>
                   </div>
-                  <div className="rounded-lg bg-slate-900 border border-slate-800 px-2.5 py-2">
+                  <div className="rounded-lg bg-[#10182b] border border-white/[0.07] px-2.5 py-2">
                     <div className="text-[10px] text-slate-400">연결 노드</div>
                     <div className="font-bold text-indigo-300 mt-0.5 tabular-nums">
                       {preview.connectedOsmNodes.toLocaleString()}
                     </div>
                   </div>
-                  <div className="rounded-lg bg-slate-900 border border-slate-800 px-2.5 py-2">
+                  <div className="rounded-lg bg-[#10182b] border border-white/[0.07] px-2.5 py-2">
                     <div className="text-[10px] text-slate-400">건설 구간</div>
                     <div className="font-bold text-sky-400 mt-0.5 tabular-nums">
                       {preview.totalOsmEdgesBuilt.toLocaleString()}
                     </div>
                   </div>
-                  <div className="rounded-lg bg-slate-900 border border-slate-800 px-2.5 py-2">
+                  <div className="rounded-lg bg-[#10182b] border border-white/[0.07] px-2.5 py-2">
                     <div className="text-[10px] text-slate-400">1:1 도로망</div>
                     <div className="font-bold text-slate-200 mt-0.5 tabular-nums">
                       {preview.mapped1to1Km.toLocaleString()} km
@@ -624,7 +628,7 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
                   {preview.totalEdgesInSnapshot.toLocaleString()}개
                 </div>
 
-                <div className="pt-2.5 border-t border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="pt-2.5 border-t border-white/[0.07] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
                   <div className="flex items-center gap-2 min-w-0 flex-1">
                     <label
                       htmlFor="import-target-slot"
@@ -637,7 +641,7 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
                       data-testid="import-target-slot-select"
                       value={targetImportSlotId}
                       onChange={(e) => setTargetImportSlotId(e.target.value as SaveSlotId)}
-                      className="min-h-[40px] w-full sm:max-w-[260px] min-w-0 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-emerald-500"
+                      className="min-h-[38px] w-full sm:max-w-[260px] min-w-0 px-2.5 py-1.5 rounded-lg bg-[#10182b] border border-white/[0.1] text-xs text-white focus:outline-none focus:border-emerald-400"
                     >
                       {SAVE_SLOT_IDS.map((slotId) => {
                         const existing = slots[slotId];
@@ -660,7 +664,7 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
                       data-testid="import-apply-only-btn"
                       disabled={isApplyingImport}
                       onClick={() => void handleApplyImport(false)}
-                      className="min-h-[40px] px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-100 text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                      className="min-h-[38px] px-3.5 py-1.5 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.09] disabled:opacity-50 text-slate-100 text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors"
                     >
                       <Save className="w-3.5 h-3.5 text-sky-400" />
                       <span>슬롯에만 저장</span>
@@ -670,7 +674,7 @@ export const SaveTransferPanel: React.FC<SaveTransferPanelProps> = ({
                       data-testid="import-apply-play-btn"
                       disabled={isApplyingImport}
                       onClick={() => void handleApplyImport(true)}
-                      className="min-h-[40px] px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                      className="min-h-[38px] px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors"
                     >
                       {isApplyingImport ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />

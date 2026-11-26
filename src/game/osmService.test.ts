@@ -7,7 +7,7 @@ import {
   fetchProvincialRegionInfo,
   resetBackendApiProbeForTests,
 } from './osmService';
-import { buildDenseRealOsmGraph } from './osmCore';
+import { buildDenseRealOsmGraph, resolveOsmProvincialRegion } from './osmCore';
 
 test('fetchOsmRoadChunk and fetchOsmProvincialRegion fall back when /api returns 404 (Vercel static deployment)', async () => {
   resetBackendApiProbeForTests();
@@ -448,6 +448,211 @@ test('buildDenseRealOsmGraph preserves multi-kilometer 2-node bridge spans (e.g.
     'Bay Bridge West Span must form a complete continuous path from SF to Yerba Buena Island'
   );
 });
+
+test('resolveOsmProvincialRegion prefers county-equivalent admin_level 6 over state admin_level 4 even when expectedRegionName is state name', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes('nominatim.openstreetmap.org/lookup')) {
+      return new Response(
+        JSON.stringify([
+          {
+            osm_id: 2404020,
+            boundingbox: ['37.547', '37.570', '126.961', '127.025'],
+            geojson: {
+              type: 'Polygon',
+              coordinates: [[[126.961, 37.547], [127.025, 37.547], [127.025, 37.570], [126.961, 37.570], [126.961, 37.547]]],
+            },
+          },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (url.includes('overpass')) {
+      const bodyStr = typeof init?.body === 'string' ? decodeURIComponent(init.body) : '';
+      if (bodyStr.includes('is_in(')) {
+        return new Response(
+          JSON.stringify({
+            elements: [
+              {
+                type: 'area',
+                id: 3602297418,
+                tags: { boundary: 'administrative', admin_level: '4', 'name:ko': '서울특별시' },
+              },
+              {
+                type: 'area',
+                id: 3602404020,
+                tags: { boundary: 'administrative', admin_level: '6', 'name:ko': '중구' },
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+    }
+    return new Response('Not found', { status: 404 });
+  }) as typeof fetch;
+
+  try {
+    const resolved = await resolveOsmProvincialRegion(37.564, 126.995, '서울');
+    assert.ok(resolved);
+    assert.equal(resolved.regionId, 'osm_rel_2404020');
+    assert.equal(resolved.adminLevel, '6');
+    assert.equal(resolved.regionName, '중구');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('loadOsmProvinceDirect queries full county streets including residential and service ways across the region', async () => {
+  const { loadOsmProvinceDirect } = await import('./osmCore');
+  const originalFetch = globalThis.fetch;
+  let capturedProvinceQuery = '';
+
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes('nominatim.openstreetmap.org/lookup')) {
+      return new Response(
+        JSON.stringify([
+          {
+            osm_id: 9912345,
+            boundingbox: ['37.60', '37.70', '126.80', '126.95'],
+            geojson: {
+              type: 'Polygon',
+              coordinates: [[[126.80, 37.60], [126.95, 37.60], [126.95, 37.70], [126.80, 37.70], [126.80, 37.60]]],
+            },
+          },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (url.includes('overpass')) {
+      const bodyStr = typeof init?.body === 'string' ? decodeURIComponent(init.body) : '';
+      if (bodyStr.includes('is_in(')) {
+        return new Response(
+          JSON.stringify({
+            elements: [
+              {
+                type: 'area',
+                id: 3609912345,
+                tags: { boundary: 'administrative', admin_level: '6', 'name:ko': '테스트군' },
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (bodyStr.includes('3609912345')) {
+        capturedProvinceQuery = bodyStr;
+        return new Response(
+          JSON.stringify({
+            elements: [
+              { type: 'node', id: 7001, lat: 37.65, lon: 126.87 },
+              { type: 'node', id: 7002, lat: 37.655, lon: 126.875 },
+              { type: 'node', id: 7003, lat: 37.685, lon: 126.925 }, // Distant corner of county
+              { type: 'node', id: 7004, lat: 37.688, lon: 126.928 },
+              { type: 'way', id: 8001, nodes: [7001, 7002], tags: { highway: 'residential', name: '군내골목길' } },
+              { type: 'way', id: 8002, nodes: [7003, 7004], tags: { highway: 'service', name: '외곽진입로' } },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify({ elements: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ elements: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+
+  try {
+    const reportedPcts: number[] = [];
+    const payload = await loadOsmProvinceDirect(37.6501, 126.8701, '테스트군', {
+      allowStarterFallback: false,
+      onProgress: (pct) => {
+        reportedPcts.push(pct);
+      },
+    });
+    assert.ok(capturedProvinceQuery.includes('residential'), 'Full-county query must include residential ways');
+    assert.ok(capturedProvinceQuery.includes('service'), 'Full-county query must include service ways');
+    assert.equal(payload.regionId, 'osm_rel_9912345');
+    assert.equal(payload.osmNodes.some((n) => n.id === 'osm_7003'), true, 'Distant corner node of county must load in one pass');
+    assert.ok(reportedPcts.length >= 3, `Expected multiple percentage progress updates, got ${reportedPcts.length}`);
+    assert.equal(reportedPcts[reportedPcts.length - 1], 100, 'Progress must conclude at 100%');
+    for (let i = 1; i < reportedPcts.length; i++) {
+      assert.ok(reportedPcts[i] >= reportedPcts[i - 1], 'Progress percentages must be non-decreasing');
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('resolveOsmProvincialRegion uses polygon_threshold=0 and preserves exact complex polygon vertices with exactBoundaryVersion: 2', async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedNominatimUrl = '';
+
+  // Generate 650 exact vertices
+  const exactCoords: Array<[number, number]> = [];
+  for (let i = 0; i < 650; i++) {
+    const angle = (i / 650) * Math.PI * 2;
+    const r = 0.05 + 0.005 * Math.sin(i * 7);
+    exactCoords.push([
+      Math.round((126.98 + r * Math.cos(angle)) * 1e7) / 1e7,
+      Math.round((37.56 + r * Math.sin(angle)) * 1e7) / 1e7,
+    ]);
+  }
+  exactCoords.push(exactCoords[0]); // close loop
+
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes('nominatim.openstreetmap.org')) {
+      capturedNominatimUrl = url;
+      return new Response(
+        JSON.stringify([
+          {
+            osm_id: 8881234,
+            boundingbox: ['37.50', '37.62', '126.92', '127.04'],
+            geojson: {
+              type: 'Polygon',
+              coordinates: [exactCoords],
+            },
+          },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (url.includes('overpass')) {
+      return new Response(
+        JSON.stringify({
+          elements: [
+            {
+              type: 'area',
+              id: 3608881234,
+              tags: { boundary: 'administrative', admin_level: '6', 'name:ko': '정밀행정구' },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    return new Response('Not found', { status: 404 });
+  }) as typeof fetch;
+
+  try {
+    const resolved = await resolveOsmProvincialRegion(37.56, 126.98);
+    assert.ok(resolved);
+    assert.ok(
+      capturedNominatimUrl.includes('polygon_threshold=0'),
+      `Nominatim URL must specify polygon_threshold=0 for 100% exact boundary, got: ${capturedNominatimUrl}`
+    );
+    assert.equal(resolved.exactBoundaryVersion, 2);
+    assert.ok(
+      (resolved.boundaryGeoJson?.coordinates[0].length || 0) >= 650,
+      `Exact coordinates count must be preserved (>600), got: ${resolved.boundaryGeoJson?.coordinates[0].length}`
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 
 
 

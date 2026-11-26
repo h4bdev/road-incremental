@@ -5,7 +5,9 @@ import {
   buildSkeletonGeoJsonFeatures,
   isEdgeInViewport,
   isNodeInViewport,
+  OVERVIEW_ZOOM_THRESHOLD,
   simplifyLonLatLine,
+  UNEXPLORED_NODE_MIN_ZOOM,
 } from './osmOverview';
 import {
   getCachedOsmRegionsByIds,
@@ -339,4 +341,16 @@ describe('OSM Overview Curves, Viewport Culling & High-Scale Performance', () =>
       `Expected <400ms for 4,550-node load + overview simplification + GeoJSON BBox check, got ${elapsedMs.toFixed(1)}ms`
     );
   });
+
+  it('keeps unexplored-node visibility threshold strictly narrower than overview threshold and within street zoom', () => {
+    assert.ok(
+      UNEXPLORED_NODE_MIN_ZOOM > OVERVIEW_ZOOM_THRESHOLD,
+      `UNEXPLORED_NODE_MIN_ZOOM (${UNEXPLORED_NODE_MIN_ZOOM}) must exceed OVERVIEW_ZOOM_THRESHOLD (${OVERVIEW_ZOOM_THRESHOLD})`
+    );
+    assert.ok(
+      UNEXPLORED_NODE_MIN_ZOOM >= 13.4 && UNEXPLORED_NODE_MIN_ZOOM <= 14.0,
+      `UNEXPLORED_NODE_MIN_ZOOM (${UNEXPLORED_NODE_MIN_ZOOM}) must remain within street zoom window (<=14.0 globe)`
+    );
+  });
 });
+

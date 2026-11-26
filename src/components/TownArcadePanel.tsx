@@ -21,10 +21,10 @@ import {
   Trash2,
   Trophy,
   Wind,
-  X,
   Zap,
 } from 'lucide-react';
 import { GameState, MinigameId, ReactorCellType } from '../game/types';
+import { ModalShell } from './ui/ModalShell';
 import {
   BioUpgradeKind,
   calculateExchangePreview,
@@ -187,72 +187,41 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
   const milestoneSummary = getMinigameMilestoneSummary(mg, activeGame);
 
   return (
-    <div
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-      className="fixed inset-0 z-40 flex items-end sm:items-center justify-center p-0 sm:px-4 sm:pt-16 sm:pb-20 pb-[calc(env(safe-area-inset-bottom)+68px)] bg-black/70"
-    >
-      <div
-        data-testid="town-arcade-modal"
-        className="w-full max-w-5xl h-[calc(100dvh-124px)] sm:h-auto sm:max-h-[calc(100dvh-148px)] flex flex-col rounded-t-2xl sm:rounded-2xl bg-[#0d1424] border-t sm:border border-slate-800 shadow-2xl overflow-hidden"
-      >
-        {/* Modal Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 px-4 sm:px-5 py-3 sm:py-3.5 border-b border-slate-800 bg-slate-950/80 shrink-0">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <Gamepad2 className="w-5 h-5 text-amber-400 shrink-0" />
-              <div className="min-w-0">
-                <h2 className="text-sm sm:text-lg font-bold text-white truncate">
-                  타운 미니게임 허브 (7종 · 56 마일스톤)
-                </h2>
-                <p className="hidden sm:block text-xs text-slate-400">
-                  화폐는 돈($) 환전으로만 획득 · 각 게임 8단계 마일스톤 달성 시 메인 자금 수익 영구 부스트
-                </p>
-              </div>
-            </div>
-            <button
-              onClick={onClose}
-              aria-label="닫기"
-              className="sm:hidden min-w-[40px] min-h-[40px] flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer shrink-0"
-            >
-              <X className="w-5 h-5" />
-            </button>
+    <ModalShell
+      onClose={onClose}
+      ariaLabel="타운 미니게임 허브"
+      testId="town-arcade-modal"
+      maxWidthClass="max-w-5xl"
+      heightClass="h-[calc(100dvh-124px)] sm:h-auto sm:max-h-[calc(100dvh-148px)]"
+      backdropClassName="p-0 sm:px-4 sm:pt-16 sm:pb-20 pb-[calc(env(safe-area-inset-bottom)+68px)]"
+      icon={<Gamepad2 className="w-4 h-4 text-amber-400" />}
+      title="타운 미니게임 허브 (7종 · 56 마일스톤)"
+      subtitle="화폐는 돈($) 환전으로만 획득 · 각 게임 8단계 마일스톤 달성 시 메인 자금 수익 영구 부스트"
+      headerRight={
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="flex items-center gap-2.5 text-xs font-mono-numbers overflow-x-auto no-scrollbar">
+            {MINIGAME_ORDER.map((id) => (
+              <span
+                key={id}
+                style={{ color: MINIGAME_META[id].accentColor }}
+                className="whitespace-nowrap"
+              >
+                {MINIGAME_META[id].currencySymbol} {formatNum(getCurrencyBalance(id))}
+              </span>
+            ))}
           </div>
 
-          <div className="flex items-center justify-between sm:justify-end gap-3">
-            <div className="flex items-center gap-2.5 text-xs font-mono-numbers overflow-x-auto no-scrollbar">
-              {MINIGAME_ORDER.map((id) => (
-                <span
-                  key={id}
-                  style={{ color: MINIGAME_META[id].accentColor }}
-                  className="whitespace-nowrap"
-                >
-                  {MINIGAME_META[id].currencySymbol} {formatNum(getCurrencyBalance(id))}
-                </span>
-              ))}
+          <div className="text-right font-mono-numbers shrink-0 pl-2 border-l border-white/[0.08]">
+            <div className="text-[10px] text-slate-400">메인 자금</div>
+            <div className="text-xs sm:text-sm font-bold text-emerald-400">
+              ${formatNum(gameState.capital)}
             </div>
-
-            <div className="text-right font-mono-numbers shrink-0">
-              <div className="text-[10px] text-slate-400">메인 자금</div>
-              <div className="text-xs sm:text-sm font-bold text-emerald-400">
-                ${formatNum(gameState.capital)}
-              </div>
-            </div>
-
-            <button
-              onClick={onClose}
-              aria-label="닫기"
-              className="hidden sm:flex min-w-[38px] min-h-[38px] items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
-            >
-              <X className="w-5 h-5" />
-            </button>
           </div>
         </div>
-
-        {/* Game Switcher Tabs (7 Games) */}
-        <div className="flex items-center justify-between gap-2 px-4 py-2 border-b border-slate-800 bg-slate-900/50 overflow-x-auto no-scrollbar shrink-0">
-          <div className="flex items-center gap-1.5">
+      }
+      subHeader={
+        <div className="flex items-center justify-between gap-2 px-4 sm:px-5 py-2 border-b border-white/[0.07] bg-[#080d18]/60 overflow-x-auto no-scrollbar shrink-0">
+          <div className="flex items-center gap-1 p-1 rounded-xl bg-[#070b14] border border-white/[0.08]">
             {MINIGAME_ORDER.map((id) => {
               const m = MINIGAME_META[id];
               const isActive = activeGame === id;
@@ -263,10 +232,10 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                   key={id}
                   data-testid={`minigame-tab-${id}`}
                   onClick={() => setActiveGame(id)}
-                  className={`min-h-[38px] flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                  className={`min-h-[34px] flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                     isActive
-                      ? 'bg-slate-800 text-white border border-slate-600'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-800/60 border border-transparent'
+                      ? 'bg-sky-500/20 text-white border border-sky-400/45'
+                      : 'text-slate-400 hover:text-white hover:bg-white/[0.05] border border-transparent'
                   }`}
                 >
                   {!isUnlocked ? (
@@ -289,78 +258,78 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
 
           <div
             data-testid="milestone-boost-badge"
-            className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-950/50 border border-emerald-500/40 text-xs font-mono-numbers shrink-0"
+            className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-950/35 border border-emerald-500/35 text-xs font-mono-numbers shrink-0"
           >
             <Trophy className="w-3.5 h-3.5 text-amber-400" />
             <span className="text-slate-300">
               마일스톤 {milestoneSummary.unlockedCount}/{milestoneSummary.totalCount}
             </span>
             <span className="text-emerald-400 font-bold">
-              메인 수익 ×{milestoneSummary.incomeMult.toFixed(2)} (+{milestoneSummary.totalBoostPct}%)
+              ×{milestoneSummary.incomeMult.toFixed(2)} (+{milestoneSummary.totalBoostPct}%)
             </span>
           </div>
         </div>
-
-        {/* Body */}
-        <div className="flex-1 overflow-y-auto p-3.5 sm:p-4 space-y-3.5">
-          {!isCurrentUnlocked ? (
-            <div
-              data-testid="locked-minigame-view"
-              className="p-6 sm:p-8 rounded-2xl bg-gradient-to-br from-slate-900/90 via-slate-900/60 to-slate-950 border border-amber-500/30 flex flex-col items-center justify-center text-center space-y-4 shadow-xl"
-            >
-              <div className="w-16 h-16 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-inner">
-                <Lock className="w-8 h-8" />
-              </div>
-              <div className="max-w-lg space-y-2">
-                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-800 border border-slate-700 text-xs font-semibold text-slate-300">
-                  <span>미해금 미니게임</span>
-                  <span>·</span>
-                  <span className="text-amber-400 font-mono-numbers">
-                    현재 해금 {(mg.unlockedGameIds || []).length}/7
-                  </span>
-                </div>
-                <h3 className="text-xl sm:text-2xl font-bold text-white flex items-center justify-center gap-2">
-                  <span style={{ color: meta.accentColor }}>{meta.currencySymbol}</span>
-                  <span>{meta.name}</span>
-                </h3>
-                <p className="text-xs sm:text-sm text-slate-300 leading-relaxed font-medium">
-                  {meta.subtitle}
-                </p>
-                <p className="text-xs text-slate-400 leading-relaxed">
-                  이 미니게임을 자금($)으로 잠금 해제하면 전용 화폐 환전 및 특화 성장 루프가 열립니다.
-                  8단계 마일스톤을 달성할 때마다 메인 자금 수익에 영구 배수 보너스가 부여됩니다.
-                  (미니게임을 하나 해금할 때마다 다음 미니게임의 잠금 해제 비용이 증가합니다)
-                </p>
-              </div>
-
-              <div className="pt-2 flex flex-col items-center gap-2">
-                <button
-                  data-testid="unlock-minigame-btn"
-                  disabled={!canAffordUnlock}
-                  onClick={() => onUnlockMinigame(activeGame)}
-                  className={`min-h-[46px] px-6 py-2.5 rounded-xl font-bold text-sm transition-all cursor-pointer flex items-center gap-2 shadow-lg ${
-                    canAffordUnlock
-                      ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-black shadow-amber-500/20 active:scale-95'
-                      : 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
-                  }`}
-                >
-                  <Lock className="w-4 h-4" />
-                  <span>{meta.shortName} 잠금 해제 (${formatNum(unlockCost)})</span>
-                </button>
-                {!canAffordUnlock && (
-                  <span className="text-xs text-rose-400 font-mono-numbers">
-                    보유 자금 부족 (필요: ${formatNum(unlockCost)} / 보유: ${formatNum(gameState.capital)})
-                  </span>
-                )}
-              </div>
-            </div>
-          ) : (
-            <>
-              {/* Strictly One-Way & Exclusive Exchange Strip */}
-              <section
-                data-testid="oneway-exchange-bar"
-            className="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 flex flex-col lg:flex-row lg:items-center justify-between gap-3"
+      }
+    >
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
+        {!isCurrentUnlocked ? (
+          <div
+            data-testid="locked-minigame-view"
+            className="p-6 sm:p-8 rounded-2xl bg-[#10182b] border border-amber-400/30 flex flex-col items-center justify-center text-center space-y-4"
           >
+            <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-400/30 flex items-center justify-center text-amber-400">
+              <Lock className="w-7 h-7" />
+            </div>
+            <div className="max-w-lg space-y-2">
+              <div className="text-xs font-semibold text-slate-400">
+                미해금 미니게임 ·{' '}
+                <span className="text-amber-400 font-mono-numbers">
+                  현재 해금 {(mg.unlockedGameIds || []).length}/7
+                </span>
+              </div>
+              <h3 className="text-xl sm:text-2xl font-bold text-white flex items-center justify-center gap-2 font-heading">
+                <span style={{ color: meta.accentColor }}>{meta.currencySymbol}</span>
+                <span>{meta.name}</span>
+              </h3>
+              <p className="text-xs sm:text-sm text-slate-300 leading-relaxed font-medium">
+                {meta.subtitle}
+              </p>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                이 미니게임을 자금($)으로 잠금 해제하면 전용 화폐 환전 및 특화 성장 루프가 열립니다.
+                8단계 마일스톤을 달성할 때마다 메인 자금 수익에 영구 배수 보너스가 부여됩니다.
+                (미니게임을 하나 해금할 때마다 다음 미니게임의 잠금 해제 비용이 증가합니다)
+              </p>
+            </div>
+
+            <div className="pt-1 flex flex-col items-center gap-2">
+              <button
+                data-testid="unlock-minigame-btn"
+                disabled={!canAffordUnlock}
+                onClick={() => onUnlockMinigame(activeGame)}
+                className={`min-h-[44px] px-6 py-2.5 rounded-xl font-bold text-sm transition-colors cursor-pointer flex items-center gap-2 ${
+                  canAffordUnlock
+                    ? 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                    : 'bg-white/[0.04] text-slate-500 border border-white/[0.06] cursor-not-allowed'
+                }`}
+              >
+                <Lock className="w-4 h-4" />
+                <span>{meta.shortName} 잠금 해제 (${formatNum(unlockCost)})</span>
+              </button>
+              {!canAffordUnlock && (
+                <span className="text-xs text-rose-400 font-mono-numbers">
+                  보유 자금 부족 (필요: ${formatNum(unlockCost)} / 보유: ${formatNum(gameState.capital)})
+                </span>
+              )}
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* Strictly One-Way & Exclusive Exchange Strip */}
+            <section
+              data-testid="oneway-exchange-bar"
+              className="p-3.5 rounded-xl bg-[#10182b] border border-white/[0.08] flex flex-col lg:flex-row lg:items-center justify-between gap-3"
+            >
             <div className="space-y-1 min-w-0">
               <div className="flex items-center gap-2 text-xs font-bold text-white">
                 <span>메인 자금</span>
@@ -387,8 +356,8 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                     onClick={() => onExchangeMoney(activeGame, preset.amount)}
                     className={`min-h-[40px] px-3 py-1 rounded-lg text-xs font-mono-numbers font-semibold transition-colors cursor-pointer whitespace-nowrap flex flex-col items-center justify-center ${
                       canAfford
-                        ? 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-600'
-                        : 'bg-slate-900 text-slate-600 border border-slate-800 cursor-not-allowed'
+                        ? 'bg-white/[0.06] hover:bg-white/[0.11] text-white border border-white/[0.12]'
+                        : 'bg-white/[0.03] text-slate-600 border border-white/[0.06] cursor-not-allowed'
                     }`}
                   >
                     <span>{preset.label}</span>
@@ -404,7 +373,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
           {/* GAME 1: DEEP CORE MINE */}
           {activeGame === 'mine' && (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-              <div className="lg:col-span-6 p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col justify-between gap-4">
+              <div className="lg:col-span-6 p-4 rounded-xl bg-[#10182b] border border-white/[0.08] flex flex-col justify-between gap-4">
                 <div className="space-y-2">
                   <div className="flex items-center justify-between gap-2">
                     <h3 className="text-base font-bold text-white flex items-center gap-2">
@@ -433,7 +402,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                       {formatNum(mg.mine.layerHp)} / {formatNum(mg.mine.layerMaxHp)} HP
                     </span>
                   </div>
-                  <div className="w-full h-3.5 rounded-lg bg-slate-950 border border-slate-800 overflow-hidden">
+                  <div className="w-full h-3.5 rounded-lg bg-[#070b14] border border-white/[0.07] overflow-hidden">
                     <div
                       className="h-full bg-amber-500 transition-all duration-100"
                       style={{
@@ -455,7 +424,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                     <span>지진파 발파 충전 ({Math.floor(mg.mine.seismicCharge || 0)}%)</span>
                     <span>충전 완료 시 {formatNum(mineMetrics.seismicBurstDamage)} DMG</span>
                   </div>
-                  <div className="w-full h-2 rounded-full bg-slate-950 border border-slate-800 overflow-hidden">
+                  <div className="w-full h-2 rounded-full bg-[#070b14] border border-white/[0.07] overflow-hidden">
                     <div
                       className="h-full bg-rose-500 transition-all duration-100"
                       style={{ width: `${Math.min(100, mg.mine.seismicCharge || 0)}%` }}
@@ -477,7 +446,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                       className={`min-h-[44px] px-4 py-2 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-colors ${
                         (mg.mine.seismicCharge || 0) >= 100
                           ? 'bg-rose-600 hover:bg-rose-500 text-white cursor-pointer'
-                          : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                          : 'bg-white/[0.04] text-slate-500 border border-white/[0.06] cursor-not-allowed'
                       }`}
                     >
                       <Flame className="w-4 h-4" />
@@ -503,7 +472,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                   return (
                     <div
                       key={item.kind}
-                      className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col justify-between gap-2"
+                      className="p-3 rounded-xl bg-[#10182b] border border-white/[0.08] flex flex-col justify-between gap-2"
                     >
                       <div>
                         <div className="text-xs font-bold text-white flex items-center justify-between">
@@ -518,7 +487,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                         className={`w-full min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-mono-numbers font-bold cursor-pointer transition-colors ${
                           affordable
                             ? 'bg-amber-500 hover:bg-amber-400 text-slate-950'
-                            : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                            : 'bg-white/[0.04] text-slate-500 border border-white/[0.06] cursor-not-allowed'
                         }`}
                       >
                         강화 ({formatNum(cost)} ◈)
@@ -533,7 +502,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
           {/* GAME 2: FUSION POWER PLANT (4x4 GRID + TURBINE) */}
           {activeGame === 'reactor' && (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-              <div className="lg:col-span-7 p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-3">
+              <div className="lg:col-span-7 p-4 rounded-xl bg-[#10182b] border border-white/[0.08] space-y-3">
                 <div className="flex items-center justify-between gap-2">
                   <div>
                     <h3 className="text-base font-bold text-white flex items-center gap-2">
@@ -570,8 +539,8 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                       onClick={() => setReactorBrush(id)}
                       className={`min-h-[38px] px-2 py-1 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1 whitespace-nowrap cursor-pointer ${
                         reactorBrush === id
-                          ? 'bg-cyan-600 text-white'
-                          : 'bg-slate-800/80 text-slate-300 hover:text-white'
+                          ? 'bg-cyan-600 text-white border border-cyan-400/50'
+                          : 'bg-white/[0.04] border border-white/[0.08] text-slate-300 hover:text-white hover:bg-white/[0.08]'
                       }`}
                     >
                       <Icon className="w-3.5 h-3.5 shrink-0" />
@@ -639,7 +608,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                       {reactorMetrics.netHeatPerSec.toFixed(1)}%/s
                     </span>
                   </div>
-                  <div className="relative w-full h-3 rounded-lg bg-slate-950 border border-slate-800 overflow-hidden">
+                  <div className="relative w-full h-3 rounded-lg bg-[#070b14] border border-white/[0.07] overflow-hidden">
                     <div
                       className={`h-full transition-all duration-100 ${
                         mg.reactor.overheated
@@ -653,7 +622,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                   </div>
                   <button
                     onClick={onVentReactor}
-                    className="w-full min-h-[40px] px-4 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs font-bold cursor-pointer flex items-center justify-center gap-2"
+                    className="w-full min-h-[40px] px-4 py-1.5 rounded-lg bg-white/[0.06] hover:bg-white/[0.11] border border-white/[0.09] text-cyan-300 text-xs font-bold cursor-pointer flex items-center justify-center gap-2"
                   >
                     <Wind className="w-4 h-4" />
                     <span>긴급 냉각 배기 (-38% 온도)</span>
@@ -676,7 +645,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                   return (
                     <div
                       key={item.kind}
-                      className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between gap-3"
+                      className="p-3 rounded-xl bg-[#10182b] border border-white/[0.08] flex items-center justify-between gap-3"
                     >
                       <div className="min-w-0">
                         <div className="text-xs font-bold text-white">
@@ -693,7 +662,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                             ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-700/50 cursor-default'
                             : affordable
                             ? 'bg-cyan-500 hover:bg-cyan-400 text-slate-950'
-                            : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                            : 'bg-white/[0.04] text-slate-500 border border-white/[0.06] cursor-not-allowed'
                         }`}
                       >
                         {item.maxed ? '완료' : `${formatNum(cost)} ⚡`}
@@ -708,7 +677,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
           {/* GAME 3: ORBITAL SHIPYARD (5 UNITS) */}
           {activeGame === 'shipyard' && (
             <div className="space-y-3.5">
-              <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="p-4 rounded-xl bg-[#10182b] border border-white/[0.08] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
                   <h3 className="text-base font-bold text-white flex items-center gap-2">
                     <Rocket className="w-4 h-4 text-indigo-400" />
@@ -742,7 +711,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                     className={`min-h-[40px] px-3.5 py-2 rounded-lg text-xs font-mono-numbers font-bold whitespace-nowrap cursor-pointer ${
                       mg.shipyard.totalCargoShipped >= shipyardMetrics.prestigeReq
                         ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
-                        : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                        : 'bg-white/[0.04] text-slate-500 border border-white/[0.06] cursor-not-allowed'
                     }`}
                   >
                     함대 도약 ({formatNum(mg.shipyard.totalCargoShipped)}/{formatNum(shipyardMetrics.prestigeReq)} t)
@@ -765,7 +734,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                   return (
                     <div
                       key={stage.kind}
-                      className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col justify-between gap-3"
+                      className="p-3 rounded-xl bg-[#10182b] border border-white/[0.08] flex flex-col justify-between gap-3"
                     >
                       <div className="space-y-1">
                         <div className="text-[10px] text-slate-400">{stage.step}</div>
@@ -786,7 +755,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                         className={`w-full min-h-[38px] px-2.5 py-1.5 rounded-lg text-xs font-mono-numbers font-bold cursor-pointer ${
                           affordable
                             ? 'bg-indigo-500 hover:bg-indigo-400 text-white'
-                            : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                            : 'bg-white/[0.04] text-slate-500 border border-white/[0.06] cursor-not-allowed'
                         }`}
                       >
                         증설 ({formatNum(cost)} ✦)
@@ -801,7 +770,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
           {/* GAME 4: QUANTUM RESEARCH LAB */}
           {activeGame === 'quantum' && (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-              <div className="lg:col-span-7 p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-3.5">
+              <div className="lg:col-span-7 p-4 rounded-xl bg-[#10182b] border border-white/[0.08] space-y-3.5">
                 <div className="flex items-center justify-between gap-2">
                   <div>
                     <h3 className="text-base font-bold text-white flex items-center gap-2">
@@ -835,7 +804,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                     return (
                       <div
                         key={label}
-                        className="p-2.5 rounded-lg bg-slate-950/70 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                        className="p-2.5 rounded-lg bg-[#070b14] border border-white/[0.07] flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                       >
                         <div className="flex items-center justify-between sm:justify-start gap-2">
                           <span className="text-xs font-semibold text-white">{label}</span>
@@ -853,7 +822,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                                   ? matched
                                     ? 'bg-emerald-500 text-slate-950'
                                     : 'bg-sky-600 text-white'
-                                  : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                                  : 'bg-white/[0.05] text-slate-300 border border-white/[0.08] hover:bg-white/[0.1]'
                               }`}
                             >
                               {val}
@@ -872,7 +841,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                       {(mg.quantum.experimentProgress * 100).toFixed(0)}% · +{formatNum(quantumMetrics.experimentRewardRp)} RP
                     </span>
                   </div>
-                  <div className="w-full h-3 rounded-lg bg-slate-950 border border-slate-800 overflow-hidden">
+                  <div className="w-full h-3 rounded-lg bg-[#070b14] border border-white/[0.07] overflow-hidden">
                     <div
                       className="h-full bg-emerald-500 transition-all duration-100"
                       style={{ width: `${Math.min(100, Math.max(2, mg.quantum.experimentProgress * 100))}%` }}
@@ -893,7 +862,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                       className={`min-h-[42px] px-4 py-2 rounded-lg text-xs font-mono-numbers font-bold flex items-center justify-center gap-1.5 ${
                         mg.quantum.experimentsCompleted >= quantumMetrics.leapReq
                           ? 'bg-indigo-500 hover:bg-indigo-400 text-white cursor-pointer'
-                          : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                          : 'bg-white/[0.04] text-slate-500 border border-white/[0.06] cursor-not-allowed'
                       }`}
                     >
                       <Sparkles className="w-4 h-4" />
@@ -918,7 +887,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                   return (
                     <div
                       key={item.kind}
-                      className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between gap-3"
+                      className="p-3 rounded-xl bg-[#10182b] border border-white/[0.08] flex items-center justify-between gap-3"
                     >
                       <div className="min-w-0">
                         <div className="text-xs font-bold text-white">
@@ -935,7 +904,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                             ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-700/50 cursor-default'
                             : affordable
                             ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
-                            : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                            : 'bg-white/[0.04] text-slate-500 border border-white/[0.06] cursor-not-allowed'
                         }`}
                       >
                         {item.maxed ? '완료' : `${formatNum(cost)} ⚛`}
@@ -950,7 +919,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
           {/* GAME 5: ORBITAL SOLAR ARRAY */}
           {activeGame === 'solar' && (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-              <div className="lg:col-span-6 p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col justify-between gap-4">
+              <div className="lg:col-span-6 p-4 rounded-xl bg-[#10182b] border border-white/[0.08] flex flex-col justify-between gap-4">
                 <div className="flex items-center justify-between gap-2">
                   <div>
                     <h3 className="text-base font-bold text-white flex items-center gap-2">
@@ -971,7 +940,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                   </div>
                 </div>
 
-                <div className="p-3 rounded-xl bg-slate-950/75 border border-slate-800 space-y-2">
+                <div className="p-3 rounded-xl bg-[#070b14] border border-white/[0.07] space-y-2">
                   <div className="flex items-center justify-between text-xs font-mono-numbers">
                     <span className="text-slate-300">
                       현재 궤도 거울각: <strong className="text-white">{mg.solar.orbitalAngle}</strong> (목표 {mg.solar.optimalAngle})
@@ -994,8 +963,8 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                               : isCur
                               ? 'bg-sky-600 text-white'
                               : isOpt
-                              ? 'bg-slate-800 border border-yellow-400/70 text-yellow-300'
-                              : 'bg-slate-900 text-slate-400 hover:bg-slate-800'
+                              ? 'bg-white/[0.06] border border-amber-400/60 text-amber-300'
+                              : 'bg-[#070b14] border border-white/[0.07] text-slate-400 hover:bg-white/[0.06]'
                           }`}
                         >
                           {ang}
@@ -1010,7 +979,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                     <span>태양풍 펄스 충전 ({Math.floor(mg.solar.pulseCharge)}%)</span>
                     <span className="text-yellow-300">+{formatNum(solarMetrics.pulseGw)} GW</span>
                   </div>
-                  <div className="w-full h-2.5 rounded-full bg-slate-950 border border-slate-800 overflow-hidden">
+                  <div className="w-full h-2.5 rounded-full bg-[#070b14] border border-white/[0.07] overflow-hidden">
                     <div
                       className="h-full bg-yellow-400 transition-all duration-100"
                       style={{ width: `${Math.min(100, mg.solar.pulseCharge)}%` }}
@@ -1043,7 +1012,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                   return (
                     <div
                       key={item.kind}
-                      className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col justify-between gap-2"
+                      className="p-3 rounded-xl bg-[#10182b] border border-white/[0.08] flex flex-col justify-between gap-2"
                     >
                       <div>
                         <div className="text-xs font-bold text-white flex items-center justify-between">
@@ -1060,7 +1029,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                             ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-700/50 cursor-default'
                             : affordable
                             ? 'bg-yellow-500 hover:bg-yellow-400 text-slate-950'
-                            : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                            : 'bg-white/[0.04] text-slate-500 border border-white/[0.06] cursor-not-allowed'
                         }`}
                       >
                         {item.maxed ? '완료' : `강화 (${formatNum(cost)} ☀)`}
@@ -1075,7 +1044,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
           {/* GAME 6: TERRA BIODOME */}
           {activeGame === 'bio' && (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-              <div className="lg:col-span-6 p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col justify-between gap-4">
+              <div className="lg:col-span-6 p-4 rounded-xl bg-[#10182b] border border-white/[0.08] flex flex-col justify-between gap-4">
                 <div className="flex items-center justify-between gap-2">
                   <div>
                     <h3 className="text-base font-bold text-white flex items-center gap-2">
@@ -1096,7 +1065,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                   </div>
                 </div>
 
-                <div className="p-3 rounded-xl bg-slate-950/75 border border-slate-800 space-y-2">
+                <div className="p-3 rounded-xl bg-[#070b14] border border-white/[0.07] space-y-2">
                   <div className="flex items-center justify-between text-xs font-mono-numbers">
                     <span className="text-slate-300 flex items-center gap-1">
                       <Droplets className="w-3.5 h-3.5 text-sky-400" />
@@ -1106,7 +1075,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                       {bioMetrics.isOptimalHumidity ? '최적 광합성 구간 (45~75%)' : '습도 조절 필요'}
                     </span>
                   </div>
-                  <div className="relative w-full h-3 rounded-lg bg-slate-900 border border-slate-800 overflow-hidden">
+                  <div className="relative w-full h-3 rounded-lg bg-[#070b14] border border-white/[0.07] overflow-hidden">
                     <div
                       className="absolute top-0 bottom-0 bg-green-500/20 border-x border-green-500/40"
                       style={{ left: '45%', width: '30%' }}
@@ -1121,13 +1090,13 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       onClick={() => onMistBio(10)}
-                      className="min-h-[36px] rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-300 text-xs font-bold cursor-pointer"
+                      className="min-h-[36px] rounded-lg bg-white/[0.06] hover:bg-white/[0.11] border border-white/[0.08] text-sky-300 text-xs font-bold cursor-pointer"
                     >
                       가습 분사 (+10%)
                     </button>
                     <button
                       onClick={() => onMistBio(-10)}
-                      className="min-h-[36px] rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-bold cursor-pointer"
+                      className="min-h-[36px] rounded-lg bg-white/[0.06] hover:bg-white/[0.11] border border-white/[0.08] text-amber-300 text-xs font-bold cursor-pointer"
                     >
                       환기 제습 (-10%)
                     </button>
@@ -1149,7 +1118,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                     className={`min-h-[44px] px-4 py-2 rounded-xl text-xs font-mono-numbers font-bold flex items-center justify-center gap-1.5 ${
                       mg.bio.totalBiomass >= bioMetrics.evolveReq
                         ? 'bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer'
-                        : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                        : 'bg-white/[0.04] text-slate-500 border border-white/[0.06] cursor-not-allowed'
                     }`}
                   >
                     <span>생태계 진화 ({formatNum(mg.bio.totalBiomass)}/{formatNum(bioMetrics.evolveReq)})</span>
@@ -1172,7 +1141,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                   return (
                     <div
                       key={item.kind}
-                      className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col justify-between gap-2"
+                      className="p-3 rounded-xl bg-[#10182b] border border-white/[0.08] flex flex-col justify-between gap-2"
                     >
                       <div>
                         <div className="text-xs font-bold text-white flex items-center justify-between">
@@ -1187,7 +1156,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                         className={`w-full min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-mono-numbers font-bold cursor-pointer ${
                           affordable
                             ? 'bg-green-500 hover:bg-green-400 text-slate-950'
-                            : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                            : 'bg-white/[0.04] text-slate-500 border border-white/[0.06] cursor-not-allowed'
                         }`}
                       >
                         배양 ({formatNum(cost)} ✿)
@@ -1202,7 +1171,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
           {/* GAME 7: SUPERCONDUCTING COLLIDER */}
           {activeGame === 'collider' && (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-              <div className="lg:col-span-6 p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col justify-between gap-4">
+              <div className="lg:col-span-6 p-4 rounded-xl bg-[#10182b] border border-white/[0.08] flex flex-col justify-between gap-4">
                 <div className="flex items-center justify-between gap-2">
                   <div>
                     <h3 className="text-base font-bold text-white flex items-center gap-2">
@@ -1228,7 +1197,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                     <span className="text-slate-300">빔 광도(Luminosity) 충전 ({Math.floor(mg.collider.luminosity)}%)</span>
                     <span className="text-pink-300">폭주 +{formatNum(colliderMetrics.burstDamageTeV)} TeV</span>
                   </div>
-                  <div className="w-full h-3.5 rounded-lg bg-slate-950 border border-slate-800 overflow-hidden">
+                  <div className="w-full h-3.5 rounded-lg bg-[#070b14] border border-white/[0.07] overflow-hidden">
                     <div
                       className="h-full bg-pink-500 transition-all duration-100"
                       style={{ width: `${Math.min(100, mg.collider.luminosity)}%` }}
@@ -1251,7 +1220,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                     className={`min-h-[44px] px-4 py-2 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 ${
                       mg.collider.luminosity >= 100
                         ? 'bg-fuchsia-600 hover:bg-fuchsia-500 text-white cursor-pointer'
-                        : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                        : 'bg-white/[0.04] text-slate-500 border border-white/[0.06] cursor-not-allowed'
                     }`}
                   >
                     <Sparkles className="w-4 h-4" />
@@ -1276,7 +1245,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                   return (
                     <div
                       key={item.kind}
-                      className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col justify-between gap-2"
+                      className="p-3 rounded-xl bg-[#10182b] border border-white/[0.08] flex flex-col justify-between gap-2"
                     >
                       <div>
                         <div className="text-xs font-bold text-white flex items-center justify-between">
@@ -1291,7 +1260,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                         className={`w-full min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-mono-numbers font-bold cursor-pointer ${
                           affordable
                             ? 'bg-pink-500 hover:bg-pink-400 text-slate-950'
-                            : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                            : 'bg-white/[0.04] text-slate-500 border border-white/[0.06] cursor-not-allowed'
                         }`}
                       >
                         증설 ({formatNum(cost)} ⊕)
@@ -1308,7 +1277,7 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
       {/* MILESTONE PROGRESSION TRACK FOR ACTIVE MINIGAME (8 Tiers per game) */}
           <section
             data-testid="minigame-milestones"
-            className="p-3.5 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2.5"
+            className="pt-4 border-t border-white/[0.07] space-y-3"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
@@ -1329,8 +1298,8 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                   data-testid={`milestone-card-${ms.def.id}`}
                   className={`p-3 rounded-xl border flex flex-col justify-between gap-2 ${
                     ms.achieved
-                      ? 'bg-emerald-950/30 border-emerald-500/50'
-                      : 'bg-slate-950/70 border-slate-800'
+                      ? 'bg-emerald-950/25 border-emerald-500/40'
+                      : 'bg-[#10182b] border-white/[0.08]'
                   }`}
                 >
                   <div className="space-y-1">
@@ -1352,9 +1321,9 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
                   </div>
 
                   <div className="space-y-1">
-                    <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                    <div className="w-full h-1.5 rounded-full bg-[#070b14] border border-white/[0.05] overflow-hidden">
                       <div
-                        className={`h-full transition-all duration-150 ${
+                        className={`h-full transition-all duration-150 rounded-full ${
                           ms.achieved ? 'bg-emerald-400' : 'bg-amber-400'
                         }`}
                         style={{ width: `${ms.progressPct}%` }}
@@ -1374,15 +1343,14 @@ export const TownArcadePanel: React.FC<TownArcadePanelProps> = ({
             </div>
           </section>
 
-          <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400 font-mono-numbers">
+          <div className="pt-3 border-t border-white/[0.07] flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400 font-mono-numbers">
             <span className="flex items-center gap-1.5">
               <Cpu className="w-3.5 h-3.5 text-slate-500" />
               <span>화폐는 $ → 화폐 단방향 환전 전용 · 마일스톤 달성 시 메인 자금($) 수익 부스트 적용</span>
             </span>
             <span>누적 환전 투자액: ${formatNum(mg.totalMoneyInvested)}</span>
           </div>
-        </div>
       </div>
-    </div>
+    </ModalShell>
   );
 };

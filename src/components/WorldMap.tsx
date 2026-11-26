@@ -52,6 +52,7 @@ import {
   isEdgeInViewport,
   isNodeInViewport,
   OVERVIEW_ZOOM_THRESHOLD,
+  UNEXPLORED_NODE_MIN_ZOOM,
   ViewportBounds,
 } from '../game/osmOverview';
 
@@ -216,6 +217,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
 
   const [viewportBounds, setViewportBounds] = useState<ViewportBounds | null>(null);
   const [isOverviewZoom, setIsOverviewZoom] = useState(false);
+  const [isUnexploredHidden, setIsUnexploredHidden] = useState(false);
 
   const [tileType, setTileType] = useState<'dark' | 'osm' | 'satellite'>('dark');
   const tileTypeRef = useRef<'dark' | 'osm' | 'satellite'>('dark');
@@ -497,33 +499,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
               'line-dasharray': [4, 3],
             },
           },
-          // Overview Zoom (< 11.5): simplified smooth curved polylines (no sub-pixel dot clutter)
-          {
-            id: 'osm-overview-unbuilt-road',
-            type: 'line',
-            source: 'osm-edges-overview',
-            maxzoom: OVERVIEW_ZOOM_THRESHOLD,
-            filter: ['all', ['==', ['get', 'built'], false], ['==', ['get', 'mode'], 'road']],
-            layout: { 'line-cap': 'round', 'line-join': 'round' },
-            paint: {
-              'line-color': '#f59e0b',
-              'line-width': ['interpolate', ['linear'], ['zoom'], 2, 1.0, 8, 1.7, 11.4, 2.5],
-              'line-opacity': ['case', ['==', ['get', 'tier'], 'major'], 0.58, 0.34],
-            },
-          },
-          {
-            id: 'osm-overview-unbuilt-rail',
-            type: 'line',
-            source: 'osm-edges-overview',
-            maxzoom: OVERVIEW_ZOOM_THRESHOLD,
-            filter: ['all', ['==', ['get', 'built'], false], ['==', ['get', 'mode'], 'rail']],
-            layout: { 'line-cap': 'round', 'line-join': 'round' },
-            paint: {
-              'line-color': '#22d3ee',
-              'line-width': ['interpolate', ['linear'], ['zoom'], 2, 1.1, 8, 2.0, 11.4, 2.7],
-              'line-opacity': 0.65,
-            },
-          },
+          // Overview Zoom (< 11.5): simplified smooth curved polylines for built routes only (no unbuilt clutter)
           {
             id: 'osm-overview-built-casing',
             type: 'line',
@@ -550,12 +526,12 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
               'line-opacity': 0.98,
             },
           },
-          // Street Zoom (>= 11.5): detailed clickable nodes & frontier edges
+          // Street Zoom (>= 11.5 built/connected, >= 12.8 unexplored frontier): detailed clickable nodes & edges
           {
             id: 'osm-edges-unbuilt-road',
             type: 'line',
             source: 'osm-edges-frontier',
-            minzoom: OVERVIEW_ZOOM_THRESHOLD,
+            minzoom: UNEXPLORED_NODE_MIN_ZOOM,
             filter: [
               'all',
               ['==', ['get', 'mode'], 'road'],
@@ -577,7 +553,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
             id: 'osm-edges-unbuilt-pedestrian',
             type: 'line',
             source: 'osm-edges-frontier',
-            minzoom: OVERVIEW_ZOOM_THRESHOLD,
+            minzoom: UNEXPLORED_NODE_MIN_ZOOM,
             filter: [
               'any',
               ['==', ['get', 'highwayType'], 'pedestrian'],
@@ -598,7 +574,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
             id: 'osm-edges-unbuilt-rail',
             type: 'line',
             source: 'osm-edges-frontier',
-            minzoom: OVERVIEW_ZOOM_THRESHOLD,
+            minzoom: UNEXPLORED_NODE_MIN_ZOOM,
             filter: ['==', ['get', 'mode'], 'rail'],
             layout: { 'line-cap': 'butt', 'line-join': 'round' },
             paint: {
@@ -720,11 +696,16 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
             },
           },
           {
-            id: 'osm-nodes-halo',
+            id: 'osm-nodes-unexplored-halo',
             type: 'circle',
             source: 'osm-nodes',
-            minzoom: OVERVIEW_ZOOM_THRESHOLD,
-            filter: ['all', ['==', ['get', 'hideDot'], false], ['!=', ['get', 'mode'], 'road']],
+            minzoom: UNEXPLORED_NODE_MIN_ZOOM,
+            filter: [
+              'all',
+              ['==', ['get', 'isExplored'], false],
+              ['==', ['get', 'hideDot'], false],
+              ['!=', ['get', 'mode'], 'road'],
+            ],
             paint: {
               'circle-radius': ['get', 'haloRadius'],
               'circle-color': 'rgba(0,0,0,0)',
@@ -736,10 +717,48 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
             },
           },
           {
-            id: 'osm-nodes-circle',
+            id: 'osm-nodes-unexplored-circle',
+            type: 'circle',
+            source: 'osm-nodes',
+            minzoom: UNEXPLORED_NODE_MIN_ZOOM,
+            filter: ['==', ['get', 'isExplored'], false],
+            paint: {
+              'circle-radius': ['get', 'radius'],
+              'circle-color': ['get', 'fillColor'],
+              'circle-opacity': ['get', 'fillOpacity'],
+              'circle-stroke-color': ['get', 'strokeColor'],
+              'circle-stroke-width': ['get', 'strokeWidth'],
+              'circle-stroke-opacity': ['get', 'strokeOpacity'],
+              'circle-pitch-alignment': 'viewport',
+            },
+          },
+          {
+            id: 'osm-nodes-connected-halo',
             type: 'circle',
             source: 'osm-nodes',
             minzoom: OVERVIEW_ZOOM_THRESHOLD,
+            filter: [
+              'all',
+              ['==', ['get', 'isExplored'], true],
+              ['==', ['get', 'hideDot'], false],
+              ['!=', ['get', 'mode'], 'road'],
+            ],
+            paint: {
+              'circle-radius': ['get', 'haloRadius'],
+              'circle-color': 'rgba(0,0,0,0)',
+              'circle-opacity': 0,
+              'circle-stroke-color': ['get', 'haloColor'],
+              'circle-stroke-width': ['get', 'haloWidth'],
+              'circle-stroke-opacity': ['get', 'haloOpacity'],
+              'circle-pitch-alignment': 'viewport',
+            },
+          },
+          {
+            id: 'osm-nodes-connected-circle',
+            type: 'circle',
+            source: 'osm-nodes',
+            minzoom: OVERVIEW_ZOOM_THRESHOLD,
+            filter: ['==', ['get', 'isExplored'], true],
             paint: {
               'circle-radius': ['get', 'radius'],
               'circle-color': ['get', 'fillColor'],
@@ -797,19 +816,24 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
     map.addControl(new maplibregl.GlobeControl(), 'bottom-right');
 
     const queryNearestOsmNode = (point: maplibregl.Point) => {
-      if (
-        !styleReadyRef.current ||
-        !map.getLayer('osm-nodes-circle') ||
-        map.getZoom() < OVERVIEW_ZOOM_THRESHOLD
-      ) {
+      const zoom = map.getZoom();
+      if (!styleReadyRef.current || zoom < OVERVIEW_ZOOM_THRESHOLD) {
         return null;
       }
+      const queryLayers: string[] = [];
+      if (map.getLayer('osm-nodes-connected-circle')) {
+        queryLayers.push('osm-nodes-connected-circle');
+      }
+      if (zoom >= UNEXPLORED_NODE_MIN_ZOOM && map.getLayer('osm-nodes-unexplored-circle')) {
+        queryLayers.push('osm-nodes-unexplored-circle');
+      }
+      if (queryLayers.length === 0) return null;
       const tol = isTouchRef.current ? 16 : 7;
       const bbox: [maplibregl.PointLike, maplibregl.PointLike] = [
         [point.x - tol, point.y - tol],
         [point.x + tol, point.y + tol],
       ];
-      const features = map.queryRenderedFeatures(bbox, { layers: ['osm-nodes-circle'] });
+      const features = map.queryRenderedFeatures(bbox, { layers: queryLayers });
       if (features.length === 0) return null;
 
       let best = features[0];
@@ -865,9 +889,15 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
         mapContainerRef.current.dataset.globeOverview = z < 8.5 ? 'true' : 'false';
         mapContainerRef.current.dataset.lodOverview =
           z < OVERVIEW_ZOOM_THRESHOLD ? 'true' : 'false';
+        mapContainerRef.current.dataset.unexploredHidden =
+          z < UNEXPLORED_NODE_MIN_ZOOM ? 'true' : 'false';
       }
       setIsOverviewZoom((prev) => {
         const next = z < OVERVIEW_ZOOM_THRESHOLD;
+        return prev === next ? prev : next;
+      });
+      setIsUnexploredHidden((prev) => {
+        const next = z < UNEXPLORED_NODE_MIN_ZOOM;
         return prev === next ? prev : next;
       });
     };
@@ -1551,8 +1581,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
     }
 
     const unlockedEdges = osmEdges.filter((edge) => {
-      if (edge.coordinates.length < 2) return false;
-      if (edge.built) return true;
+      if (!edge.built || edge.coordinates.length < 2) return false;
       const nFrom = osmNodeIndex.byId.get(edge.fromNodeId);
       const nTo = osmNodeIndex.byId.get(edge.toNodeId);
       return Boolean(
@@ -1664,9 +1693,13 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
   );
   const frontierAffordSig = `${frontierEdgePack.entries.length}:${frontierAffordableCount}`;
 
-  // Update Unbuilt Frontier Edges GeoJSON (viewport-culled in Street Zoom; skipped while Overview Zoom curves handle display)
+  // Update Unbuilt Frontier Edges GeoJSON (viewport-culled in Street Zoom; skipped while Overview Zoom curves handle display or when wide zoom hides unexplored elements)
   useEffect(() => {
-    if (isOverviewZoom) return;
+    if (isOverviewZoom || isUnexploredHidden) {
+      frontierEdgesGeoJsonRef.current = EMPTY_FC;
+      syncSourceData('osm-edges-frontier', EMPTY_FC);
+      return;
+    }
     const hasAnyConnected = osmNodeIndex.hasAnyConnected;
     const features: Array<Record<string, unknown>> = [];
     const curCapital = gameStateRef.current.capital;
@@ -1701,7 +1734,14 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
     const fc = { type: 'FeatureCollection', features } as unknown as GeoJsonData;
     frontierEdgesGeoJsonRef.current = fc;
     syncSourceData('osm-edges-frontier', fc);
-  }, [frontierEdgePack, frontierAffordSig, osmNodeIndex.hasAnyConnected, viewportBounds, isOverviewZoom]);
+  }, [
+    frontierEdgePack,
+    frontierAffordSig,
+    osmNodeIndex.hasAnyConnected,
+    viewportBounds,
+    isOverviewZoom,
+    isUnexploredHidden,
+  ]);
 
   // Update Atomic OpenStreetMap Nodes GeoJSON (viewport-culled when zoomed into Street Zoom >= 11.5)
   useEffect(() => {
@@ -1746,6 +1786,10 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
 
     const processNode = (node: (typeof gameState.osmNodes)[number]) => {
       const isSelected = node.id === selectedOsmNodeId;
+      const isExplored = Boolean(node.connected || isSelected);
+      if (isUnexploredHidden && !isExplored) {
+        return;
+      }
       const isReachable =
         !selectedOsmNodeId ||
         isSelected ||
@@ -1863,6 +1907,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
         properties: {
           id: node.id,
           mode,
+          isExplored: Boolean(node.connected || isSelected),
           isPendingSeed,
           hideDot,
           haloRadius,
@@ -1921,12 +1966,13 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
     gameState.provincialRegions,
     viewportBounds,
     isOverviewZoom,
+    isUnexploredHidden,
   ]);
 
   // Update lightweight 0-or-1 feature hover highlight without touching the main osm-nodes source
   useEffect(() => {
     const node = hoverOsmNodeId ? osmNodeIndex.byId.get(hoverOsmNodeId) : undefined;
-    if (!node) {
+    if (!node || (isUnexploredHidden && !node.connected && node.id !== selectedOsmNodeId)) {
       hoverNodeGeoJsonRef.current = EMPTY_FC;
       syncSourceData('osm-hover-node', EMPTY_FC);
       return;
@@ -2001,6 +2047,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
     pendingRegionList,
     gameState.osmNodes,
     gameState.osmEdges,
+    isUnexploredHidden,
   ]);
 
   // Visualize Unlocked Region Borders + Expandable Neighboring Regions (Polygons & Interactive Map Labels)
@@ -2087,12 +2134,13 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       wrapper.style.gap = '6px';
       wrapper.style.padding = '4px 8px';
       wrapper.style.borderRadius = '8px';
-      wrapper.style.background = 'rgba(2, 6, 23, 0.92)';
+      wrapper.style.background = 'rgba(11, 18, 32, 0.92)';
+      wrapper.style.backdropFilter = 'blur(10px)';
       wrapper.style.border = isSelected
         ? '1.5px solid #38bdf8'
         : canAfford
-        ? '1px solid rgba(56, 189, 248, 0.7)'
-        : '1px solid rgba(245, 158, 11, 0.55)';
+        ? '1px solid rgba(56, 189, 248, 0.6)'
+        : '1px solid rgba(255, 255, 255, 0.14)';
       wrapper.style.boxShadow = '0 4px 14px rgba(0, 0, 0, 0.5)';
       wrapper.style.cursor = 'pointer';
       wrapper.style.userSelect = 'none';
@@ -2110,10 +2158,11 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       if (callbacksRef.current.onUnlockRegion) {
         const unlockBtn = document.createElement('button');
         unlockBtn.type = 'button';
+        unlockBtn.dataset.unlockBtnRegion = region.regionId;
         unlockBtn.disabled = !canAfford || Boolean(unlockingRegionId);
         unlockBtn.textContent = isBusy ? '로드 중' : '개척';
         unlockBtn.style.padding = '2px 7px';
-        unlockBtn.style.borderRadius = '5px';
+        unlockBtn.style.borderRadius = '6px';
         unlockBtn.style.fontSize = '10px';
         unlockBtn.style.fontWeight = '700';
         unlockBtn.style.border = 'none';
@@ -2147,6 +2196,19 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       regionMarkersRef.current.push(marker);
     }
   }, [expandableSig, gameState.provincialRegions, unlockingRegionId]);
+
+  useEffect(() => {
+    if (!unlockingRegionId) return;
+    const btn = document.querySelector<HTMLButtonElement>(
+      `[data-unlock-btn-region="${CSS.escape(unlockingRegionId)}"]`
+    );
+    if (btn) {
+      btn.textContent =
+        loadingProgress?.active && typeof loadingProgress.percent === 'number'
+          ? `로드 ${loadingProgress.percent}%`
+          : '로드 중';
+    }
+  }, [unlockingRegionId, loadingProgress?.active, loadingProgress?.percent]);
 
   const flyTo = (lat: number, lng: number, zoom: number) => {
     const map = mapInstanceRef.current;
@@ -2203,7 +2265,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
           <button
             data-testid="mobile-region-toggle"
             onClick={() => setMobileRegionsOpen((o) => !o)}
-            className="min-h-[40px] px-2.5 rounded-xl bg-slate-950/95 border border-slate-800 text-xs font-semibold text-slate-200 shadow-lg flex items-center gap-1 shrink-0 cursor-pointer"
+            className="min-h-[38px] px-3 rounded-xl ui-glass text-xs font-semibold text-slate-200 shadow-lg flex items-center gap-1 shrink-0 cursor-pointer"
           >
             <Compass className="w-3.5 h-3.5 text-sky-400" />
             <span>지역</span>
@@ -2217,7 +2279,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
           <button
             onClick={cycleTileLayer}
             aria-label="지도 스타일 전환"
-            className="min-h-[40px] px-2.5 rounded-xl bg-slate-950/95 border border-slate-800 text-xs font-semibold text-slate-200 shadow-lg flex items-center gap-1 shrink-0 cursor-pointer"
+            className="min-h-[38px] px-3 rounded-xl ui-glass text-xs font-semibold text-slate-200 shadow-lg flex items-center gap-1 shrink-0 cursor-pointer"
           >
             <Layers className="w-3.5 h-3.5 text-amber-400" />
             <span>{tileLabel}</span>
@@ -2225,7 +2287,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
         </div>
 
         {mobileRegionsOpen && (
-          <div className="pointer-events-auto flex items-center gap-1.5 p-1.5 rounded-xl bg-slate-950/95 border border-slate-800 shadow-xl overflow-x-auto no-scrollbar">
+          <div className="pointer-events-auto flex items-center gap-1.5 p-1.5 rounded-xl ui-glass shadow-xl overflow-x-auto no-scrollbar">
             <button
               onClick={() => {
                 flyTo(
@@ -2235,7 +2297,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
                 );
                 setMobileRegionsOpen(false);
               }}
-              className="min-h-[36px] px-3 py-1 text-xs rounded-lg font-semibold text-sky-300 bg-sky-500/15 whitespace-nowrap shrink-0 cursor-pointer"
+              className="min-h-[34px] px-3 py-1 text-xs rounded-lg font-semibold text-sky-300 bg-sky-500/15 whitespace-nowrap shrink-0 cursor-pointer"
             >
               내 도시 ({gameState.startingCity.name.split(' ')[0]})
             </button>
@@ -2244,7 +2306,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
                 flyTo(gameState.startingCity.lat, gameState.startingCity.lng, 8.2);
                 setMobileRegionsOpen(false);
               }}
-              className="min-h-[36px] px-3 py-1 text-xs rounded-lg font-semibold text-emerald-300 bg-emerald-500/15 whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1"
+              className="min-h-[34px] px-3 py-1 text-xs rounded-lg font-semibold text-emerald-300 bg-emerald-500/15 whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1"
             >
               <MapPin className="w-3.5 h-3.5" />
               개척 가능 지역
@@ -2254,7 +2316,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
                 flyTo(gameState.startingCity.lat, gameState.startingCity.lng, 2.5);
                 setMobileRegionsOpen(false);
               }}
-              className="min-h-[36px] px-3 py-1 text-xs rounded-lg font-semibold text-cyan-300 bg-cyan-500/15 whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1"
+              className="min-h-[34px] px-3 py-1 text-xs rounded-lg font-semibold text-cyan-300 bg-cyan-500/15 whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1"
             >
               <Globe className="w-3.5 h-3.5" />
               3D 지구본
@@ -2265,7 +2327,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
                   onOpenExpansionTab();
                   setMobileRegionsOpen(false);
                 }}
-                className="min-h-[36px] px-3 py-1 text-xs rounded-lg font-semibold text-indigo-300 bg-indigo-500/15 whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1"
+                className="min-h-[34px] px-3 py-1 text-xs rounded-lg font-semibold text-indigo-300 bg-indigo-500/15 whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1"
               >
                 <Lock className="w-3.5 h-3.5" />
                 지역 해금 ({regions.filter((r) => r.unlocked).length}/{regions.length})
@@ -2275,14 +2337,18 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
         )}
 
         {/* Compact Mobile Node Legend + Manual Viewport Rescan */}
-        <div className="self-start pointer-events-auto flex items-center gap-2 px-2.5 py-1 rounded-lg bg-slate-950/85 border border-slate-800/90 text-[10px] text-slate-300 shadow">
+        <div className="self-start pointer-events-auto flex items-center gap-2 px-2.5 py-1 rounded-lg ui-glass text-[10px] text-slate-300 shadow">
           <span className="flex items-center gap-1">
             <span className="w-2 h-2 rounded-full bg-amber-500 border border-amber-200 inline-block" />
-            도로 노드
+            도로
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 border border-emerald-200 inline-block" />
+            보행자
           </span>
           <span className="flex items-center gap-1">
             <span className="w-2.5 h-2.5 rounded-full border-2 border-cyan-400 bg-sky-950 inline-block" />
-            철도 노드
+            철도
           </span>
           {!isOverviewZoom && onLoadOsmChunksBatch && (
             <button
@@ -2290,17 +2356,17 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
               onClick={() => requestViewportChunksRef.current(true)}
               disabled={isLoadingOsm}
               title="현재 화면 도로·철도 노드 다시 수신"
-              className="ml-0.5 px-1.5 py-0.5 rounded bg-sky-500/20 hover:bg-sky-500/30 disabled:opacity-50 text-sky-300 font-semibold flex items-center gap-1 cursor-pointer"
+              className="ml-0.5 px-1.5 py-0.5 rounded bg-sky-500/18 hover:bg-sky-500/30 disabled:opacity-50 text-sky-300 font-semibold flex items-center gap-1 cursor-pointer"
             >
               <RefreshCw className={`w-2.5 h-2.5 ${isLoadingOsm ? 'animate-spin' : ''}`} />
-              도로 재수신
+              재수신
             </button>
           )}
         </div>
       </div>
 
       {/* DESKTOP Quick Region Jump Bar (md+) */}
-      <div className="hidden md:flex fixed top-18 left-3 z-20 items-center gap-1 p-1 rounded-xl bg-slate-950/95 border border-slate-800 shadow-xl max-w-[calc(100vw-24rem)] overflow-x-auto no-scrollbar">
+      <div className="hidden md:flex fixed top-18 left-3 z-20 items-center gap-1 p-1 rounded-xl ui-glass shadow-xl max-w-[calc(100vw-24rem)] overflow-x-auto no-scrollbar">
         <span className="text-[11px] font-medium text-slate-400 px-2 flex items-center gap-1 whitespace-nowrap">
           <Compass className="w-3.5 h-3.5 text-sky-400" />
           지역 이동
@@ -2326,7 +2392,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
         </button>
         <button
           onClick={() => flyTo(gameState.startingCity.lat, gameState.startingCity.lng, 2.5)}
-          className="px-2.5 py-1 text-xs rounded-lg font-semibold text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 transition-colors cursor-pointer whitespace-nowrap flex items-center gap-1"
+          className="px-2.5 py-1 text-xs rounded-lg font-semibold text-cyan-300 bg-cyan-500/12 hover:bg-cyan-500/22 transition-colors cursor-pointer whitespace-nowrap flex items-center gap-1"
         >
           <Globe className="w-3.5 h-3.5" />
           3D 지구본
@@ -2335,27 +2401,33 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
 
       {/* DESKTOP Right Top Map Controls: Tile Layer Switcher (md+) */}
       <div className="hidden md:flex fixed top-18 right-3 z-20 flex-col items-end gap-1.5">
-        <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-950/95 border border-slate-800 shadow-xl">
+        <div className="flex items-center gap-1 p-1 rounded-xl ui-glass shadow-xl">
           <button
             onClick={() => switchTileLayer('dark')}
-            className={`px-2.5 py-1 text-xs rounded-lg font-medium transition-colors cursor-pointer ${
-              tileType === 'dark' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'
+            className={`px-2.5 py-1 text-xs rounded-lg font-semibold transition-colors cursor-pointer ${
+              tileType === 'dark'
+                ? 'bg-sky-500 text-slate-950 font-bold'
+                : 'text-slate-400 hover:text-white hover:bg-white/[0.06]'
             }`}
           >
             다크 지도
           </button>
           <button
             onClick={() => switchTileLayer('osm')}
-            className={`px-2.5 py-1 text-xs rounded-lg font-medium transition-colors cursor-pointer ${
-              tileType === 'osm' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'
+            className={`px-2.5 py-1 text-xs rounded-lg font-semibold transition-colors cursor-pointer ${
+              tileType === 'osm'
+                ? 'bg-sky-500 text-slate-950 font-bold'
+                : 'text-slate-400 hover:text-white hover:bg-white/[0.06]'
             }`}
           >
             OSM 도로
           </button>
           <button
             onClick={() => switchTileLayer('satellite')}
-            className={`px-2.5 py-1 text-xs rounded-lg font-medium transition-colors cursor-pointer ${
-              tileType === 'satellite' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'
+            className={`px-2.5 py-1 text-xs rounded-lg font-semibold transition-colors cursor-pointer ${
+              tileType === 'satellite'
+                ? 'bg-sky-500 text-slate-950 font-bold'
+                : 'text-slate-400 hover:text-white hover:bg-white/[0.06]'
             }`}
           >
             위성
@@ -2363,23 +2435,27 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
         </div>
 
         {/* Compact Road vs Rail Node Legend + Manual Viewport Rescan */}
-        <div className="flex items-center gap-2.5 px-2.5 py-1 rounded-xl bg-slate-950/90 border border-slate-800 text-[11px] text-slate-300 shadow-lg">
+        <div className="flex items-center gap-2.5 px-3 py-1.5 rounded-xl ui-glass text-[11px] text-slate-300 shadow-lg">
           <span className="flex items-center gap-1.5">
             <span className="w-2.5 h-2.5 rounded-full bg-amber-500 border border-amber-200 inline-block" />
-            도로 노드
+            도로
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 border border-emerald-200 inline-block" />
+            보행자
           </span>
           <span className="flex items-center gap-1.5">
             <span className="w-3 h-3 rounded-full border-2 border-cyan-400 bg-sky-950 inline-block" />
-            철도 노드
+            철도
           </span>
-          <span className="text-slate-400">· 시야 거리 d≤10</span>
+          <span className="text-slate-400">· 시야 d≤10</span>
           {!isOverviewZoom && onLoadOsmChunksBatch && (
             <button
               type="button"
               onClick={() => requestViewportChunksRef.current(true)}
               disabled={isLoadingOsm}
               title="이미 로드된 구역의 누락된 도로·철도 노드를 현재 화면 기준으로 다시 수신합니다"
-              className="px-2 py-0.5 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 disabled:opacity-50 text-sky-300 font-semibold flex items-center gap-1 cursor-pointer transition-colors"
+              className="px-2 py-0.5 rounded-lg bg-sky-500/18 hover:bg-sky-500/30 disabled:opacity-50 text-sky-300 font-semibold flex items-center gap-1 cursor-pointer transition-colors"
             >
               <RefreshCw className={`w-3 h-3 ${isLoadingOsm ? 'animate-spin' : ''}`} />
               화면 도로 재수신
@@ -2392,7 +2468,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       {selectedOsmNode && (
         <div
           data-testid="osm-builder-banner"
-          className="fixed bottom-[74px] sm:bottom-20 left-2 right-2 sm:left-3 sm:right-auto sm:w-96 z-30 p-3.5 rounded-2xl bg-slate-950/95 border border-emerald-500/60 shadow-2xl space-y-2"
+          className="fixed bottom-[74px] sm:bottom-20 left-2 right-2 sm:left-3 sm:right-auto sm:w-96 z-30 p-3.5 rounded-2xl ui-glass border-emerald-400/45 shadow-2xl space-y-2"
         >
           <div className="flex items-start justify-between gap-2">
             <div className="flex items-start gap-2.5 min-w-0">
@@ -2416,7 +2492,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
                 setHoverOsmNodeId(null);
               }}
               aria-label="노드 선택 취소"
-              className="min-h-[38px] px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-slate-200 cursor-pointer shrink-0 flex items-center gap-1"
+              className="min-h-[34px] px-2.5 py-1 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.09] text-[11px] font-semibold text-slate-200 cursor-pointer shrink-0 flex items-center gap-1 transition-colors"
             >
               <X className="w-3.5 h-3.5" />
               종료
@@ -2424,7 +2500,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
           </div>
 
           {previewResult ? (
-            <div className="px-2.5 py-2 rounded-xl bg-slate-900/90 border border-slate-800 flex items-center justify-between gap-2 text-[11px] font-mono-numbers">
+            <div className="px-2.5 py-2 rounded-xl bg-[#070b14] border border-white/[0.08] flex items-center justify-between gap-2 text-[11px] font-mono-numbers">
               <span className="text-slate-300 truncate">
                 {previewResult.kind === 'transfer'
                   ? '특수 환승 직결'
@@ -2450,7 +2526,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
               </span>
             </div>
           ) : (
-            <div className="text-[11px] text-slate-400 px-1">
+            <div className="text-[11px] text-slate-400 px-0.5">
               {isTouchRef.current
                 ? '도로·철도 위 다음 노드를 터치하면 최단 노선을 따라 연속 연결됩니다.'
                 : '다른 노드에 마우스를 올리면 시공 길이·비용이 미리 표시됩니다. (Esc / 우클릭 종료)'}
@@ -2463,7 +2539,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       {pendingRegion && !selectedOsmNode && (
         <div
           data-testid="isolated-seed-banner"
-          className="fixed bottom-[74px] sm:bottom-20 left-2 right-2 sm:left-3 sm:right-auto sm:w-96 z-30 p-3.5 rounded-2xl bg-slate-950/95 border border-amber-500/70 shadow-2xl space-y-2"
+          className="fixed bottom-[74px] sm:bottom-20 left-2 right-2 sm:left-3 sm:right-auto sm:w-96 z-30 p-3.5 rounded-2xl ui-glass border-amber-400/50 shadow-2xl space-y-2"
         >
           <div className="flex items-start justify-between gap-2">
             <div className="flex items-start gap-2 min-w-0">
@@ -2495,7 +2571,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
                     )
                   : flyTo(pendingRegion.centerLat, pendingRegion.centerLng, 15)
               }
-              className="min-h-[36px] px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-bold cursor-pointer whitespace-nowrap shrink-0"
+              className="min-h-[34px] px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-bold cursor-pointer whitespace-nowrap shrink-0 transition-colors"
             >
               {pendingRegion.isStartingRegion ? '중심 이동' : '지역 이동'}
             </button>
@@ -2507,14 +2583,14 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       {nextLockedEntry && onUnlockRegion && !pendingRegion && (
         <div
           data-testid="adjacent-region-banner"
-          className="hidden md:flex fixed bottom-20 right-3 z-20 w-80 p-3 rounded-2xl bg-slate-950/95 border border-slate-700/80 shadow-2xl flex-col gap-2"
+          className="hidden md:flex fixed bottom-20 right-3 z-20 w-80 p-3.5 rounded-2xl ui-glass shadow-2xl flex-col gap-2.5"
         >
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
               <div className="text-[11px] text-slate-400 font-medium">
                 {nextLockedEntry.region.isIsolated
-                  ? '고립 도·주 · 새 출발 노드 선택'
-                  : '인접 도·주 · 경계 교차점 연결'}
+                  ? '고립 지역 · 새 출발 노드 선택'
+                  : '인접 지역 · 경계 교차점 연결'}
               </div>
               <div className="text-xs font-bold text-white truncate mt-0.5 flex items-center gap-1.5">
                 <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
@@ -2524,7 +2600,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
             {onOpenExpansionTab && (
               <button
                 onClick={onOpenExpansionTab}
-                className="text-[11px] text-indigo-300 hover:text-white font-semibold cursor-pointer whitespace-nowrap shrink-0"
+                className="text-[11px] text-sky-300 hover:text-white font-semibold cursor-pointer whitespace-nowrap shrink-0"
               >
                 전체 보기
               </button>
@@ -2534,16 +2610,21 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
           <button
             disabled={gameState.capital < nextLockedEntry.cost || Boolean(unlockingRegionId)}
             onClick={() => onUnlockRegion(nextLockedEntry.region.regionId)}
-            className={`w-full min-h-[40px] px-3 py-1.5 rounded-xl text-xs font-bold font-mono-numbers tabular-nums flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors ${
+            className={`w-full min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-bold font-mono-numbers tabular-nums flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors ${
               gameState.capital >= nextLockedEntry.cost && !unlockingRegionId
                 ? 'bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer'
-                : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                : 'bg-white/[0.05] text-slate-500 border border-white/[0.06] cursor-not-allowed'
             }`}
           >
             {unlockingRegionId === nextLockedEntry.region.regionId ? (
               <>
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                <span>지역 도로 로드 중...</span>
+                <span>
+                  지역 도로 로드 중{' '}
+                  {loadingProgress?.active && typeof loadingProgress.percent === 'number'
+                    ? `${loadingProgress.percent}%`
+                    : '...'}
+                </span>
               </>
             ) : (
               <>
@@ -2560,20 +2641,20 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
         <div
           data-testid="loading-progress-indicator"
           aria-live="polite"
-          className="fixed top-[134px] left-1.5 md:top-[118px] md:left-3 z-30 pointer-events-none px-3 py-1.5 rounded-xl bg-slate-950/92 border border-sky-500/40 shadow-lg flex flex-col gap-1 min-w-[168px] max-w-[78vw]"
+          className="fixed top-[134px] left-1.5 md:top-[118px] md:left-3 z-30 pointer-events-none px-3 py-2 rounded-xl ui-glass border-sky-400/35 shadow-lg flex flex-col gap-1.5 min-w-[172px] max-w-[78vw]"
         >
           <div className="flex items-center justify-between gap-2.5 text-[11px] text-slate-200 tabular-nums">
             <span className="flex items-center gap-1.5 truncate">
               <Loader2 className="w-3 h-3 text-sky-400 animate-spin shrink-0" />
               <span className="truncate">{loadingProgress.label}</span>
             </span>
-            <span className="font-mono font-bold text-sky-300 shrink-0">
+            <span className="font-mono-numbers font-bold text-sky-300 shrink-0">
               {loadingProgress.percent}%
             </span>
           </div>
-          <div className="w-full h-1 rounded-full bg-slate-800 overflow-hidden">
+          <div className="w-full h-1 rounded-full bg-[#070b14] overflow-hidden">
             <div
-              className="h-full w-full origin-left bg-sky-400 transition-transform duration-200 ease-out"
+              className="h-full w-full origin-left bg-sky-400 transition-transform duration-200 ease-out rounded-full"
               style={{
                 transform: `scaleX(${Math.max(0.02, Math.min(1, loadingProgress.percent / 100))})`,
               }}
@@ -2586,7 +2667,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       {(gameState.osmNodes || []).length === 0 && !loadingProgress?.active && (
         <div
           data-testid="osm-empty-banner"
-          className="fixed bottom-[82px] left-1/2 -translate-x-1/2 z-30 px-4 py-2.5 rounded-2xl bg-slate-950/95 border border-sky-500/50 shadow-2xl flex items-center gap-3 max-w-[92vw]"
+          className="fixed bottom-[82px] left-1/2 -translate-x-1/2 z-30 px-4 py-2.5 rounded-2xl ui-glass border-sky-400/40 shadow-2xl flex items-center gap-3 max-w-[92vw]"
         >
           {isLoadingOsm ? (
             <>
@@ -2603,7 +2684,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
               {onReloadOsm && (
                 <button
                   onClick={onReloadOsm}
-                  className="min-h-[34px] px-3 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                  className="min-h-[34px] px-3 py-1 rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 transition-colors"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
                   노드 불러오기

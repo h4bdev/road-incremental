@@ -10,7 +10,6 @@ import {
   Sparkles,
   Train,
   TreeDeciduous,
-  X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
@@ -23,6 +22,7 @@ import {
   getSkillTotalInvestedCost,
 } from '../game/rules';
 import { formatMoneyCompact } from '../game/format';
+import { ModalShell } from './ui/ModalShell';
 
 export { formatMoneyCompact };
 
@@ -234,163 +234,126 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
       .join(selectedSkill.id === 'sk_multi_path' ? ' 또는 ' : ', ') || '';
 
   return (
-    <div
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-      className="fixed inset-0 z-40 flex items-end sm:items-center justify-center p-0 sm:p-4 pb-[calc(env(safe-area-inset-bottom)+68px)] sm:pb-4 bg-black/75"
-    >
-      <div
-        data-testid="study-tree-modal"
-        className="w-full max-w-6xl h-[calc(100dvh-124px)] sm:h-[87vh] flex flex-col rounded-t-2xl sm:rounded-2xl bg-[#070b14] border-t sm:border border-slate-800 shadow-2xl overflow-hidden"
-      >
-        {/* Top Bar (Money Only, Zero SP) */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-4 sm:px-5 py-2.5 sm:py-3.5 border-b border-slate-800 bg-slate-950/90 shrink-0">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <TreeDeciduous className="w-5 h-5 text-emerald-400 shrink-0" />
-              <div className="min-w-0">
-                <h2 className="text-sm sm:text-lg font-bold text-white truncate">
-                  통합 연구 트리 ({gameState.skills.length}종 · {totalTreeLevels}/{maxTreeLevels} Lv)
-                </h2>
-                <p className="hidden sm:block text-xs text-slate-400">
-                  자금($)만으로 [11]부터 [161] 특이점까지 모든 전문 분야를 자유롭게 연구하세요.
-                </p>
-              </div>
-            </div>
-            <button
-              onClick={onClose}
-              aria-label="닫기"
-              className="sm:hidden min-w-[40px] min-h-[40px] flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer shrink-0"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-
-          <div className="flex items-center justify-between sm:justify-end gap-2 sm:gap-3 flex-wrap">
-            <div className="font-mono-numbers text-left sm:text-right mr-1">
-              <div className="text-[10px] text-slate-400">보유 연구 자금</div>
-              <div
-                data-testid="study-capital-display"
-                className="text-xs sm:text-sm font-bold text-emerald-400"
-              >
-                {formatMoneyCompact(gameState.capital)}
-              </div>
-            </div>
-
-            <button
-              data-testid="study-buy-all-btn"
-              disabled={!anyAffordable}
-              onClick={onBuyAllSkills}
-              className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap cursor-pointer transition-colors ${
-                anyAffordable
-                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                  : 'bg-slate-800 text-slate-500 cursor-not-allowed'
-              }`}
-            >
-              가능한 연구 최대 구매
-            </button>
-
-            <button
-              data-testid="study-reset-btn"
-              disabled={totalInvested <= 0}
-              onClick={onResetSkillTree}
-              title="투자한 모든 자금을 100% 환불받고 연구 트리를 초기화합니다."
-              className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 whitespace-nowrap cursor-pointer transition-colors ${
-                totalInvested > 0
-                  ? 'bg-rose-950/80 hover:bg-rose-900 text-rose-200 border border-rose-500/50'
-                  : 'bg-slate-900 text-slate-600 border border-slate-800 cursor-not-allowed'
-              }`}
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>트리 초기화 (100% 환불)</span>
-            </button>
-
-            <button
-              onClick={onClose}
-              aria-label="닫기"
-              className="hidden sm:flex min-w-[38px] min-h-[38px] items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-        </div>
-
-        {/* Main Split: Top-to-Bottom AD Study Viewport + Inspector Drawer */}
-        <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
-          {/* Interactive Pannable / Scrollable AD Study Canvas */}
-          <div
-            ref={viewportRef}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerCancel={handlePointerUp}
-            onPointerLeave={handlePointerUp}
-            onWheel={handleWheel}
-            className="relative flex-1 min-h-[220px] overflow-hidden bg-[#050811] cursor-grab active:cursor-grabbing touch-none"
-          >
-            {/* Zoom & View Controls */}
-            <div className="absolute top-2.5 left-2.5 z-20 flex items-center gap-1 p-1 rounded-xl bg-slate-950/90 border border-slate-800 shadow-lg">
-              <button
-                onClick={() => setZoom((z) => Math.min(1.4, Number((z + 0.1).toFixed(2))))}
-                aria-label="트리 확대"
-                className="min-w-[34px] min-h-[34px] flex items-center justify-center rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 cursor-pointer"
-              >
-                <ZoomIn className="w-4 h-4" />
-              </button>
-              <button
-                onClick={() => setZoom((z) => Math.max(0.22, Number((z - 0.1).toFixed(2))))}
-                aria-label="트리 축소"
-                className="min-w-[34px] min-h-[34px] flex items-center justify-center rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 cursor-pointer"
-              >
-                <ZoomOut className="w-4 h-4" />
-              </button>
-              <button
-                onClick={fitTopToViewport}
-                className="min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-medium text-slate-300 hover:text-white hover:bg-slate-800 flex items-center gap-1 cursor-pointer"
-              >
-                <Maximize2 className="w-3.5 h-3.5 text-emerald-400" />
-                상단 정렬
-              </button>
-            </div>
-
-            {/* Tree Navigation Hint */}
-            <div className="hidden sm:flex absolute top-2.5 right-2.5 z-20 items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-800 text-[11px] text-slate-300 shadow">
-              <span>휠·드래그로 1~16티어 자유 탐색</span>
-            </div>
-
-            {/* Transformed AD Study World */}
+    <ModalShell
+      onClose={onClose}
+      ariaLabel="통합 연구 트리"
+      testId="study-tree-modal"
+      maxWidthClass="max-w-6xl"
+      heightClass="h-[calc(100dvh-124px)] sm:h-[87vh]"
+      icon={<TreeDeciduous className="w-4 h-4 text-emerald-400" />}
+      title={`통합 연구 트리 (${gameState.skills.length}종 · ${totalTreeLevels}/${maxTreeLevels} Lv)`}
+      subtitle="자금($)만으로 [11]부터 [161] 특이점까지 모든 전문 분야를 자유롭게 연구하세요."
+      headerRight={
+        <>
+          <div className="font-mono-numbers text-left sm:text-right mr-1">
+            <div className="text-[10px] text-slate-400">보유 연구 자금</div>
             <div
-              style={{
-                width: TREE_WIDTH,
-                height: TREE_HEIGHT,
-                transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-                transformOrigin: '0 0',
-              }}
-              className="relative"
+              data-testid="study-capital-display"
+              className="text-xs sm:text-sm font-bold text-emerald-400"
             >
-              {/* Era & Branch Visual Guides */}
-              <div
-                style={{ left: 60, top: 645, width: 1480 }}
-                className="absolute border-t border-dashed border-slate-700/80 pt-1.5 flex items-center justify-between text-xs font-bold tracking-wider uppercase pointer-events-none"
-              >
-                <span className="text-amber-400 bg-[#050811] pr-3">
-                  토목 · 도로 분야
-                </span>
-                <span className="text-cyan-400 bg-[#050811] px-3">
-                  철도 · 고속배차 분야
-                </span>
-                <span className="text-emerald-400 bg-[#050811] pl-3">
-                  상권 · 물류 분야
-                </span>
-              </div>
+              {formatMoneyCompact(gameState.capital)}
+            </div>
+          </div>
 
-              <div
-                style={{ left: 60, top: 1320, width: 1480 }}
-                className="absolute border-t border-dashed border-sky-500/40 pt-1 text-center text-xs font-bold text-sky-400 pointer-events-none"
-              >
-                ▼ 대륙·행성 초장거리 시대 (10,000 km ~ 1,000,000+ km) ▼
-              </div>
+          <button
+            data-testid="study-buy-all-btn"
+            disabled={!anyAffordable}
+            onClick={onBuyAllSkills}
+            className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap cursor-pointer transition-colors ${
+              anyAffordable
+                ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                : 'bg-white/[0.04] text-slate-500 border border-white/[0.06] cursor-not-allowed'
+            }`}
+          >
+            가능한 연구 최대 구매
+          </button>
+
+          <button
+            data-testid="study-reset-btn"
+            disabled={totalInvested <= 0}
+            onClick={onResetSkillTree}
+            title="투자한 모든 자금을 100% 환불받고 연구 트리를 초기화합니다."
+            className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 whitespace-nowrap cursor-pointer transition-colors ${
+              totalInvested > 0
+                ? 'bg-rose-950/80 hover:bg-rose-900 text-rose-200 border border-rose-500/45'
+                : 'bg-white/[0.04] text-slate-600 border border-white/[0.06] cursor-not-allowed'
+            }`}
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>트리 초기화 (100% 환불)</span>
+          </button>
+        </>
+      }
+    >
+      {/* Main Split: Top-to-Bottom AD Study Viewport + Inspector Drawer */}
+      <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
+        {/* Interactive Pannable / Scrollable AD Study Canvas */}
+        <div
+          ref={viewportRef}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+          onPointerLeave={handlePointerUp}
+          onWheel={handleWheel}
+          className="relative flex-1 min-h-[220px] overflow-hidden bg-[#070b14] cursor-grab active:cursor-grabbing touch-none"
+        >
+          {/* Zoom & View Controls */}
+          <div className="absolute top-2.5 left-2.5 z-20 flex items-center gap-1 p-1 rounded-xl ui-glass shadow-lg">
+            <button
+              onClick={() => setZoom((z) => Math.min(1.4, Number((z + 0.1).toFixed(2))))}
+              aria-label="트리 확대"
+              className="min-w-[34px] min-h-[34px] flex items-center justify-center rounded-lg text-slate-300 hover:text-white hover:bg-white/[0.07] cursor-pointer"
+            >
+              <ZoomIn className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setZoom((z) => Math.max(0.22, Number((z - 0.1).toFixed(2))))}
+              aria-label="트리 축소"
+              className="min-w-[34px] min-h-[34px] flex items-center justify-center rounded-lg text-slate-300 hover:text-white hover:bg-white/[0.07] cursor-pointer"
+            >
+              <ZoomOut className="w-4 h-4" />
+            </button>
+            <button
+              onClick={fitTopToViewport}
+              className="min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/[0.07] flex items-center gap-1 cursor-pointer"
+            >
+              <Maximize2 className="w-3.5 h-3.5 text-emerald-400" />
+              상단 정렬
+            </button>
+          </div>
+
+          {/* Tree Navigation Hint */}
+          <div className="hidden sm:flex absolute top-2.5 right-2.5 z-20 items-center gap-2 px-3 py-1.5 rounded-xl ui-glass text-[11px] text-slate-300 shadow">
+            <span>휠·드래그로 1~16티어 자유 탐색</span>
+          </div>
+
+          {/* Transformed AD Study World */}
+          <div
+            style={{
+              width: TREE_WIDTH,
+              height: TREE_HEIGHT,
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+              transformOrigin: '0 0',
+            }}
+            className="relative"
+          >
+            {/* Era & Branch Visual Guides */}
+            <div
+              style={{ left: 60, top: 645, width: 1480 }}
+              className="absolute border-t border-dashed border-white/[0.12] pt-2 flex items-center justify-between text-xs font-bold pointer-events-none"
+            >
+              <span className="text-amber-400 bg-[#070b14] pr-3">토목 · 도로 분야</span>
+              <span className="text-cyan-400 bg-[#070b14] px-3">철도 · 고속배차 분야</span>
+              <span className="text-emerald-400 bg-[#070b14] pl-3">상권 · 물류 분야</span>
+            </div>
+
+            <div
+              style={{ left: 60, top: 1320, width: 1480 }}
+              className="absolute border-t border-dashed border-sky-400/35 pt-1.5 text-center text-xs font-bold text-sky-400 pointer-events-none"
+            >
+              대륙 · 행성 초장거리 시대 (10,000 km ~ 1,000,000+ km)
+            </div>
 
               {/* SVG Connectors */}
               <svg
@@ -485,15 +448,13 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
                       backgroundColor: unlocked
                         ? branchMeta.fillBg
                         : reqMet
-                        ? 'rgba(15, 23, 42, 0.92)'
-                        : 'rgba(9, 13, 24, 0.92)',
-                      boxShadow: unlocked
-                        ? `0 0 18px ${branchMeta.glow}`
-                        : affordable
-                        ? '0 0 12px rgba(251, 191, 36, 0.3)'
+                        ? '#10182b'
+                        : '#0b1120',
+                      boxShadow: isSelected
+                        ? '0 0 0 2px rgba(255,255,255,0.28)'
                         : undefined,
                     }}
-                    className="absolute rounded-xl border-2 px-2.5 py-2 text-left transition-transform hover:scale-[1.03] cursor-pointer focus:outline-none"
+                    className="absolute rounded-xl border-2 px-2.5 py-2 text-left transition-transform hover:scale-[1.03] cursor-pointer"
                   >
                     <div className="flex items-center justify-between gap-1.5">
                       <span className="inline-flex items-center gap-1 text-[11px] font-mono-numbers font-bold">
@@ -541,8 +502,8 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
 
           {/* Right / Bottom Study Inspector Drawer */}
           {selectedSkill && (
-            <aside className="w-full lg:w-84 shrink-0 border-t lg:border-t-0 lg:border-l border-slate-800 bg-slate-950/95 p-3.5 sm:p-5 flex flex-col justify-between gap-3 overflow-y-auto max-h-[44%] lg:max-h-none">
-              <div className="space-y-2.5">
+            <aside className="w-full lg:w-84 shrink-0 border-t lg:border-t-0 lg:border-l border-white/[0.08] bg-[#080d18] p-4 sm:p-5 flex flex-col justify-between gap-3 overflow-y-auto max-h-[44%] lg:max-h-none">
+              <div className="space-y-3">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <div
@@ -566,7 +527,7 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
                   {selectedSkill.description}
                 </p>
 
-                <div className="p-2.5 sm:p-3 rounded-xl bg-slate-900/80 border border-slate-800 space-y-1">
+                <div className="p-3 rounded-xl bg-[#10182b] border border-white/[0.08] space-y-1">
                   <div className="text-[10px] sm:text-[11px] text-slate-400">연구 효과</div>
                   <div className="text-xs font-bold text-amber-300">
                     {selectedSkill.effectText}
@@ -574,7 +535,7 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
                 </div>
 
                 {!selReqMet && selReqNames && (
-                  <div className="flex items-start gap-2 text-xs text-slate-400 p-2 rounded-lg bg-slate-900/50 border border-slate-800">
+                  <div className="flex items-start gap-2 text-xs text-slate-400 p-2.5 rounded-lg bg-[#10182b]/70 border border-white/[0.07]">
                     <Lock className="w-4 h-4 shrink-0 mt-0.5 text-slate-500" />
                     <span>선행 연구 필요: {selReqNames}</span>
                   </div>
@@ -588,9 +549,9 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
                 )}
               </div>
 
-              <div className="pt-2.5 sm:pt-3 border-t border-slate-800 space-y-2">
+              <div className="pt-3 border-t border-white/[0.07] space-y-2.5">
                 {selIsMaxed ? (
-                  <div className="min-h-[42px] py-2 rounded-xl bg-emerald-950/40 border border-emerald-500/40 text-emerald-400 text-xs font-bold flex items-center justify-center gap-1.5">
+                  <div className="min-h-[42px] py-2 rounded-xl bg-emerald-950/35 border border-emerald-500/40 text-emerald-400 text-xs font-bold flex items-center justify-center gap-1.5">
                     <Check className="w-4 h-4" />
                     연구 마스터 완료 (최대 레벨)
                   </div>
@@ -612,10 +573,10 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
                         data-testid="study-buy-one-btn"
                         disabled={!selAffordable}
                         onClick={() => onUnlockSkill(selectedSkill.id)}
-                        className={`min-h-[44px] py-2 px-3 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
+                        className={`min-h-[40px] py-2 px-3 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
                           selAffordable
                             ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                            : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                            : 'bg-white/[0.04] text-slate-500 border border-white/[0.06] cursor-not-allowed'
                         }`}
                       >
                         +1 연구 ({formatMoneyCompact(selMoneyCost)})
@@ -625,10 +586,10 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
                         data-testid="study-buy-max-btn"
                         disabled={selMaxInfo.count <= 0}
                         onClick={() => onBuyMaxSkill(selectedSkill.id)}
-                        className={`min-h-[44px] py-2 px-3 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
+                        className={`min-h-[40px] py-2 px-3 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
                           selMaxInfo.count > 0
-                            ? 'bg-sky-600 hover:bg-sky-500 text-white'
-                            : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                            ? 'bg-sky-500 hover:bg-sky-400 text-slate-950'
+                            : 'bg-white/[0.04] text-slate-500 border border-white/[0.06] cursor-not-allowed'
                         }`}
                       >
                         {selMaxInfo.count > 0
@@ -641,8 +602,7 @@ export const SkillTreePanel: React.FC<SkillTreePanelProps> = ({
               </div>
             </aside>
           )}
-        </div>
       </div>
-    </div>
+    </ModalShell>
   );
 };

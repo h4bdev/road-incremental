@@ -98,6 +98,7 @@ import {
   parseChunkKeyCoords,
   readCachedOsmTilesForKeys,
 } from './game/osmService';
+import { EXACT_BOUNDARY_CACHE_VERSION } from './game/osmTileCache';
 import {
   applyRestoredGraphMarks,
   buildSummaryFromState,
@@ -661,14 +662,21 @@ export default function App() {
 
   // Load ALL nodes of a city in one pass (with local starter fallback if Overpass is empty)
   const loadFullStartingCityIntoState = useCallback(async (lat: number, lng: number, targetRegionId?: string) => {
+    const targetReg = stateRef.current?.provincialRegions.find((r) => r.regionId === targetRegionId);
+    const regionLabel = targetReg?.regionName || stateRef.current?.startingCity.name || '지역';
+    const sessionId = beginLoadingSession(`${regionLabel} 도로망 로드 중`, 12);
     setIsLoadingOsm(true);
     try {
-      const targetReg = stateRef.current?.provincialRegions.find((r) => r.regionId === targetRegionId);
       const regionData = await fetchOsmProvincialRegion(
         lat,
         lng,
         targetReg?.regionName,
-        targetRegionId
+        targetRegionId,
+        {
+          onProgress: (pct, lbl) => {
+            updateLoadingSession(sessionId, Math.max(12, Math.min(95, pct)), lbl);
+          },
+        }
       );
       let chunkKey = regionData.chunkKey;
       let osmNodes = regionData.osmNodes;
@@ -676,6 +684,7 @@ export default function App() {
       let totalNodeCount = regionData.totalNodeCount ?? osmNodes.length;
 
       if (osmNodes.length === 0) {
+        updateLoadingSession(sessionId, 88, `${regionLabel} 보조 도로 확인 중`);
         const fallback = await fetchOsmRoadChunk(lat, lng);
         chunkKey = fallback.chunkKey;
         osmNodes = fallback.osmNodes;
@@ -684,6 +693,7 @@ export default function App() {
       }
 
       if (osmNodes.length > 0 || osmEdges.length > 0) {
+        updateLoadingSession(sessionId, 96, `${regionLabel} 노드 연결 중`);
         setGameState((prev) => {
           if (!prev) return prev;
           const rid =
@@ -697,10 +707,13 @@ export default function App() {
           return applyRestoredGraphMarks(merged, pendingRestoredMarksRef.current);
         });
       }
+      completeLoadingSession(sessionId, `${regionLabel} 로드 완료`);
+    } catch {
+      completeLoadingSession(sessionId, `${regionLabel} 로드 완료`);
     } finally {
       setIsLoadingOsm(false);
     }
-  }, []);
+  }, [beginLoadingSession, completeLoadingSession, updateLoadingSession]);
 
   const persistCurrentSlotLocally = useCallback(
     (state: GameState, slotId: SaveSlotId, customName?: string, savedAt?: number): number => {
@@ -794,15 +807,27 @@ export default function App() {
       void (async () => {
         setIsLoadingOsm(true);
         try {
-          const startGuessName = city.name.split(' ')[0];
+          const initStartRegion = fresh.provincialRegions.find((r) => r.isStartingRegion);
+          const startGuessName = initStartRegion?.regionName || city.name.split(' ')[0];
+          const startKnownId = initStartRegion?.regionId.startsWith('curated_')
+            ? initStartRegion.regionId
+            : undefined;
           const [fullCityData, startRegionInfo] = await Promise.all([
-            fetchOsmProvincialRegion(city.lat, city.lng, startGuessName),
-            fetchProvincialRegionInfo(city.lat, city.lng, undefined, startGuessName).catch(
+            fetchOsmProvincialRegion(city.lat, city.lng, startGuessName, startKnownId, {
+              onProgress: (pct, lbl) => {
+                updateLoadingSession(
+                  sessionId,
+                  Math.max(40, Math.min(92, Math.round(35 + pct * 0.58))),
+                  lbl || `${city.name} 도로망 수신 중`
+                );
+              },
+            }),
+            fetchProvincialRegionInfo(city.lat, city.lng, startKnownId, startGuessName).catch(
               () => null
             ),
           ]);
           if (loadingSessionRef.current !== sessionId) return;
-          updateLoadingSession(sessionId, 75, `${city.name} 교차로·철도 병합 중`);
+          updateLoadingSession(sessionId, 94, `${city.name} 교차로·철도 병합 중`);
 
           let initialNodes = fullCityData.osmNodes;
           let initialEdges = fullCityData.osmEdges;
@@ -962,10 +987,15 @@ export default function App() {
       const mergedRegions = (prev.provincialRegions || []).map((r) => {
         const fromHydrated = (hydrated.provincialRegions || []).find((h) => h.regionId === r.regionId);
         if (!fromHydrated) return r;
+        const upgradeGeom = (fromHydrated.exactBoundaryVersion || 0) > (r.exactBoundaryVersion || 0);
         return {
           ...r,
-          boundaryGeoJson: r.boundaryGeoJson || fromHydrated.boundaryGeoJson,
+          boundaryGeoJson: upgradeGeom
+            ? fromHydrated.boundaryGeoJson || r.boundaryGeoJson
+            : r.boundaryGeoJson || fromHydrated.boundaryGeoJson,
           hasRealOsmBoundary: Boolean(r.hasRealOsmBoundary || fromHydrated.hasRealOsmBoundary),
+          exactBoundaryVersion:
+            Math.max(r.exactBoundaryVersion || 0, fromHydrated.exactBoundaryVersion || 0) || undefined,
           totalNodeCount: Math.max(r.totalNodeCount || 0, fromHydrated.totalNodeCount || 0) || undefined,
         };
       });
@@ -1564,7 +1594,9 @@ export default function App() {
     return [...unlocked, ...expandable, ...remaining]
       .filter(
         (r) =>
-          !r.hasRealOsmBoundary &&
+          (!r.hasRealOsmBoundary ||
+            !r.boundaryGeoJson ||
+            (r.exactBoundaryVersion || 0) < EXACT_BOUNDARY_CACHE_VERSION) &&
           !hydratedRegionIdsRef.current.has(r.regionId) &&
           (hydrateAttemptsRef.current.get(r.regionId) || 0) < 6
       )
@@ -1594,7 +1626,7 @@ export default function App() {
       })
       .filter((x): x is { regionId: string; regionName: string; lat: number; lng: number } => Boolean(x));
 
-    const items = allPending.slice(0, 2);
+    const items = allPending.slice(0, 3);
 
     void (async () => {
       let needsNextPass = allPending.length > items.length;
@@ -1621,6 +1653,7 @@ export default function App() {
               if (!prev) return prev;
               return registerDiscoveredProvincialRegion(prev, {
                 ...info,
+                exactBoundaryVersion: info.exactBoundaryVersion || EXACT_BOUNDARY_CACHE_VERSION,
                 regionName: info.regionName || item.regionName,
               });
             });
@@ -1844,15 +1877,27 @@ export default function App() {
 
       unlockingRegionRef.current = regionId;
       setUnlockingRegionId(regionId);
+      setIsLoadingOsm(true);
+      const sessionId = beginLoadingSession(`${target.regionName} 도로망 로드 중`, 12);
       try {
         let regionData = await fetchOsmProvincialRegion(
           target.centerLat,
           target.centerLng,
           target.regionName,
           target.regionId,
-          { allowStarterFallback: false }
+          {
+            allowStarterFallback: false,
+            onProgress: (pct, lbl) => {
+              updateLoadingSession(
+                sessionId,
+                Math.max(12, Math.min(94, pct)),
+                lbl || `${target.regionName} 로드 중`
+              );
+            },
+          }
         );
         if (regionData.osmNodes.length === 0 && !regionData.usedLiveOverpass) {
+          updateLoadingSession(sessionId, 86, `${target.regionName} 보조 도로 확인 중`);
           const fallbackChunk = await fetchOsmRoadChunk(target.centerLat, target.centerLng, {
             allowStarterFallback: false,
           });
@@ -1866,6 +1911,7 @@ export default function App() {
           };
         }
 
+        updateLoadingSession(sessionId, 96, `${target.regionName} 노드 연결 중`);
         let unlockSuccess = false;
         let wasIsolated = target.isIsolated;
 
@@ -1894,17 +1940,23 @@ export default function App() {
             setFlyToTarget({
               lat: target.centerLat,
               lng: target.centerLng,
-              zoom: 14,
+              zoom: 15,
               ts: Date.now(),
             });
           }
+          completeLoadingSession(sessionId, `${target.regionName} 해금 완료`);
+        } else {
+          completeLoadingSession(sessionId, `${target.regionName} 로드 완료`);
         }
+      } catch {
+        completeLoadingSession(sessionId, `${target.regionName} 로드 완료`);
       } finally {
+        setIsLoadingOsm(false);
         unlockingRegionRef.current = null;
         setUnlockingRegionId(null);
       }
     },
-    [discoverNearbyProvinces]
+    [beginLoadingSession, completeLoadingSession, discoverNearbyProvinces, updateLoadingSession]
   );
 
   const handleSelectIsolatedSeed = useCallback((nodeId: string) => {
@@ -1956,7 +2008,7 @@ export default function App() {
   }, [loadFullStartingCityIntoState]);
 
   const handleOpenExpansionTab = useCallback(() => {
-    setActiveModal('prestige');
+    setActiveModal('lines');
   }, []);
 
   useEffect(() => {
@@ -1988,7 +2040,7 @@ export default function App() {
   );
 
   return (
-    <div className="w-full h-[100dvh] bg-[#090d16] text-slate-100 overflow-hidden select-none">
+    <div className="w-full h-[100dvh] bg-[#080d18] text-slate-100 overflow-hidden select-none">
       {screenState === 'title' && (
         <TitleScreen
           activeSlotId={activeSlotId}
@@ -2069,6 +2121,9 @@ export default function App() {
               gameState={gameState}
               onClose={() => setActiveModal(null)}
               onFocusMap={handleFocusMap}
+              onUnlockRegion={handleUnlockRegion}
+              unlockingRegionId={unlockingRegionId}
+              unlockProgressPct={loadingProgress?.active ? loadingProgress.percent : null}
             />
           )}
 
@@ -2094,9 +2149,6 @@ export default function App() {
             <PrestigePanel
               gameState={gameState}
               onClose={() => setActiveModal(null)}
-              onUnlockRegion={handleUnlockRegion}
-              unlockingRegionId={unlockingRegionId}
-              onFocusMap={handleFocusMap}
             />
           )}
 
@@ -2403,9 +2455,9 @@ export default function App() {
               {toasts.map((toast) => (
                 <div
                   key={toast.id}
-                  className="p-3.5 rounded-xl border shadow-2xl flex items-start gap-2.5 bg-slate-950/95 border-yellow-500/60"
+                  className="p-3.5 rounded-xl ui-glass border-amber-400/45 shadow-2xl flex items-start gap-2.5"
                 >
-                  <Award className="w-5 h-5 text-yellow-400 shrink-0 mt-0.5" />
+                  <Award className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
                   <div className="min-w-0">
                     <div className="text-xs font-bold text-white leading-snug">{toast.title}</div>
                     <div className="text-[11px] text-slate-300 mt-0.5 leading-snug">

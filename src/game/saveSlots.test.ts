@@ -277,7 +277,7 @@ test('oversized UTF-8 saves (>1MB raw core/chunks) respect Firestore document by
     buildCost: 30,
     baseIncomePerSec: 2,
     built: true,
-    regionId: 'curated_kr_seoul',
+    regionId: 'curated_kr_seoul_jung',
   }));
 
   // 2,500 long UTF-8 connected nodeIds (~1.3MB combined if shoved into 2 chunks)
@@ -337,7 +337,7 @@ test('V2 split local save/load roundtrips 10,000 nodes cleanly, skips redundant 
     lng: 126.95 + Math.floor(i / 100) * 0.0005,
     connected: i < 500,
     mode: 'road' as const,
-    regionId: 'curated_kr_seoul',
+    regionId: 'curated_kr_seoul_jung',
   }));
   const edges = Array.from({ length: 9_999 }, (_, i) => ({
     id: `edge_perf_${i}`,
@@ -354,7 +354,7 @@ test('V2 split local save/load roundtrips 10,000 nodes cleanly, skips redundant 
     buildCost: 25,
     baseIncomePerSec: 2,
     built: i < 499,
-    regionId: 'curated_kr_seoul',
+    regionId: 'curated_kr_seoul_jung',
   }));
 
   const largeState = {
@@ -424,7 +424,7 @@ test('4,351-node progressive restore across chunks never truncates at 600 and pr
       lng: baseLng + Math.floor((i % 100) / 10) * 0.0005,
       connected: true,
       mode: 'road' as const,
-      regionId: 'curated_kr_seoul',
+      regionId: 'curated_kr_seoul_jung',
     };
   });
   const allEdges = Array.from({ length: totalNodes - 1 }, (_, i) => ({
@@ -442,7 +442,7 @@ test('4,351-node progressive restore across chunks never truncates at 600 and pr
     buildCost: 20,
     baseIncomePerSec: 1,
     built: true,
-    regionId: 'curated_kr_seoul',
+    regionId: 'curated_kr_seoul_jung',
   }));
 
   // Also simulate >500 loaded chunks where connected chunks must survive the 500-chunk cap
@@ -849,7 +849,7 @@ test('packCloudGraphV1 does not poison loadedOsmChunks with sparse neighbor-spil
       lng: 126.9767,
       connected: i === 0,
       mode: 'road' as const,
-      regionId: 'curated_kr_seoul',
+      regionId: 'curated_kr_seoul_jung',
     })),
     {
       id: 'spill_1',
@@ -857,7 +857,7 @@ test('packCloudGraphV1 does not poison loadedOsmChunks with sparse neighbor-spil
       lng: 126.9767,
       connected: true,
       mode: 'road' as const,
-      regionId: 'curated_kr_seoul',
+      regionId: 'curated_kr_seoul_jung',
     },
   ];
 

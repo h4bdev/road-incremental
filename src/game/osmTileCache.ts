@@ -8,12 +8,15 @@ export interface CachedOsmTile {
   updatedAt: number;
 }
 
+export const EXACT_BOUNDARY_CACHE_VERSION = 2;
+
 export interface CachedOsmRegion {
   regionId: string;
   regionName: string;
   adminLevel: string;
   bbox: [number, number, number, number];
   boundaryGeoJson?: GeoJsonBoundary;
+  exactBoundaryVersion?: number;
   centerLat: number;
   centerLng: number;
   canonicalKey?: string;

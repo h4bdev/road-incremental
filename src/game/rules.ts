@@ -76,55 +76,55 @@ const NODE_TIER_STEPS: Array<{
 }> = [
   // Bronze I -> V
   { tier: 'Bronze', division: 'I', minNodes: 0, color: '#cd7f32' },
-  { tier: 'Bronze', division: 'II', minNodes: 10, color: '#d48c46' },
-  { tier: 'Bronze', division: 'III', minNodes: 25, color: '#dc9959' },
-  { tier: 'Bronze', division: 'IV', minNodes: 55, color: '#e3a66d' },
-  { tier: 'Bronze', division: 'V', minNodes: 100, color: '#ebb885' },
+  { tier: 'Bronze', division: 'II', minNodes: 80, color: '#d48c46' },
+  { tier: 'Bronze', division: 'III', minNodes: 220, color: '#dc9959' },
+  { tier: 'Bronze', division: 'IV', minNodes: 450, color: '#e3a66d' },
+  { tier: 'Bronze', division: 'V', minNodes: 800, color: '#ebb885' },
 
   // Silver I -> V
-  { tier: 'Silver', division: 'I', minNodes: 170, color: '#94a3b8' },
-  { tier: 'Silver', division: 'II', minNodes: 280, color: '#a3b3c6' },
-  { tier: 'Silver', division: 'III', minNodes: 450, color: '#b4c2d4' },
-  { tier: 'Silver', division: 'IV', minNodes: 700, color: '#cbd5e1' },
-  { tier: 'Silver', division: 'V', minNodes: 1050, color: '#e2e8f0' },
+  { tier: 'Silver', division: 'I', minNodes: 1400, color: '#94a3b8' },
+  { tier: 'Silver', division: 'II', minNodes: 2300, color: '#a3b3c6' },
+  { tier: 'Silver', division: 'III', minNodes: 3600, color: '#b4c2d4' },
+  { tier: 'Silver', division: 'IV', minNodes: 5500, color: '#cbd5e1' },
+  { tier: 'Silver', division: 'V', minNodes: 8200, color: '#e2e8f0' },
 
   // Gold I -> V
-  { tier: 'Gold', division: 'I', minNodes: 1550, color: '#d97706' },
-  { tier: 'Gold', division: 'II', minNodes: 2300, color: '#e68a0e' },
-  { tier: 'Gold', division: 'III', minNodes: 3400, color: '#f59e0b' },
-  { tier: 'Gold', division: 'IV', minNodes: 5000, color: '#fbbf24' },
-  { tier: 'Gold', division: 'V', minNodes: 7400, color: '#fcd34d' },
+  { tier: 'Gold', division: 'I', minNodes: 12000, color: '#d97706' },
+  { tier: 'Gold', division: 'II', minNodes: 17500, color: '#e68a0e' },
+  { tier: 'Gold', division: 'III', minNodes: 25000, color: '#f59e0b' },
+  { tier: 'Gold', division: 'IV', minNodes: 35000, color: '#fbbf24' },
+  { tier: 'Gold', division: 'V', minNodes: 48000, color: '#fcd34d' },
 
   // Platinum I -> V
-  { tier: 'Platinum', division: 'I', minNodes: 11000, color: '#0d9488' },
-  { tier: 'Platinum', division: 'II', minNodes: 16500, color: '#14b8a6' },
-  { tier: 'Platinum', division: 'III', minNodes: 24500, color: '#2dd4bf' },
-  { tier: 'Platinum', division: 'IV', minNodes: 36000, color: '#5eead4' },
-  { tier: 'Platinum', division: 'V', minNodes: 52000, color: '#99f6e4' },
+  { tier: 'Platinum', division: 'I', minNodes: 65000, color: '#0d9488' },
+  { tier: 'Platinum', division: 'II', minNodes: 88000, color: '#14b8a6' },
+  { tier: 'Platinum', division: 'III', minNodes: 118000, color: '#2dd4bf' },
+  { tier: 'Platinum', division: 'IV', minNodes: 156000, color: '#5eead4' },
+  { tier: 'Platinum', division: 'V', minNodes: 205000, color: '#99f6e4' },
 
   // Diamond I -> V
-  { tier: 'Diamond', division: 'I', minNodes: 75000, color: '#0284c7' },
-  { tier: 'Diamond', division: 'II', minNodes: 110000, color: '#0ea5e9' },
-  { tier: 'Diamond', division: 'III', minNodes: 160000, color: '#38bdf8' },
-  { tier: 'Diamond', division: 'IV', minNodes: 230000, color: '#7dd3fc' },
-  { tier: 'Diamond', division: 'V', minNodes: 330000, color: '#bae6fd' },
+  { tier: 'Diamond', division: 'I', minNodes: 270000, color: '#0284c7' },
+  { tier: 'Diamond', division: 'II', minNodes: 350000, color: '#0ea5e9' },
+  { tier: 'Diamond', division: 'III', minNodes: 450000, color: '#38bdf8' },
+  { tier: 'Diamond', division: 'IV', minNodes: 570000, color: '#7dd3fc' },
+  { tier: 'Diamond', division: 'V', minNodes: 710000, color: '#bae6fd' },
 
-  // Master I -> V
-  { tier: 'Master', division: 'I', minNodes: 480000, color: '#9333ea' },
-  { tier: 'Master', division: 'II', minNodes: 700000, color: '#a855f7' },
-  { tier: 'Master', division: 'III', minNodes: 1000000, color: '#b76ef8' },
-  { tier: 'Master', division: 'IV', minNodes: 1450000, color: '#c084fc' },
-  { tier: 'Master', division: 'V', minNodes: 2050000, color: '#d8b4fe' },
+  // Master I -> V (narrowed gap to Challenger: 125K steps)
+  { tier: 'Master', division: 'I', minNodes: 850000, color: '#9333ea' },
+  { tier: 'Master', division: 'II', minNodes: 975000, color: '#a855f7' },
+  { tier: 'Master', division: 'III', minNodes: 1100000, color: '#b76ef8' },
+  { tier: 'Master', division: 'IV', minNodes: 1225000, color: '#c084fc' },
+  { tier: 'Master', division: 'V', minNodes: 1350000, color: '#d8b4fe' },
 
   // Grandmaster I -> V
-  { tier: 'Grandmaster', division: 'I', minNodes: 2850000, color: '#e11d48' },
-  { tier: 'Grandmaster', division: 'II', minNodes: 3900000, color: '#f43f5e' },
-  { tier: 'Grandmaster', division: 'III', minNodes: 5200000, color: '#fb7185' },
-  { tier: 'Grandmaster', division: 'IV', minNodes: 6800000, color: '#fda4af' },
-  { tier: 'Grandmaster', division: 'V', minNodes: 8600000, color: '#ffe4e6' },
+  { tier: 'Grandmaster', division: 'I', minNodes: 1475000, color: '#e11d48' },
+  { tier: 'Grandmaster', division: 'II', minNodes: 1600000, color: '#f43f5e' },
+  { tier: 'Grandmaster', division: 'III', minNodes: 1725000, color: '#fb7185' },
+  { tier: 'Grandmaster', division: 'IV', minNodes: 1850000, color: '#fda4af' },
+  { tier: 'Grandmaster', division: 'V', minNodes: 1975000, color: '#ffe4e6' },
 
-  // Terra Challenger (1천만 노드 도달)
-  { tier: 'Terra Challenger', division: '', minNodes: 10000000, color: '#facc15' },
+  // Terra Challenger
+  { tier: 'Terra Challenger', division: '', minNodes: 2100000, color: '#facc15' },
 ];
 
 export function getNodeTierRank(connectedNodes: number): NodeTierRankInfo {
@@ -154,10 +154,11 @@ export function getNodeTierRank(connectedNodes: number): NodeTierRankInfo {
   }
 
   const span = Math.max(1, next.minNodes - current.minNodes);
-  const progressPct = Math.min(
+  const rawProgressPct = Math.min(
     100,
     Math.max(0, ((safeNodes - current.minNodes) / span) * 100)
   );
+  const progressPct = Math.round(rawProgressPct * 1000) / 1000;
   return {
     tier: current.tier,
     division: current.division,
@@ -168,6 +169,31 @@ export function getNodeTierRank(connectedNodes: number): NodeTierRankInfo {
     color: current.color,
   };
 }
+
+export interface NodeTierFamilyOverview {
+  tier: string;
+  minNodes: number;
+  color: string;
+  hasDivisions: boolean;
+}
+
+export const NODE_TIER_FAMILY_OVERVIEW: NodeTierFamilyOverview[] = (() => {
+  const seen = new Map<string, NodeTierFamilyOverview>();
+  for (const step of NODE_TIER_STEPS) {
+    const existing = seen.get(step.tier);
+    if (!existing) {
+      seen.set(step.tier, {
+        tier: step.tier,
+        minNodes: step.minNodes,
+        color: step.color,
+        hasDivisions: Boolean(step.division),
+      });
+    } else if (step.division === 'III' || !step.division) {
+      existing.color = step.color;
+    }
+  }
+  return Array.from(seen.values());
+})();
 
 function computeComponentSizes(edges: OsmEdge[], modeFilter?: 'road' | 'rail'): Map<string, number> {
   const adj = new Map<string, string[]>();
@@ -544,7 +570,11 @@ export function isRegionExpandableFromUnlocked(
       continue;
     }
 
-    if (doBboxesTouchOrOverlap(region.bbox, ur.bbox, 0.055)) {
+    const rSpan = Math.max(region.bbox[2] - region.bbox[0], region.bbox[3] - region.bbox[1]);
+    const uSpan = Math.max(ur.bbox[2] - ur.bbox[0], ur.bbox[3] - ur.bbox[1]);
+    const adjPad = rSpan < 0.25 && uSpan < 0.25 ? 0.016 : 0.045;
+
+    if (doBboxesTouchOrOverlap(region.bbox, ur.bbox, adjPad)) {
       return true;
     }
 
@@ -570,19 +600,24 @@ export function computeRegionIsolation(
   isKnownIsland?: boolean
 ): boolean {
   if (isKnownIsland) {
-    // Adjacent cities on the SAME island (e.g. Jejucity <-> Seogwipo) bridge cleanly via coastal roads!
+    // Adjacent districts on the SAME island (e.g. Jejucity <-> Seogwipo) bridge cleanly via coastal roads!
     const hasTouchingSameIsland = unlockedRegions.some(
-      (ur) => ur.isKnownIsland && doBboxesTouchOrOverlap(bbox, ur.bbox, 0.055)
+      (ur) => ur.isKnownIsland && doBboxesTouchOrOverlap(bbox, ur.bbox, 0.025)
     );
     return !hasTouchingSameIsland;
   }
   if (unlockedRegions.length === 0) return false;
+  const rSpan = Math.max(bbox[2] - bbox[0], bbox[3] - bbox[1]);
   for (const ur of unlockedRegions) {
     if (ur.isKnownIsland) continue;
-    if (doBboxesTouchOrOverlap(bbox, ur.bbox, 0.045)) {
+    const uSpan = Math.max(ur.bbox[2] - ur.bbox[0], ur.bbox[3] - ur.bbox[1]);
+    const bothCompact = rSpan < 0.25 && uSpan < 0.25;
+    const adjPad = bothCompact ? 0.016 : 0.045;
+    if (doBboxesTouchOrOverlap(bbox, ur.bbox, adjPad)) {
       return false;
     }
-    if (haversineKm(centerLat, centerLng, ur.centerLat, ur.centerLng) <= 45) {
+    const maxDistKm = bothCompact ? 14 : 42;
+    if (haversineKm(centerLat, centerLng, ur.centerLat, ur.centerLng) <= maxDistKm) {
       return false;
     }
   }
@@ -618,13 +653,13 @@ export function getRegionUnlockCost(state: GameState, region: ProvincialRegion):
     );
   }
 
-  // Moderate provincial unlock curve (1.62^(unlocked-1) up to 12, then 1.38x)
+  // Smooth county-scale unlock curve (1.48^(unlocked-1) up to 16, then 1.30x)
   const expFactor =
-    unlockedCount <= 12
-      ? Math.pow(1.62, unlockedCount - 1)
-      : Math.pow(1.62, 11) * Math.pow(1.38, unlockedCount - 12);
-  const base = isolated ? 55000 * (1 + Math.min(3.0, minDistKm / 180)) : 18000;
-  return Math.max(5000, Math.round((base * expFactor) / 100) * 100);
+    unlockedCount <= 16
+      ? Math.pow(1.48, unlockedCount - 1)
+      : Math.pow(1.48, 15) * Math.pow(1.30, unlockedCount - 16);
+  const base = isolated ? 42000 * (1 + Math.min(3.0, minDistKm / 180)) : 12000;
+  return Math.max(4000, Math.round((base * expFactor) / 100) * 100);
 }
 
 export function getRegionProgressStats(
@@ -863,6 +898,69 @@ function getCanonicalAdminRegionKey(name: string, lat: number, lng: number): str
 
   const isKorea = lat >= 33.0 && lat <= 38.9 && lng >= 124.4 && lng <= 132.0;
   if (isKorea) {
+    // County / 시·군·구 canonical aliases (disambiguated by coordinates where generic gu names repeat)
+    const inSeoulCore = lat >= 37.42 && lat <= 37.71 && lng >= 126.76 && lng <= 127.19;
+    const inIncheonArea = lat >= 37.34 && lat <= 37.60 && lng >= 126.32 && lng <= 126.78;
+    const inBusanArea = lat >= 35.04 && lat <= 35.35 && lng >= 128.88 && lng <= 129.26;
+    if (
+      norm === '서울중구' ||
+      ((norm === '중구' || norm === 'junggu' || norm === 'jung') && inSeoulCore && !inIncheonArea)
+    ) {
+      return 'kr_seoul_jung';
+    }
+    if (norm === '서울종로구' || norm === '종로구' || norm === '종로' || norm === 'jongnogu' || norm === 'jongno') {
+      return 'kr_seoul_jongno';
+    }
+    if (norm === '서울용산구' || norm === '용산구' || norm === 'yongsan' || norm === 'yongsangu') {
+      return 'kr_seoul_yongsan';
+    }
+    if (norm === '서울서대문구' || norm === '서대문구' || norm === 'seodaemun' || norm === 'seodaemungu') {
+      return 'kr_seoul_seodaemun';
+    }
+    if (norm === '서울마포구' || norm === '마포구' || norm === 'mapo' || norm === 'mapogu') {
+      return 'kr_seoul_mapo';
+    }
+    if (norm === '서울성동구' || norm === '성동구' || norm === 'seongdong' || norm === 'seongdonggu') {
+      return 'kr_seoul_seongdong';
+    }
+    if (norm === '서울동대문구' || norm === '동대문구' || norm === 'dongdaemun' || norm === 'dongdaemungu') {
+      return 'kr_seoul_dongdaemun';
+    }
+    if (norm === '서울성북구' || norm === '성북구' || norm === 'seongbuk' || norm === 'seongbukgu') {
+      return 'kr_seoul_seongbuk';
+    }
+    if (norm === '서울강남구' || norm === '강남구' || norm === 'gangnam' || norm === 'gangnamgu') {
+      return 'kr_seoul_gangnam';
+    }
+    if (norm === '서울서초구' || norm === '서초구' || norm === 'seocho' || norm === 'seochogu') {
+      return 'kr_seoul_seocho';
+    }
+    if (norm === '서울영등포구' || norm === '영등포구' || norm === 'yeongdeungpo' || norm === 'yeongdeungpogu') {
+      return 'kr_seoul_yeongdeungpo';
+    }
+    if (norm === '고양' || norm === '고양시' || norm === 'goyang' || norm === 'goyangsi') return 'kr_goyang';
+    if (norm === '성남' || norm === '성남시' || norm === 'seongnam' || norm === 'seongnamsi') return 'kr_seongnam';
+    if (
+      norm === '인천중구' ||
+      ((norm === '중구' || norm === 'junggu' || norm === 'jung') && inIncheonArea)
+    ) {
+      return 'kr_incheon_jung';
+    }
+    if (
+      norm === '부산중구' ||
+      ((norm === '중구' || norm === 'junggu' || norm === 'jung') && inBusanArea)
+    ) {
+      return 'kr_busan_jung';
+    }
+    if (norm === '목포' || norm === '목포시' || norm === 'mokpo' || norm === 'mokposi') return 'kr_mokpo';
+    if (norm === '제주시' || (norm === 'jeju' && lat > 33.37) || norm === 'jejucity' || norm === 'jejusi') return 'kr_jeju_city';
+    if (norm === '서귀포' || norm === '서귀포시' || norm === 'seogwipo' || norm === 'seogwiposi') return 'kr_seogwipo';
+    if (norm === '부산동구' || (norm === '동구' && inBusanArea)) return 'kr_busan_dong';
+    if (norm === '부산연제구' || norm === '연제구' || norm === 'yeonje' || norm === 'yeonjegu') return 'kr_busan_yeonje';
+    if (norm === '부산부산진구' || norm === '부산진구' || norm === 'busanjin' || norm === 'busanjingu') return 'kr_busan_jingu';
+    if (norm === '부산수영구' || norm === '수영구' || norm === 'suyeong' || norm === 'suyeonggu') return 'kr_busan_suyeong';
+    if (norm === '부산해운대구' || norm === '해운대구' || norm === 'haeundae' || norm === 'haeundaegu') return 'kr_busan_haeundae';
+
     if (norm === '서울' || norm === 'seoul' || norm === 'seoulmetropolitan') return 'kr_seoul';
     if (norm === '경기' || norm === '경기도' || norm === 'gyeonggi' || norm === 'gyeonggido') return 'kr_gyeonggi';
     if (norm === '인천' || norm === 'incheon') return 'kr_incheon';
@@ -879,11 +977,35 @@ function getCanonicalAdminRegionKey(name: string, lat: number, lng: number): str
     if (norm === '대구' || norm === 'daegu') return 'kr_daegu';
     if (norm === '울산' || norm === 'ulsan') return 'kr_ulsan';
     if (norm === '부산' || norm === 'busan') return 'kr_busan';
-    if (norm === '제주' || norm === '제주도' || norm === 'jeju' || norm === 'jejudo') return 'kr_jeju';
+    if (norm === '제주' || norm === '제주도' || norm === 'jejudo') return 'kr_jeju';
   }
 
-  // Known non-KR curated names
+  // Known non-KR curated county/ward/prefecture names
+  if (norm.includes('chiyoda') || norm.includes('千代田')) return 'jp_tokyo_chiyoda';
+  if ((norm === 'chuo' || norm.includes('chuoku') || norm.includes('中央区')) && lat > 35.5 && lat < 35.9) return 'jp_tokyo_chuo';
+  if ((norm === 'minato' || norm.includes('minatoku') || norm.includes('港区')) && lat > 35.5 && lat < 35.9) return 'jp_tokyo_minato';
+  if (norm.includes('shinjuku') || norm.includes('新宿')) return 'jp_tokyo_shinjuku';
+  if (norm.includes('bunkyo') || norm.includes('文京')) return 'jp_tokyo_bunkyo';
   if (norm.includes('tokyo') || norm.includes('東京都')) return 'jp_tokyo';
+
+  if (norm.includes('manhattan') || norm.includes('newyorkcounty')) return 'us_ny_manhattan';
+  if (norm.includes('kingscounty') || norm.includes('brooklyn')) return 'us_ny_kings';
+  if (norm.includes('queenscounty') || norm === 'queens') return 'us_ny_queens';
+  if (norm.includes('bronxcounty') || norm === 'thebronx' || norm === 'bronx') return 'us_ny_bronx';
+  if (norm.includes('hudsoncounty')) return 'us_nj_hudson';
+  if (norm.includes('miamidade') || norm === 'dadecounty' || norm.includes('마이애미데이드')) {
+    return 'us_fl_miami_dade';
+  }
+  if (norm.includes('broward')) return 'us_fl_broward';
+  if (norm.includes('westminster')) return 'uk_westminster';
+  if (norm.includes('camden')) return 'uk_camden';
+  if (norm === 'cityoflondon' || norm === 'londoncity') return 'uk_city_london';
+  if (norm.includes('lambeth')) return 'uk_lambeth';
+  if (norm === 'paris') return 'fr_paris';
+  if (norm.includes('hautsdeseine')) return 'fr_hauts_de_seine';
+  if (norm.includes('seinesaintdenis')) return 'fr_seine_saint_denis';
+  if (norm.includes('valdemarne')) return 'fr_val_de_marne';
+
   if (norm.includes('kanagawa') || norm.includes('神奈川')) return 'jp_kanagawa';
   if (norm.includes('chiba') || norm.includes('千葉')) return 'jp_chiba';
   if (norm.includes('saitama') || norm.includes('埼玉')) return 'jp_saitama';
@@ -945,18 +1067,40 @@ function areSameProvincialRegion(
 
   const keyA = getCanonicalAdminRegionKey(a.regionName, a.centerLat, a.centerLng);
   const keyB = getCanonicalAdminRegionKey(b.regionName, b.centerLat, b.centerLng);
-  if (keyA && keyB && keyA === keyB) return true;
-
-  const distKm = haversineKm(a.centerLat, a.centerLng, b.centerLat, b.centerLng);
-  const normA = normalizeAdminRegionName(a.regionName);
-  const normB = normalizeAdminRegionName(b.regionName);
-  if (normA && normB && (normA === normB || normA.includes(normB) || normB.includes(normA)) && distKm <= 150) {
-    return true;
+  if (keyA && keyB) {
+    if (keyA === keyB) return true;
+    // Different known canonical counties (e.g. kr_seoul_jung vs kr_incheon_jung) must never collapse
+    return false;
   }
 
-  // Enclave cities (e.g. Seoul inside Gyeonggi) have small bbox overlap IoU; require high IoU (>= 0.45) to merge by geometry
+  const distKm = haversineKm(a.centerLat, a.centerLng, b.centerLat, b.centerLng);
   const iou = computeBboxIoU(a.bbox, b.bbox);
-  if (iou >= 0.45 && distKm <= 55) {
+  const normA = normalizeAdminRegionName(a.regionName);
+  const normB = normalizeAdminRegionName(b.regionName);
+  const namesMatch =
+    Boolean(normA && normB) &&
+    (normA === normB ||
+      (Math.min(normA.length, normB.length) >= 4 &&
+        (normA.includes(normB) || normB.includes(normA))));
+
+  if (namesMatch) {
+    // Disallow merging generic repeating county names (e.g. '중구', '서구') when disjoint & >12km apart
+    if (distKm <= 12 || iou >= 0.15) {
+      return true;
+    }
+    const maxSpan = Math.max(
+      a.bbox[2] - a.bbox[0],
+      a.bbox[3] - a.bbox[1],
+      b.bbox[2] - b.bbox[0],
+      b.bbox[3] - b.bbox[1]
+    );
+    if (maxSpan >= 0.45 && distKm <= 120 && iou >= 0.08) {
+      return true;
+    }
+  }
+
+  // Enclave cities have small bbox overlap IoU; require high IoU (>= 0.55) within compact distance to merge by geometry
+  if (iou >= 0.55 && distKm <= 25) {
     return true;
   }
 
@@ -1196,6 +1340,10 @@ export function registerStartingProvincialRegion(
     bbox: meta.bbox,
     boundaryGeoJson: meta.boundaryGeoJson || canonicalMatch?.boundaryGeoJson || existingStart?.boundaryGeoJson,
     hasRealOsmBoundary: isRealOsmBoundaryMeta(meta) || existingStart?.hasRealOsmBoundary || canonicalMatch?.hasRealOsmBoundary,
+    exactBoundaryVersion:
+      (meta.boundaryGeoJson ? 2 : undefined) ||
+      canonicalMatch?.exactBoundaryVersion ||
+      existingStart?.exactBoundaryVersion,
     centerLat: meta.centerLat,
     centerLng: meta.centerLng,
     unlocked: true,
@@ -1255,6 +1403,7 @@ export function registerDiscoveredProvincialRegion(
     adminLevel: string;
     bbox: [number, number, number, number];
     boundaryGeoJson?: GeoJsonBoundary;
+    exactBoundaryVersion?: number;
     centerLat: number;
     centerLng: number;
     isKnownIsland?: boolean;
@@ -1281,8 +1430,12 @@ export function registerDiscoveredProvincialRegion(
   );
 
   if (canonicalMatch) {
+    const isNewerExactBoundary =
+      Boolean(meta.boundaryGeoJson) &&
+      (meta.exactBoundaryVersion || 0) > (canonicalMatch.exactBoundaryVersion || 0);
     const shouldUpgradeBoundary =
       (isIncomingRealOsm && !canonicalMatch.hasRealOsmBoundary) ||
+      isNewerExactBoundary ||
       (Boolean(meta.boundaryGeoJson) && !canonicalMatch.boundaryGeoJson) ||
       (meta.totalNodeCount || 0) > (canonicalMatch.totalNodeCount || 0);
     if (!shouldUpgradeBoundary) {
@@ -1299,7 +1452,7 @@ export function registerDiscoveredProvincialRegion(
         : hasHangulText(meta.regionName)
         ? meta.regionName
         : r.regionName;
-      const upgradeGeom = isIncomingRealOsm || !r.boundaryGeoJson;
+      const upgradeGeom = isIncomingRealOsm || isNewerExactBoundary || !r.boundaryGeoJson;
       const nextBbox = upgradeGeom ? meta.bbox : r.bbox;
       const nextCenterLat = upgradeGeom ? meta.centerLat : r.centerLat;
       const nextCenterLng = upgradeGeom ? meta.centerLng : r.centerLng;
@@ -1312,6 +1465,9 @@ export function registerDiscoveredProvincialRegion(
           ? meta.boundaryGeoJson || r.boundaryGeoJson
           : r.boundaryGeoJson || meta.boundaryGeoJson,
         hasRealOsmBoundary: r.hasRealOsmBoundary || isIncomingRealOsm,
+        exactBoundaryVersion: upgradeGeom
+          ? Math.max(r.exactBoundaryVersion || 0, meta.exactBoundaryVersion || 0) || undefined
+          : r.exactBoundaryVersion,
         centerLat: nextCenterLat,
         centerLng: nextCenterLng,
         totalNodeCount: Math.max(r.totalNodeCount || 0, meta.totalNodeCount || 0) || undefined,
@@ -1330,10 +1486,40 @@ export function registerDiscoveredProvincialRegion(
     return canonicalMatch.unlocked ? retagNodesIntoUnlockedRegions(nextState) : nextState;
   }
 
-  const incomingKey = getCanonicalAdminRegionKey(meta.regionName, meta.centerLat, meta.centerLng);
   const incomingArea = bboxAreaDegSq(meta.bbox);
+  const incomingLevelNum = Number.parseInt(meta.adminLevel || '6', 10);
+  const isIncomingCoarseState =
+    Number.isFinite(incomingLevelNum) && incomingLevelNum <= 5 && incomingArea > 0.08;
+
+  // Enforce County/County-equivalent as minimum unit:
+  // - Reject coarse State/Province ('4'/'3') if finer county-level regions already live inside it
+  if (isIncomingCoarseState) {
+    const hasFinerChildren = regions.some((r) => {
+      const rLvl = Number.parseInt(r.adminLevel || '6', 10);
+      if (!(rLvl >= 6 && rLvl <= 8)) return false;
+      const rArea = bboxAreaDegSq(r.bbox);
+      if (rArea <= 0 || incomingArea <= rArea * 1.8) return false;
+      const interMinLat = Math.max(r.bbox[0], meta.bbox[0]);
+      const interMinLng = Math.max(r.bbox[1], meta.bbox[1]);
+      const interMaxLat = Math.min(r.bbox[2], meta.bbox[2]);
+      const interMaxLng = Math.min(r.bbox[3], meta.bbox[3]);
+      if (interMaxLat <= interMinLat || interMaxLng <= interMinLng) return false;
+      const interArea = (interMaxLat - interMinLat) * (interMaxLng - interMinLng);
+      return interArea / rArea >= 0.6;
+    });
+    if (hasFinerChildren) {
+      return state;
+    }
+  }
+
+  // - Reject sub-county neighborhoods/wards ('8'/'9'/'10' or tiny polygons) inside a real county ('6'/'7')
+  const incomingKey = getCanonicalAdminRegionKey(meta.regionName, meta.centerLat, meta.centerLng);
   if (!incomingKey && incomingArea > 0) {
-    const parentContainer = regions.find((r) => {
+    const parentCounty = regions.find((r) => {
+      const rLvl = Number.parseInt(r.adminLevel || '6', 10);
+      if (!(rLvl === 6 || rLvl === 7 || (rLvl === 8 && bboxAreaDegSq(r.bbox) >= 0.001))) {
+        return false;
+      }
       const rArea = bboxAreaDegSq(r.bbox);
       if (rArea <= incomingArea * 1.8) return false;
       const interMinLat = Math.max(meta.bbox[0], r.bbox[0]);
@@ -1344,9 +1530,9 @@ export function registerDiscoveredProvincialRegion(
       const interArea = (interMaxLat - interMinLat) * (interMaxLng - interMinLng);
       if (interArea / incomingArea < 0.6) return false;
       if (!isPointInRegionBoundary(meta.centerLat, meta.centerLng, r, 0)) return false;
-      return meta.adminLevel !== '4' || r.adminLevel === '4';
+      return !Number.isFinite(incomingLevelNum) || incomingLevelNum > rLvl || incomingArea < 0.001;
     });
-    if (parentContainer) {
+    if (parentCounty) {
       return state;
     }
   }
@@ -1422,10 +1608,10 @@ export function buildInitialProvincialRegions(startingCity: StartingCity): Provi
     );
 
   const fallbackBbox: [number, number, number, number] = [
-    startingCity.lat - 0.08,
-    startingCity.lng - 0.1,
-    startingCity.lat + 0.08,
-    startingCity.lng + 0.1,
+    startingCity.lat - 0.045,
+    startingCity.lng - 0.055,
+    startingCity.lat + 0.045,
+    startingCity.lng + 0.055,
   ];
 
   const startingRegion: ProvincialRegion = curatedStartMatch
@@ -1439,7 +1625,7 @@ export function buildInitialProvincialRegions(startingCity: StartingCity): Provi
     : {
         regionId: `start_${startingCity.id}`,
         regionName: startingCity.name.split(' ')[0],
-        adminLevel: '4',
+        adminLevel: '6',
         bbox: fallbackBbox,
         centerLat: startingCity.lat,
         centerLng: startingCity.lng,
@@ -1514,9 +1700,10 @@ export function scopeGameStateToStartingCity(
   const curatedById = new Map(CURATED_PROVINCIAL_REGIONS.map((c) => [c.regionId, c]));
 
   const strippedRegionIds = new Set<string>();
+  const migratedRegionIdMap = new Map<string, string>();
   let provincialRegions: ProvincialRegion[];
   if (Array.isArray(state.provincialRegions) && state.provincialRegions.length > 0) {
-    const cleaned = state.provincialRegions
+    let cleaned = state.provincialRegions
       .filter((r) => {
         if (isCountryLevelRegion(r)) {
           strippedRegionIds.add(r.regionId);
@@ -1551,6 +1738,80 @@ export function scopeGameStateToStartingCity(
           ? { ...r, boundaryGeoJson: curated.boundaryGeoJson, adminLevel: curated.adminLevel }
           : r;
       });
+
+    // Migrate legacy sub-county Miami saves (city-level Miami inside Miami-Dade) into Miami-Dade County
+    const miamiDadeCurated = curatedById.get('curated_us_fl_miami_dade');
+    if (miamiDadeCurated) {
+      const isLegacySubMiami = (r: ProvincialRegion): boolean => {
+        if (r.regionId === miamiDadeCurated.regionId) return false;
+        const norm = normalizeAdminRegionName(r.regionName);
+        if (norm.includes('miamidade') || norm === 'dadecounty' || norm.includes('마이애미데이드')) {
+          return false;
+        }
+        const inDadeCoords =
+          r.centerLat >= 25.13 &&
+          r.centerLat <= 25.98 &&
+          r.centerLng >= -80.88 &&
+          r.centerLng <= -80.10;
+        if (!inDadeCoords) return false;
+        const isMiamiMunicipalityName =
+          norm === 'miami' ||
+          norm === '마이애미' ||
+          norm === 'miamibeach' ||
+          norm === '마이애미비치' ||
+          norm === 'coralgables' ||
+          norm === 'hialeah' ||
+          (r.adminLevel === '8' && norm.includes('miami'));
+        return isMiamiMunicipalityName;
+      };
+
+      const legacyMiamis = cleaned.filter(isLegacySubMiami);
+      if (legacyMiamis.length > 0) {
+        let existingDade = cleaned.find(
+          (r) =>
+            r.regionId === miamiDadeCurated.regionId ||
+            getCanonicalAdminRegionKey(r.regionName, r.centerLat, r.centerLng) === 'us_fl_miami_dade'
+        );
+        let dadeTarget: ProvincialRegion = existingDade
+          ? {
+              ...existingDade,
+              adminLevel: '6',
+              bbox:
+                bboxAreaDegSq(existingDade.bbox) >= bboxAreaDegSq(miamiDadeCurated.bbox) * 0.5
+                  ? existingDade.bbox
+                  : miamiDadeCurated.bbox,
+              boundaryGeoJson:
+                bboxAreaDegSq(existingDade.bbox) >= bboxAreaDegSq(miamiDadeCurated.bbox) * 0.5
+                  ? existingDade.boundaryGeoJson || miamiDadeCurated.boundaryGeoJson
+                  : miamiDadeCurated.boundaryGeoJson,
+            }
+          : {
+              ...miamiDadeCurated,
+              unlocked: false,
+              isStartingRegion: false,
+              isIsolated: false,
+            };
+
+        for (const legacy of legacyMiamis) {
+          dadeTarget = {
+            ...dadeTarget,
+            unlocked: dadeTarget.unlocked || legacy.unlocked,
+            isStartingRegion: Boolean(dadeTarget.isStartingRegion || legacy.isStartingRegion),
+            isKnownIsland: Boolean(dadeTarget.isKnownIsland || legacy.isKnownIsland),
+            isIsolated:
+              dadeTarget.unlocked || legacy.unlocked ? false : dadeTarget.isIsolated,
+          };
+          migratedRegionIdMap.set(legacy.regionId, dadeTarget.regionId);
+        }
+
+        const legacyIdSet = new Set(legacyMiamis.map((l) => l.regionId));
+        cleaned = cleaned.filter(
+          (r) => !legacyIdSet.has(r.regionId) && r.regionId !== dadeTarget.regionId
+        );
+        cleaned.unshift(dadeTarget);
+      }
+    }
+
     const dedupedCleaned = deduplicateProvincialRegions(cleaned);
     const hasAnyUnlocked = dedupedCleaned.some((r) => r.unlocked);
     const missingFromBaseline = seededBaselineRegions.filter((b) => {
@@ -1580,7 +1841,11 @@ export function scopeGameStateToStartingCity(
   }
 
   const pendingSeedRegionIds = Array.isArray(state.pendingSeedRegionIds)
-    ? state.pendingSeedRegionIds
+    ? Array.from(
+        new Set(
+          state.pendingSeedRegionIds.map((rid) => migratedRegionIdMap.get(rid) ?? rid)
+        )
+      )
     : [];
 
   const unlockedRegions = provincialRegions.filter((r) => r.unlocked);
@@ -1588,8 +1853,8 @@ export function scopeGameStateToStartingCity(
     unlockedRegions.find((r) => r.isStartingRegion) || unlockedRegions[0];
 
   const rawOsmNodes = state.osmNodes || [];
-  let needsNodeTag = false;
-  if (startRegion) {
+  let needsNodeTag = migratedRegionIdMap.size > 0;
+  if (!needsNodeTag && startRegion) {
     for (let i = 0; i < rawOsmNodes.length; i++) {
       const rid = rawOsmNodes[i].regionId;
       if (!rid || strippedRegionIds.has(rid)) {
@@ -1601,14 +1866,17 @@ export function scopeGameStateToStartingCity(
   const taggedNodes = !needsNodeTag
     ? rawOsmNodes
     : rawOsmNodes.map((n) => {
+        if (n.regionId && migratedRegionIdMap.has(n.regionId)) {
+          return { ...n, regionId: migratedRegionIdMap.get(n.regionId)! };
+        }
         if (n.regionId && !strippedRegionIds.has(n.regionId)) return n;
         const match = unlockedRegions.find((ur) => isPointInRegionBoundary(n.lat, n.lng, ur, 0.002));
         return { ...n, regionId: match ? match.regionId : '__locked_outside__' };
       });
 
   const rawOsmEdges = state.osmEdges || [];
-  let needsEdgeTag = false;
-  if (startRegion) {
+  let needsEdgeTag = migratedRegionIdMap.size > 0;
+  if (!needsEdgeTag && startRegion) {
     for (let i = 0; i < rawOsmEdges.length; i++) {
       const rid = rawOsmEdges[i].regionId;
       if (!rid || strippedRegionIds.has(rid)) {
@@ -1619,11 +1887,14 @@ export function scopeGameStateToStartingCity(
   }
   const taggedEdges = !needsEdgeTag
     ? rawOsmEdges
-    : rawOsmEdges.map((e) =>
-        (e.regionId && !strippedRegionIds.has(e.regionId)) || !startRegion
+    : rawOsmEdges.map((e) => {
+        if (e.regionId && migratedRegionIdMap.has(e.regionId)) {
+          return { ...e, regionId: migratedRegionIdMap.get(e.regionId)! };
+        }
+        return (e.regionId && !strippedRegionIds.has(e.regionId)) || !startRegion
           ? e
-          : { ...e, regionId: startRegion.regionId }
-      );
+          : { ...e, regionId: startRegion.regionId };
+      });
 
   const hasConnectedNodes = taggedNodes.some((n) => n.connected);
   const startPendingManualSeed =
@@ -1669,7 +1940,15 @@ export function scopeGameStateToStartingCity(
     skills,
     osmNodes: seededOsmNodes,
     osmEdges: taggedEdges,
-    loadedOsmRegions: Array.isArray(state.loadedOsmRegions) ? state.loadedOsmRegions : [],
+    loadedOsmRegions: Array.isArray(state.loadedOsmRegions)
+      ? Array.from(
+          new Set(
+            state.loadedOsmRegions.filter(
+              (rid) => !strippedRegionIds.has(rid) && !migratedRegionIdMap.has(rid)
+            )
+          )
+        )
+      : [],
     provincialRegions,
     pendingSeedRegionIds,
     achievements,
@@ -3819,6 +4098,7 @@ export function mergeOsmChunksBatch(
         bbox: mergeRegionBboxWithBoundary(r.bbox, upd.boundaryGeoJson),
         boundaryGeoJson: upd.boundaryGeoJson,
         hasRealOsmBoundary: true,
+        exactBoundaryVersion: 2,
         totalNodeCount: Math.max(r.totalNodeCount || 0, upd.totalNodeCount || 0) || undefined,
       };
     });
@@ -4027,6 +4307,7 @@ export function mergeOsmChunksBatch(
         bbox: upd.boundaryGeoJson ? mergeRegionBboxWithBoundary(r.bbox, upd.boundaryGeoJson) : r.bbox,
         boundaryGeoJson: upd.boundaryGeoJson || r.boundaryGeoJson,
         hasRealOsmBoundary: r.hasRealOsmBoundary || Boolean(upd.boundaryGeoJson),
+        exactBoundaryVersion: upd.boundaryGeoJson ? 2 : r.exactBoundaryVersion,
         totalNodeCount: nextTotal > 0 ? nextTotal : r.totalNodeCount,
       };
     });
@@ -4130,6 +4411,7 @@ export function unlockProvincialRegion(
         bbox: resolvedBbox,
         boundaryGeoJson: payload?.boundaryGeoJson || r.boundaryGeoJson,
         hasRealOsmBoundary: r.hasRealOsmBoundary || Boolean(payload?.boundaryGeoJson),
+        exactBoundaryVersion: payload?.boundaryGeoJson ? 2 : r.exactBoundaryVersion,
         totalNodeCount:
           Math.max(r.totalNodeCount || 0, payload?.totalNodeCount || 0) || undefined,
         unlocked: true,

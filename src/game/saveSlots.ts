@@ -138,6 +138,7 @@ export interface CompactRegionRecord {
 
 type LocalCompactRegionRecord = CompactRegionRecord & {
   hasRealOsmBoundary?: boolean;
+  exactBoundaryVersion?: number;
 };
 
 export interface DehydratedCloudSlot {
@@ -490,6 +491,7 @@ function packLocalCoreV2(
     isKnownIsland: Boolean(r.isKnownIsland),
     totalNodeCount: Math.max(0, Math.floor(r.totalNodeCount || 0)),
     ...(r.hasRealOsmBoundary ? { hasRealOsmBoundary: true } : {}),
+    ...(r.exactBoundaryVersion ? { exactBoundaryVersion: r.exactBoundaryVersion } : {}),
   }));
 
   const connectedSet = new Set<string>();
@@ -699,6 +701,7 @@ function unpackLocalV2ToRawGameState(
       totalNodeCount: r.totalNodeCount || undefined,
       boundaryGeoJson: b?.boundaryGeoJson,
       hasRealOsmBoundary: hasReal,
+      exactBoundaryVersion: r.exactBoundaryVersion,
     };
   });
 
@@ -1744,6 +1747,7 @@ export function packCloudGraphV1(
     isKnownIsland: Boolean(r.isKnownIsland),
     totalNodeCount: Math.max(0, Math.floor(r.totalNodeCount || 0)),
     ...(r.hasRealOsmBoundary ? { hasRealOsmBoundary: true } : {}),
+    ...(r.exactBoundaryVersion ? { exactBoundaryVersion: r.exactBoundaryVersion } : {}),
   }));
 
   const chunkSet = new Set<string>(state.loadedOsmChunks || []);

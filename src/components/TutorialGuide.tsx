@@ -58,7 +58,7 @@ const STEPS: TutorialStepDef[] = [
     id: 'expand',
     title: '4. 인접 행정구역 세계 확장',
     description:
-      '자금을 모아 "세계 확장" 탭 또는 지도 위 지역 카드로 인접 도·주를 해금하고 노선을 이어가세요!',
+      '자금을 모아 "세계 확장" 탭 또는 지도 위 지역 카드로 인접 행정구역(카운티·시·군·구)을 해금하고 노선을 이어가세요!',
     hint: '저장 슬롯 창에서 자금 밸런스 조정 및 클라우드 백업도 언제든 가능합니다.',
     icon: <Compass className="w-4 h-4 text-indigo-400" />,
   },
@@ -90,15 +90,15 @@ export const TutorialGuide: React.FC<TutorialGuideProps> = ({
     <aside
       data-testid="onboarding-tutorial"
       aria-label="초보자 가이드"
-      className="fixed top-[136px] sm:top-[152px] right-2 sm:right-3 z-30 w-[min(330px,calc(100vw-16px))] rounded-2xl bg-slate-950/95 border border-sky-500/50 shadow-2xl p-3.5 text-slate-100 pointer-events-auto"
+      className="fixed top-[136px] sm:top-[152px] right-2 sm:right-3 z-30 w-[min(330px,calc(100vw-16px))] rounded-2xl ui-glass border-sky-400/35 shadow-2xl p-3.5 text-slate-100 pointer-events-auto"
     >
       <div className="flex items-start justify-between gap-2">
-        <div className="flex items-center gap-2 min-w-0">
-          <div className="w-7 h-7 rounded-lg bg-slate-900 border border-slate-700 flex items-center justify-center shrink-0">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-7 h-7 rounded-lg bg-[#10182b] border border-white/[0.09] flex items-center justify-center shrink-0">
             {step.icon}
           </div>
           <div className="min-w-0">
-            <div className="text-[10px] font-bold uppercase tracking-wide text-sky-400 flex items-center gap-1">
+            <div className="text-[11px] font-semibold text-sky-400 flex items-center gap-1">
               <HelpCircle className="w-3 h-3" />
               플레이 가이드 ({safeIndex + 1}/{STEPS.length})
             </div>
@@ -109,32 +109,32 @@ export const TutorialGuide: React.FC<TutorialGuideProps> = ({
           type="button"
           onClick={onComplete}
           aria-label="튜토리얼 닫기"
-          className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer shrink-0"
+          className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/[0.08] cursor-pointer shrink-0 transition-colors"
         >
           <X className="w-4 h-4" />
         </button>
       </div>
 
-      <p className="text-xs text-slate-200 leading-relaxed mt-2">{step.description}</p>
-      <p className="text-[11px] text-slate-400 leading-snug mt-1.5 bg-slate-900/80 border border-slate-800/80 rounded-lg px-2.5 py-1.5">
+      <p className="text-xs text-slate-200 leading-relaxed mt-2.5">{step.description}</p>
+      <p className="text-[11px] text-slate-400 leading-snug mt-2 bg-[#070b14]/80 border border-white/[0.06] rounded-lg px-2.5 py-2">
         {step.hint}
       </p>
 
-      {/* Progress dots */}
+      {/* Progress segments */}
       <div className="flex items-center justify-between gap-2 mt-3">
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1">
           {STEPS.map((s, idx) => (
             <button
               key={s.id}
               type="button"
               onClick={() => onStepChange(idx)}
               aria-label={`${idx + 1}단계로 이동`}
-              className={`h-1.5 rounded-full transition-all cursor-pointer ${
+              className={`h-1 rounded-full transition-all cursor-pointer ${
                 idx === safeIndex
                   ? 'w-5 bg-sky-400'
                   : idx < safeIndex
-                  ? 'w-2 bg-emerald-400'
-                  : 'w-2 bg-slate-700'
+                  ? 'w-2.5 bg-emerald-400'
+                  : 'w-2.5 bg-white/[0.15]'
               }`}
             />
           ))}
@@ -144,7 +144,7 @@ export const TutorialGuide: React.FC<TutorialGuideProps> = ({
           <button
             type="button"
             onClick={onComplete}
-            className="min-h-[32px] px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-medium cursor-pointer"
+            className="min-h-[32px] px-2.5 py-1 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.08] text-slate-300 text-[11px] font-medium cursor-pointer transition-colors"
           >
             건너뛰기
           </button>
@@ -152,7 +152,7 @@ export const TutorialGuide: React.FC<TutorialGuideProps> = ({
             <button
               type="button"
               onClick={onComplete}
-              className="min-h-[32px] px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+              className="min-h-[32px] px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-colors"
             >
               <CheckCircle2 className="w-3.5 h-3.5" />
               완료
@@ -161,10 +161,10 @@ export const TutorialGuide: React.FC<TutorialGuideProps> = ({
             <button
               type="button"
               onClick={() => onStepChange(safeIndex + 1)}
-              className={`min-h-[32px] px-3 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1 cursor-pointer ${
+              className={`min-h-[32px] px-3 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-colors ${
                 stepDone
                   ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                  : 'bg-sky-600 hover:bg-sky-500 text-white'
+                  : 'bg-sky-500 hover:bg-sky-400 text-slate-950'
               }`}
             >
               <span>{stepDone ? '다음 (달성!)' : '다음'}</span>
@@ -175,9 +175,9 @@ export const TutorialGuide: React.FC<TutorialGuideProps> = ({
       </div>
 
       {safeIndex === 2 && (
-        <div className="mt-2 flex items-center gap-1.5 text-[10px] text-amber-300/90">
-          <Gamepad2 className="w-3 h-3 shrink-0" />
-          <span>하단 Dock의 "연구"와 "타운" 버튼을 눌러 확인해 보세요.</span>
+        <div className="mt-2.5 pt-2 border-t border-white/[0.06] flex items-center gap-1.5 text-[11px] text-amber-300/90">
+          <Gamepad2 className="w-3.5 h-3.5 shrink-0" />
+          <span>하단 메뉴의 &ldquo;연구&rdquo;와 &ldquo;타운&rdquo; 버튼을 눌러 확인해 보세요.</span>
         </div>
       )}
     </aside>

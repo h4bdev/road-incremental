@@ -58,6 +58,7 @@ import { isCountryLevelOsmArea, quantizeChunkKey } from './osmCore';
 import { enumerateChunkKeysForBounds } from './osmService';
 import { CURATED_LINES, CURATED_PROVINCIAL_REGIONS, INITIAL_UPGRADES, PRESET_CITIES } from './worldCatalog';
 import { MINIGAME_MILESTONES, MINIGAME_ORDER } from './minigames';
+import { hydrateRawGameState } from './saveSlots';
 
 function makeSampleOsmGrid(wayName = '세종대로', mode: 'road' | 'rail' = 'road') {
   const nodes = [
@@ -195,7 +196,7 @@ test('createInitialGameState initializes city-level regions with GeoJSON boundar
   assert.ok(state.skills.every((s) => s.costSP === 0 && s.costMoney > 0));
   assert.ok(state.provincialRegions.every((r) => Boolean(r.boundaryGeoJson)));
   assert.equal(state.provincialRegions.filter((r) => r.unlocked).length, 1);
-  assert.equal(state.provincialRegions.find((r) => r.unlocked)?.regionId, 'curated_kr_seoul');
+  assert.equal(state.provincialRegions.find((r) => r.unlocked)?.regionId, 'curated_kr_seoul_jung');
   assert.deepEqual(state.completedOsmWays, []);
   assert.deepEqual(state.loadedOsmRegions, []);
   assert.equal(calculateTotalIncomePerSec(state), 0);
@@ -215,10 +216,10 @@ test('linking OSM nodes completes real way and OSM junction achievements without
   assert.equal(state.skillPoints, 0);
 
   const { nodes, edges } = makeLongOsmGrid('세종대로', 'road', 18);
-  state = mergeOsmChunk(state, '37.566_126.978', nodes, edges, 'curated_kr_seoul', {
+  state = mergeOsmChunk(state, '37.566_126.978', nodes, edges, 'curated_kr_seoul_jung', {
     totalNodeCount: 50,
   });
-  assert.ok(state.loadedOsmRegions?.includes('curated_kr_seoul'));
+  assert.ok(state.loadedOsmRegions?.includes('curated_kr_seoul_jung'));
 
   // Jumping past d=10 is blocked
   const blockedFar = connectOsmPath(state, 'n1', 'n18');
@@ -248,8 +249,8 @@ test('linking OSM nodes completes real way and OSM junction achievements without
   assert.equal(osmAch5.unlocked, true);
   assert.equal(res.newState.skillPoints, 0);
 
-  // City progress tracking reports connectedCount / totalNodes / percentage
-  const prog = getRegionProgressStats(res.newState, 'curated_kr_seoul');
+  // County progress tracking reports connectedCount / totalNodes / percentage
+  const prog = getRegionProgressStats(res.newState, 'curated_kr_seoul_jung');
   assert.equal(prog.connectedCount, 18);
   assert.equal(prog.totalNodes, 50);
   assert.equal(prog.pct, 36);
@@ -817,91 +818,90 @@ test('Rule 0: dead-end/isolated routes bridge only to the single nearest node wi
   assert.equal(connectOsmPath(state, 'a2', 'c1').success, false);
 });
 
-test('Province-level regional locking, exponential money unlock, GeoJSON border bridge, mainland corridor -> Jeju isolated seed selection', () => {
+test('County-level regional locking, exponential money unlock, GeoJSON border bridge, coastal -> Jeju isolated seed selection', () => {
   const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
   let state = createInitialGameState(seoul);
 
   const unlockedInit = state.provincialRegions.filter((r) => r.unlocked);
   assert.equal(unlockedInit.length, 1);
   const startRegion = unlockedInit[0];
-  assert.equal(startRegion.regionId, 'curated_kr_seoul');
+  assert.equal(startRegion.regionId, 'curated_kr_seoul_jung');
 
-  // Minimum regional unit is province/state (도·주)
-  const gyeonggi = state.provincialRegions.find((r) => r.regionId === 'curated_kr_gyeonggi')!;
-  const jeju = state.provincialRegions.find((r) => r.regionId === 'curated_kr_jeju')!;
-  assert.ok(gyeonggi && gyeonggi.unlocked === false && gyeonggi.isIsolated === false);
+  // Minimum regional unit is county / county-equivalent (US County / KR 시·군·구)
+  const jongno = state.provincialRegions.find((r) => r.regionId === 'curated_kr_seoul_jongno')!;
+  const jeju = state.provincialRegions.find((r) => r.regionId === 'curated_kr_jeju_city')!;
+  assert.ok(jongno && jongno.unlocked === false && jongno.isIsolated === false);
   assert.ok(jeju && jeju.unlocked === false && jeju.isIsolated === true);
 
-  const gyeonggiCostBefore = getRegionUnlockCost(state, gyeonggi);
+  const jongnoCostBefore = getRegionUnlockCost(state, jongno);
   const jejuCostBefore = getRegionUnlockCost(state, jeju);
-  assert.ok(gyeonggiCostBefore < jejuCostBefore, 'Adjacent province should cost less than distant island province');
+  assert.ok(jongnoCostBefore < jejuCostBefore, 'Adjacent county should cost less than distant island county');
 
-  assert.equal(unlockProvincialRegion(state, gyeonggi.regionId).success, false);
+  assert.equal(unlockProvincialRegion(state, jongno.regionId).success, false);
 
-  // Merge border node inside Seoul's real polygon + node inside locked Gyeonggi
+  // Merge border node inside Seoul Jung-gu + node inside locked Jongno-gu (distance ~300m <= CROSS_BORDER_BRIDGE_MAX_KM 450m)
   state = { ...state, capital: 500_000 };
   state = mergeOsmChunk(
     state,
-    '37.700_127.050',
+    '37.569_126.978',
     [
-      { id: 'seoul_tip', lat: 37.6990, lng: 127.0500, connected: true, mode: 'road', regionId: startRegion.regionId },
-      { id: 'gyeonggi_locked', lat: 37.7025, lng: 127.0500, connected: false, mode: 'road', regionId: gyeonggi.regionId },
+      { id: 'jung_tip', lat: 37.5685, lng: 126.9780, connected: true, mode: 'road', regionId: startRegion.regionId },
+      { id: 'jongno_locked', lat: 37.5712, lng: 126.9780, connected: false, mode: 'road', regionId: jongno.regionId },
     ],
     []
   );
-  assert.equal(connectOsmPath(state, 'seoul_tip', 'gyeonggi_locked').success, false);
+  assert.equal(connectOsmPath(state, 'jung_tip', 'jongno_locked').success, false);
 
-  // Unlock adjacent province Gyeonggi -> cross-border connection allowed & cost increases exponentially
-  const gyeonggiUnlock = unlockProvincialRegion(state, gyeonggi.regionId, {
-    chunkKey: 'prov_gyeonggi',
+  // Unlock adjacent county Jongno-gu -> cross-border connection allowed & cost increases exponentially
+  const jongnoUnlock = unlockProvincialRegion(state, jongno.regionId, {
+    chunkKey: 'prov_jongno',
     osmNodes: [
-      { id: 'gyeonggi_border', lat: 37.7025, lng: 127.0500, connected: false, mode: 'road', regionId: gyeonggi.regionId },
-      { id: 'gyeonggi_next', lat: 37.7040, lng: 127.0500, connected: false, mode: 'road', regionId: gyeonggi.regionId },
+      { id: 'jongno_border', lat: 37.5712, lng: 126.9780, connected: false, mode: 'road', regionId: jongno.regionId },
+      { id: 'jongno_next', lat: 37.5728, lng: 126.9780, connected: false, mode: 'road', regionId: jongno.regionId },
     ],
     osmEdges: [
       {
-        id: 'e_gyeonggi_1',
-        wayName: '평화로',
+        id: 'e_jongno_1',
+        wayName: '세종대로',
         highwayType: 'primary',
         mode: 'road',
-        fromNodeId: 'gyeonggi_border',
-        toNodeId: 'gyeonggi_next',
-        coordinates: [[37.7025, 127.0500], [37.7040, 127.0500]],
-        distanceKm: 0.16,
+        fromNodeId: 'jongno_border',
+        toNodeId: 'jongno_next',
+        coordinates: [[37.5712, 126.9780], [37.5728, 126.9780]],
+        distanceKm: 0.18,
         buildCost: 40,
         baseIncomePerSec: 4,
         built: false,
-        regionId: gyeonggi.regionId,
+        regionId: jongno.regionId,
       },
     ],
   });
-  assert.equal(gyeonggiUnlock.success, true);
-  assert.equal(gyeonggiUnlock.isIsolated, false);
-  assert.equal(gyeonggiUnlock.newState.capital, 500_000 - gyeonggiCostBefore);
+  assert.equal(jongnoUnlock.success, true);
+  assert.equal(jongnoUnlock.isIsolated, false);
+  assert.equal(jongnoUnlock.newState.capital, 500_000 - jongnoCostBefore);
 
-  assert.ok(getRegionUnlockCost(gyeonggiUnlock.newState, jeju) > jejuCostBefore);
+  assert.ok(getRegionUnlockCost(jongnoUnlock.newState, jeju) > jejuCostBefore);
 
-  const bridgedBorder = connectOsmPath(gyeonggiUnlock.newState, 'seoul_tip', 'gyeonggi_border');
+  const bridgedBorder = connectOsmPath(jongnoUnlock.newState, 'jung_tip', 'jongno_border');
   assert.equal(bridgedBorder.success, true);
-  assert.equal(bridgedBorder.newState.osmNodes.find((n) => n.id === 'gyeonggi_border')?.connected, true);
+  assert.equal(bridgedBorder.newState.osmNodes.find((n) => n.id === 'jongno_border')?.connected, true);
 
-  // Non-adjacent Jeju cannot be unlocked directly from Seoul/Gyeonggi
+  // Non-adjacent Jeju cannot be unlocked directly from Seoul Jung-gu / Jongno-gu
   assert.equal(unlockProvincialRegion(bridgedBorder.newState, jeju.regionId).success, false);
 
-  // Step through province-level mainland corridor to Jeonnam, then unlock Jeju
-  let stepState = { ...bridgedBorder.newState, capital: 500_000_000_000 };
-  const provinceCorridor = [
-    'curated_kr_chungnam',
-    'curated_kr_jeonbuk',
-    'curated_kr_jeonnam',
-  ];
-  for (const rid of provinceCorridor) {
-    const stepRes = unlockProvincialRegion(stepState, rid);
-    assert.equal(stepRes.success, true, `Must unlock contiguous province corridor ${rid}: ${stepRes.reason || ''}`);
-    stepState = stepRes.newState;
-  }
-
-  const jejuUnlock = unlockProvincialRegion(stepState, jeju.regionId, {
+  // From south-coast Mokpo-si, island Jeju-si becomes expandable (isolated sea crossing)
+  const mokpoCity = {
+    id: 'custom_mokpo',
+    name: '목포시 대한민국',
+    country: '대한민국',
+    description: '전남 서남권 거점',
+    lat: 34.8118,
+    lng: 126.3922,
+    zoom: 13,
+    isCustom: true,
+  };
+  const mokpoState = { ...createInitialGameState(mokpoCity), capital: 500_000_000 };
+  const jejuUnlock = unlockProvincialRegion(mokpoState, jeju.regionId, {
     chunkKey: 'prov_jeju',
     osmNodes: [
       { id: 'jeju_1', lat: 33.4996, lng: 126.5312, connected: false, mode: 'road', regionId: jeju.regionId },
@@ -938,17 +938,17 @@ test('Province-level regional locking, exponential money unlock, GeoJSON border 
 });
 
 test('Neighbor-only expansion from Jeju (no Tokyo/Paris/NY/Seoul) and GeoJSON polygon coordinate-level locked-region blocking', () => {
-  const jejuProv = {
-    id: 'custom_jeju_prov',
-    name: '제주특별자치도',
+  const jejuCity = {
+    id: 'custom_jeju_city',
+    name: '제주시',
     country: '대한민국',
     description: '제주도 거점',
     lat: 33.4996,
     lng: 126.5312,
-    zoom: 10,
+    zoom: 12,
     isCustom: true,
   };
-  let jejuState = createInitialGameState(jejuProv);
+  let jejuState = createInitialGameState(jejuCity);
   jejuState = { ...jejuState, capital: 500_000 };
 
   const regionIds = jejuState.provincialRegions.map((r) => r.regionId);
@@ -976,88 +976,158 @@ test('Neighbor-only expansion from Jeju (no Tokyo/Paris/NY/Seoul) and GeoJSON po
 
   const expandable = getExpandableProvincialRegions(jejuState);
   const expandableIds = expandable.map((r) => r.regionId);
-  assert.ok(expandableIds.includes('curated_kr_jeonnam'), 'Jeonnam must be expandable from Jeju');
-  assert.equal(expandableIds.includes('curated_kr_seoul'), false, 'Seoul must NOT be directly expandable from Jeju');
+  assert.ok(expandableIds.includes('curated_kr_seogwipo'), 'Seogwipo must be expandable from Jeju City');
+  assert.ok(expandableIds.includes('curated_kr_mokpo'), 'Mokpo must be expandable from Jeju City');
+  assert.equal(expandableIds.includes('curated_kr_seoul_jung'), false, 'Seoul Jung-gu must NOT be directly expandable from Jeju City');
 
-  assert.equal(unlockProvincialRegion(jejuState, 'curated_kr_seoul').success, false);
+  assert.equal(unlockProvincialRegion(jejuState, 'curated_kr_seoul_jung').success, false);
 
-  // Strict GeoJSON polygon coordinate-level locked-region blocking across Seoul -> Gyeonggi
+  // Strict GeoJSON polygon coordinate-level locked-region blocking across Seoul Jung-gu -> Jongno-gu
   const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
   let seoulState = { ...createInitialGameState(seoul), capital: 500_000 };
   seoulState = mergeOsmChunk(
     seoulState,
-    '37.700_127.050',
+    '37.569_126.978',
     [
-      { id: 's_in', lat: 37.6990, lng: 127.0500, connected: true, mode: 'road' },
-      { id: 'gyeonggi_out', lat: 37.7080, lng: 127.0500, connected: false, mode: 'road' }, // Inside Gyeonggi, outside Seoul polygon
+      { id: 's_in', lat: 37.5665, lng: 126.9780, connected: true, mode: 'road' },
+      { id: 'jongno_out', lat: 37.5780, lng: 126.9780, connected: false, mode: 'road' }, // Inside Jongno-gu, outside Jung-gu
     ],
     [
       {
         id: 'e_cross',
-        wayName: '도봉로',
+        wayName: '세종대로',
         highwayType: 'primary',
         mode: 'road',
         fromNodeId: 's_in',
-        toNodeId: 'gyeonggi_out',
-        coordinates: [[37.6990, 127.0500], [37.7080, 127.0500]],
-        distanceKm: 1.0,
+        toNodeId: 'jongno_out',
+        coordinates: [[37.5665, 126.9780], [37.5780, 126.9780]],
+        distanceKm: 1.2,
         buildCost: 40,
         baseIncomePerSec: 4,
         built: false,
       },
     ],
-    'curated_kr_seoul'
+    'curated_kr_seoul_jung'
   );
 
-  const gyeonggiNode = seoulState.osmNodes.find((n) => n.id === 'gyeonggi_out')!;
-  assert.equal(isNodeInUnlockedRegion(seoulState, gyeonggiNode), false);
-  assert.equal(connectOsmPath(seoulState, 's_in', 'gyeonggi_out').success, false);
+  const jongnoNode = seoulState.osmNodes.find((n) => n.id === 'jongno_out')!;
+  assert.equal(isNodeInUnlockedRegion(seoulState, jongnoNode), false);
+  assert.equal(connectOsmPath(seoulState, 's_in', 'jongno_out').success, false);
 
-  const gyeonggiUnlocked = unlockProvincialRegion(seoulState, 'curated_kr_gyeonggi');
-  assert.equal(gyeonggiUnlocked.success, true);
-  assert.equal(isNodeInUnlockedRegion(gyeonggiUnlocked.newState, gyeonggiNode), true);
-  assert.equal(connectOsmPath(gyeonggiUnlocked.newState, 's_in', 'gyeonggi_out').success, true);
+  const jongnoUnlocked = unlockProvincialRegion(seoulState, 'curated_kr_seoul_jongno');
+  assert.equal(jongnoUnlocked.success, true);
+  assert.equal(isNodeInUnlockedRegion(jongnoUnlocked.newState, jongnoNode), true);
+  assert.equal(connectOsmPath(jongnoUnlocked.newState, 's_in', 'jongno_out').success, true);
 });
 
-test('Node Tier Rank progresses cleanly from Bronze I -> V -> Silver -> Gold -> Platinum -> Diamond -> Master -> Grandmaster -> Terra Challenger', () => {
+test('Node Tier Rank progresses cleanly with widened lower tiers and narrowed Master -> Terra Challenger band', () => {
   assert.equal(getNodeTierRank(0).label, 'Bronze I');
-  assert.equal(getNodeTierRank(100).label, 'Bronze V');
-  assert.equal(getNodeTierRank(170).label, 'Silver I');
-  assert.equal(getNodeTierRank(1550).label, 'Gold I');
-  assert.equal(getNodeTierRank(11000).label, 'Platinum I');
-  assert.equal(getNodeTierRank(75000).label, 'Diamond I');
-  assert.equal(getNodeTierRank(480000).label, 'Master I');
-  assert.equal(getNodeTierRank(2050000).label, 'Master V');
-  assert.equal(getNodeTierRank(2850000).label, 'Grandmaster I');
-  assert.equal(getNodeTierRank(8600000).label, 'Grandmaster V');
-  assert.equal(getNodeTierRank(10000000).label, 'Terra Challenger');
+  assert.equal(getNodeTierRank(800).label, 'Bronze V');
+  assert.equal(getNodeTierRank(1400).label, 'Silver I');
+  assert.equal(getNodeTierRank(12000).label, 'Gold I');
+  assert.equal(getNodeTierRank(65000).label, 'Platinum I');
+  assert.equal(getNodeTierRank(270000).label, 'Diamond I');
+  assert.equal(getNodeTierRank(850000).label, 'Master I');
+  assert.equal(getNodeTierRank(1350000).label, 'Master V');
+  assert.equal(getNodeTierRank(1475000).label, 'Grandmaster I');
+  assert.equal(getNodeTierRank(2100000).label, 'Terra Challenger');
+
+  // Verify tier progressPct has at most 3 decimal places cleanly
+  const rank1 = getNodeTierRank(1);
+  assert.equal(typeof rank1.progressPct, 'number');
+  const decParts = rank1.progressPct.toString().split('.')[1] || '';
+  assert.ok(decParts.length <= 3, `progressPct ${rank1.progressPct} must have at most 3 decimal places`);
+  assert.equal(rank1.progressPct.toFixed(3), '1.250');
 });
 
-test('Region deduplication merges English/Korean duplicate Gyeonggi while preserving Seoul enclave separation', () => {
+test('registerDiscoveredProvincialRegion upgrades boundary when exactBoundaryVersion: 2 arrives', () => {
   const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
   let state = createInitialGameState(seoul);
 
-  const gyeonggiOsmBoundary = {
-    type: 'Polygon' as const,
-    coordinates: [[[126.5, 36.9], [127.8, 36.9], [127.8, 38.2], [126.5, 38.2], [126.5, 36.9]]],
-  };
+  // Initial simplified boundary with exactBoundaryVersion undefined
   state = registerDiscoveredProvincialRegion(state, {
-    regionId: 'osm_adm_gyeonggi_dup',
-    regionName: 'Gyeonggi',
-    adminLevel: '4',
-    bbox: [36.91, 126.52, 38.25, 127.81],
-    boundaryGeoJson: gyeonggiOsmBoundary,
-    centerLat: 37.28,
-    centerLng: 127.01,
+    regionId: 'osm_rel_test_exact',
+    regionName: '정밀 행정구역',
+    adminLevel: '6',
+    bbox: [37.5, 126.9, 37.6, 127.0],
+    boundaryGeoJson: {
+      type: 'Polygon',
+      coordinates: [[[126.9, 37.5], [127.0, 37.5], [127.0, 37.6], [126.9, 37.6], [126.9, 37.5]]],
+    },
+    centerLat: 37.55,
+    centerLng: 126.95,
   });
 
-  const gyeonggiMatches = state.provincialRegions.filter(
-    (r) => r.regionName.includes('경기') || r.regionName.toLowerCase().includes('gyeonggi')
+  const initial = state.provincialRegions.find((r) => r.regionId === 'osm_rel_test_exact')!;
+  assert.equal(initial.exactBoundaryVersion, undefined);
+
+  // Fresh exact 100% boundary arrives with exactBoundaryVersion: 2
+  const exactCoordinates = [
+    [126.9000000, 37.5000000],
+    [126.9200000, 37.5050000],
+    [126.9500000, 37.5100000],
+    [127.0000000, 37.5000000],
+    [127.0000000, 37.6000000],
+    [126.9000000, 37.6000000],
+    [126.9000000, 37.5000000],
+  ];
+  state = registerDiscoveredProvincialRegion(state, {
+    regionId: 'osm_rel_test_exact',
+    regionName: '정밀 행정구역',
+    adminLevel: '6',
+    bbox: [37.5, 126.9, 37.6, 127.0],
+    boundaryGeoJson: {
+      type: 'Polygon',
+      coordinates: [exactCoordinates],
+    },
+    exactBoundaryVersion: 2,
+    centerLat: 37.55,
+    centerLng: 126.95,
+  });
+
+  const upgraded = state.provincialRegions.find((r) => r.regionId === 'osm_rel_test_exact')!;
+  assert.equal(upgraded.exactBoundaryVersion, 2);
+  assert.equal(upgraded.boundaryGeoJson?.coordinates[0].length, 7);
+});
+
+test('Region deduplication merges English/Korean duplicate county while preserving distinct same-named districts (Seoul Jung-gu vs Incheon Jung-gu)', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  let state = createInitialGameState(seoul);
+
+  const jongnoOsmBoundary = {
+    type: 'Polygon' as const,
+    coordinates: [[[126.95, 37.569], [127.024, 37.569], [127.024, 37.633], [126.95, 37.633], [126.95, 37.569]]],
+  };
+  state = registerDiscoveredProvincialRegion(state, {
+    regionId: 'osm_adm_jongno_dup',
+    regionName: 'Jongno-gu',
+    adminLevel: '6',
+    bbox: [37.569, 126.95, 37.633, 127.024],
+    boundaryGeoJson: jongnoOsmBoundary,
+    centerLat: 37.594,
+    centerLng: 126.982,
+  });
+
+  const jongnoMatches = state.provincialRegions.filter(
+    (r) => r.regionName.includes('종로') || r.regionName.toLowerCase().includes('jongno')
   );
-  assert.equal(gyeonggiMatches.length, 1, '경기도 and Gyeonggi must merge into 1 region');
-  assert.equal(gyeonggiMatches[0].regionName, '경기도');
-  assert.equal(gyeonggiMatches[0].hasRealOsmBoundary, true);
-  assert.ok(state.provincialRegions.some((r) => r.regionId === 'curated_kr_seoul'), 'Seoul enclave must stay separate');
+  assert.equal(jongnoMatches.length, 1, '서울 종로구 and Jongno-gu must merge into 1 region');
+  assert.equal(jongnoMatches[0].regionName, '서울 종로구');
+  assert.equal(jongnoMatches[0].hasRealOsmBoundary, true);
+
+  // Bare '중구' at Incheon Jung-gu coordinates must NOT merge into '서울 중구'
+  state = registerDiscoveredProvincialRegion(state, {
+    regionId: 'osm_rel_incheon_jung_test',
+    regionName: '중구',
+    adminLevel: '6',
+    bbox: [37.42, 126.38, 37.52, 126.66],
+    centerLat: 37.4736,
+    centerLng: 126.6215,
+  });
+  const seoulJungCount = state.provincialRegions.filter((r) => r.regionId === 'curated_kr_seoul_jung').length;
+  const incheonJungCount = state.provincialRegions.filter((r) => r.regionId === 'curated_kr_incheon_jung').length;
+  assert.equal(seoulJungCount, 1);
+  assert.equal(incheonJungCount, 1);
 });
 
 test('Build cost scales upward with total connected nodes and prevents linking two unconnected nodes', () => {
@@ -1137,7 +1207,7 @@ test('Batched connectOsmPath matches sequential connectOsmEdge rewards, costs, w
 
   const { nodes, edges } = makeSampleOsmGrid('테헤란로', 'road');
   nodes[0].connected = true;
-  base = mergeOsmChunk(base, '37.566_126.978', nodes, edges, 'curated_kr_seoul');
+  base = mergeOsmChunk(base, '37.566_126.978', nodes, edges, 'curated_kr_seoul_jung');
   const seedId = 'n1';
   const targetId = 'n5';
 
@@ -1171,7 +1241,7 @@ test('Large 3,000+ node OSM graph operations (frontier, reachable, preview, batc
   let state = { ...createInitialGameState(seoul), capital: 5_000_000 };
 
   const rows = 55;
-  const cols = 55; // 3,025 nodes, ~5,940 edges inside Seoul polygon
+  const cols = 55; // 3,025 nodes, ~5,940 edges inside Seoul Jung-gu polygon
   const nodes: Array<{
     id: string;
     lat: number;
@@ -1199,19 +1269,19 @@ test('Large 3,000+ node OSM graph operations (frontier, reachable, preview, batc
     for (let c = 0; c < cols; c++) {
       nodes.push({
         id: `g_${r}_${c}`,
-        lat: 37.54 + r * 0.0005,
-        lng: 126.96 + c * 0.0005,
+        lat: 37.552 + r * 0.0003,
+        lng: 126.970 + c * 0.0003,
         connected: r === 27 && c === 27,
         mode: 'road',
-        regionId: 'curated_kr_seoul',
+        regionId: 'curated_kr_seoul_jung',
       });
     }
   }
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const id = `g_${r}_${c}`;
-      const lat = 37.54 + r * 0.0005;
-      const lng = 126.96 + c * 0.0005;
+      const lat = 37.552 + r * 0.0003;
+      const lng = 126.970 + c * 0.0003;
       if (c + 1 < cols) {
         const nid = `g_${r}_${c + 1}`;
         edges.push({
@@ -1223,13 +1293,13 @@ test('Large 3,000+ node OSM graph operations (frontier, reachable, preview, batc
           toNodeId: nid,
           coordinates: [
             [lat, lng],
-            [lat, lng + 0.0005],
+            [lat, lng + 0.0003],
           ],
-          distanceKm: 0.044,
+          distanceKm: 0.026,
           buildCost: 35,
           baseIncomePerSec: 3.5,
           built: false,
-          regionId: 'curated_kr_seoul',
+          regionId: 'curated_kr_seoul_jung',
         });
       }
       if (r + 1 < rows) {
@@ -1243,19 +1313,19 @@ test('Large 3,000+ node OSM graph operations (frontier, reachable, preview, batc
           toNodeId: nid,
           coordinates: [
             [lat, lng],
-            [lat + 0.0005, lng],
+            [lat + 0.0003, lng],
           ],
-          distanceKm: 0.055,
+          distanceKm: 0.033,
           buildCost: 35,
           baseIncomePerSec: 3.5,
           built: false,
-          regionId: 'curated_kr_seoul',
+          regionId: 'curated_kr_seoul_jung',
         });
       }
     }
   }
 
-  state = mergeOsmChunk(state, 'bench_seoul', nodes, edges, 'curated_kr_seoul');
+  state = mergeOsmChunk(state, 'bench_seoul', nodes, edges, 'curated_kr_seoul_jung');
 
   // Warm index and measure repeated operations
   const t0 = performance.now();
@@ -1288,17 +1358,17 @@ test('Large 3,000+ node OSM graph operations (frontier, reachable, preview, batc
   );
 });
 
-test('Loading new chunks in unlocked adjacent province or with unseeded rail never floods chunk nodes as d=1', () => {
+test('Loading new chunks in unlocked adjacent county or with unseeded rail never floods chunk nodes as d=1', () => {
   const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
   let state = { ...createInitialGameState(seoul), capital: 500_000 };
 
-  // Seed connected road node inside Seoul
+  // Seed connected road node inside Seoul Jung-gu
   state = mergeOsmChunk(
     state,
     '37.5665_126.9780',
     [
-      { id: 'seoul_r1', lat: 37.5665, lng: 126.978, connected: true, mode: 'road', regionId: 'curated_kr_seoul' },
-      { id: 'seoul_r2', lat: 37.5675, lng: 126.978, connected: false, mode: 'road', regionId: 'curated_kr_seoul' },
+      { id: 'seoul_r1', lat: 37.5665, lng: 126.978, connected: true, mode: 'road', regionId: 'curated_kr_seoul_jung' },
+      { id: 'seoul_r2', lat: 37.5675, lng: 126.978, connected: false, mode: 'road', regionId: 'curated_kr_seoul_jung' },
     ],
     [
       {
@@ -1313,19 +1383,19 @@ test('Loading new chunks in unlocked adjacent province or with unseeded rail nev
         buildCost: 30,
         baseIncomePerSec: 3,
         built: false,
-        regionId: 'curated_kr_seoul',
+        regionId: 'curated_kr_seoul_jung',
       },
     ],
-    'curated_kr_seoul'
+    'curated_kr_seoul_jung'
   );
 
-  // Scenario A: Load a new chunk with rail nodes inside active Seoul region (no pendingSeedRegionIds)
+  // Scenario A: Load a new chunk with rail nodes inside active Seoul Jung-gu region (no pendingSeedRegionIds)
   state = mergeOsmChunk(
     state,
     '37.5600_126.9700',
     [
-      { id: 'seoul_rail1', lat: 37.5600, lng: 126.9700, connected: false, mode: 'rail', regionId: 'curated_kr_seoul' },
-      { id: 'seoul_rail2', lat: 37.5610, lng: 126.9710, connected: false, mode: 'rail', regionId: 'curated_kr_seoul' },
+      { id: 'seoul_rail1', lat: 37.5600, lng: 126.9700, connected: false, mode: 'rail', regionId: 'curated_kr_seoul_jung' },
+      { id: 'seoul_rail2', lat: 37.5610, lng: 126.9710, connected: false, mode: 'rail', regionId: 'curated_kr_seoul_jung' },
     ],
     [
       {
@@ -1340,54 +1410,54 @@ test('Loading new chunks in unlocked adjacent province or with unseeded rail nev
         buildCost: 40,
         baseIncomePerSec: 4,
         built: false,
-        regionId: 'curated_kr_seoul',
+        regionId: 'curated_kr_seoul_jung',
       },
     ],
-    'curated_kr_seoul'
+    'curated_kr_seoul_jung'
   );
 
-  // Scenario B: Unlock adjacent non-isolated province (Gyeonggi) and load a distant chunk inside Gyeonggi
-  const gyeonggiRes = unlockProvincialRegion(state, 'curated_kr_gyeonggi');
-  assert.equal(gyeonggiRes.success, true);
-  assert.equal(gyeonggiRes.isIsolated, false);
+  // Scenario B: Unlock adjacent non-isolated county (Jongno-gu) and load a chunk inside Jongno-gu
+  const jongnoRes = unlockProvincialRegion(state, 'curated_kr_seoul_jongno');
+  assert.equal(jongnoRes.success, true);
+  assert.equal(jongnoRes.isIsolated, false);
 
-  const afterGyeonggiChunk = mergeOsmChunk(
-    gyeonggiRes.newState,
-    '37.2700_127.0100',
+  const afterJongnoChunk = mergeOsmChunk(
+    jongnoRes.newState,
+    '37.5900_126.9800',
     [
-      { id: 'gy_1', lat: 37.2700, lng: 127.0100, connected: false, mode: 'road', regionId: 'curated_kr_gyeonggi' },
-      { id: 'gy_2', lat: 37.2710, lng: 127.0110, connected: false, mode: 'road', regionId: 'curated_kr_gyeonggi' },
+      { id: 'gy_1', lat: 37.5900, lng: 126.9800, connected: false, mode: 'road', regionId: 'curated_kr_seoul_jongno' },
+      { id: 'gy_2', lat: 37.5910, lng: 126.9810, connected: false, mode: 'road', regionId: 'curated_kr_seoul_jongno' },
     ],
     [
       {
         id: 'e_gy_1',
-        wayName: '수원역로',
+        wayName: '율곡로',
         highwayType: 'primary',
         mode: 'road',
         fromNodeId: 'gy_1',
         toNodeId: 'gy_2',
-        coordinates: [[37.2700, 127.0100], [37.2710, 127.0110]],
+        coordinates: [[37.5900, 126.9800], [37.5910, 126.9810]],
         distanceKm: 0.14,
         buildCost: 40,
         baseIncomePerSec: 4,
         built: false,
-        regionId: 'curated_kr_gyeonggi',
+        regionId: 'curated_kr_seoul_jongno',
       },
     ],
-    'curated_kr_gyeonggi'
+    'curated_kr_seoul_jongno'
   );
 
-  const frontier = computeOsmFrontierDistancesForState(afterGyeonggiChunk);
+  const frontier = computeOsmFrontierDistancesForState(afterJongnoChunk);
   assert.equal(frontier.get('seoul_r1'), 0);
   assert.equal(frontier.get('seoul_r2'), 1);
   assert.equal(frontier.get('seoul_rail1'), undefined, 'Unconnected distant rail nodes in new chunk must not become d=1');
   assert.equal(frontier.get('seoul_rail2'), undefined);
-  assert.equal(frontier.get('gy_1'), undefined, 'New chunk nodes in adjacent Gyeonggi must not all become d=1');
+  assert.equal(frontier.get('gy_1'), undefined, 'New chunk nodes in adjacent Jongno-gu must not all become d=1');
   assert.equal(frontier.get('gy_2'), undefined);
   assert.equal(
     isNodeInUnseededModeInUnlockedRegion(
-      afterGyeonggiChunk,
-      afterGyeonggiChunk.osmNodes.find((n) => n.id === 'gy_1')!
+      afterJongnoChunk,
+      afterJongnoChunk.osmNodes.find((n) => n.id === 'gy_1')!
     ),
     false
   );
@@ -1400,14 +1470,14 @@ test('Isolated pedestrian route component (0 connected nodes) bridges cleanly fr
   // Main connected road r0 -> r1 -> r2 -> r3_unbuilt (so r1 has totalDegree=2 and main network has unbuilt edges!)
   // Nearby isolated pedestrian route p1 -> p2 -> p3 -> p4 (~55m east of r1)
   const nodes = [
-    { id: 'r0', lat: 37.5650, lng: 126.9780, connected: true, mode: 'road' as const, regionId: 'curated_kr_seoul' },
-    { id: 'r1', lat: 37.5660, lng: 126.9780, connected: true, mode: 'road' as const, regionId: 'curated_kr_seoul' },
-    { id: 'r2', lat: 37.5670, lng: 126.9780, connected: true, mode: 'road' as const, regionId: 'curated_kr_seoul' },
-    { id: 'r3', lat: 37.5680, lng: 126.9780, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul' },
-    { id: 'p1', lat: 37.5660, lng: 126.9786, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul' },
-    { id: 'p2', lat: 37.5665, lng: 126.9789, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul' },
-    { id: 'p3', lat: 37.5670, lng: 126.9792, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul' },
-    { id: 'p4', lat: 37.5675, lng: 126.9795, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul' },
+    { id: 'r0', lat: 37.5650, lng: 126.9780, connected: true, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'r1', lat: 37.5660, lng: 126.9780, connected: true, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'r2', lat: 37.5670, lng: 126.9780, connected: true, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'r3', lat: 37.5680, lng: 126.9780, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'p1', lat: 37.5660, lng: 126.9786, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'p2', lat: 37.5665, lng: 126.9789, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'p3', lat: 37.5670, lng: 126.9792, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'p4', lat: 37.5675, lng: 126.9795, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
   ];
 
   const edges = [
@@ -1423,7 +1493,7 @@ test('Isolated pedestrian route component (0 connected nodes) bridges cleanly fr
       buildCost: 30,
       baseIncomePerSec: 3,
       built: true,
-      regionId: 'curated_kr_seoul',
+      regionId: 'curated_kr_seoul_jung',
     },
     {
       id: 'e_r12',
@@ -1437,7 +1507,7 @@ test('Isolated pedestrian route component (0 connected nodes) bridges cleanly fr
       buildCost: 30,
       baseIncomePerSec: 3,
       built: true,
-      regionId: 'curated_kr_seoul',
+      regionId: 'curated_kr_seoul_jung',
     },
     {
       id: 'e_r23',
@@ -1451,7 +1521,7 @@ test('Isolated pedestrian route component (0 connected nodes) bridges cleanly fr
       buildCost: 30,
       baseIncomePerSec: 3,
       built: false,
-      regionId: 'curated_kr_seoul',
+      regionId: 'curated_kr_seoul_jung',
     },
     {
       id: 'e_p12',
@@ -1465,7 +1535,7 @@ test('Isolated pedestrian route component (0 connected nodes) bridges cleanly fr
       buildCost: 20,
       baseIncomePerSec: 2,
       built: false,
-      regionId: 'curated_kr_seoul',
+      regionId: 'curated_kr_seoul_jung',
     },
     {
       id: 'e_p23',
@@ -1479,7 +1549,7 @@ test('Isolated pedestrian route component (0 connected nodes) bridges cleanly fr
       buildCost: 20,
       baseIncomePerSec: 2,
       built: false,
-      regionId: 'curated_kr_seoul',
+      regionId: 'curated_kr_seoul_jung',
     },
     {
       id: 'e_p34',
@@ -1493,11 +1563,11 @@ test('Isolated pedestrian route component (0 connected nodes) bridges cleanly fr
       buildCost: 20,
       baseIncomePerSec: 2,
       built: false,
-      regionId: 'curated_kr_seoul',
+      regionId: 'curated_kr_seoul_jung',
     },
   ];
 
-  state = mergeOsmChunk(state, '37.566_126.978', nodes, edges, 'curated_kr_seoul');
+  state = mergeOsmChunk(state, '37.566_126.978', nodes, edges, 'curated_kr_seoul_jung');
 
   const frontier = computeOsmFrontierDistancesForState(state);
   assert.equal(frontier.get('p1'), 1, 'Closest isolated pedestrian entry node must expose at d=1');
@@ -1572,28 +1642,29 @@ test('Economy balance prevents 1e30+ compounding runaway at full max endgame and
   );
 });
 
-test('Detached island nodes within unlocked MultiPolygon region (Yeongjong inside Incheon) can be seeded and built', () => {
-  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
-  let state = { ...createInitialGameState(seoul), capital: 500_000 };
+test('Detached island nodes within unlocked MultiPolygon region (Yeongjong inside Incheon Jung-gu) can be seeded and built', () => {
+  const incheonJung = {
+    id: 'custom_incheon_jung',
+    name: '인천 중구 대한민국',
+    country: '대한민국',
+    description: '영종도 포함',
+    lat: 37.4736,
+    lng: 126.6215,
+    zoom: 12,
+    isCustom: true,
+  };
+  let state = { ...createInitialGameState(incheonJung), capital: 500_000 };
+  assert.equal(state.provincialRegions.find((r) => r.unlocked)?.regionId, 'curated_kr_incheon_jung');
 
-  const gyeonggiRes = unlockProvincialRegion(state, 'curated_kr_gyeonggi');
-  assert.equal(gyeonggiRes.success, true);
-  state = gyeonggiRes.newState;
-
-  const incheonRes = unlockProvincialRegion(state, 'curated_kr_incheon');
-  assert.equal(incheonRes.success, true);
-  assert.equal(incheonRes.isIsolated, false, 'Incheon touches Gyeonggi/Seoul mainland');
-  state = incheonRes.newState;
-
-  // Load mainland Incheon connected node + detached Yeongjong island road grid (no bridge edge loaded)
+  // Load mainland Incheon Jung-gu connected node + detached Yeongjong island road grid (no bridge edge loaded)
   state = mergeOsmChunk(
     state,
     '37.4800_126.4900',
     [
-      { id: 'ic_main_1', lat: 37.4563, lng: 126.7052, connected: true, mode: 'road', regionId: 'curated_kr_incheon' },
-      { id: 'yj_1', lat: 37.4820, lng: 126.4850, connected: false, mode: 'road', regionId: 'curated_kr_incheon' },
-      { id: 'yj_2', lat: 37.4840, lng: 126.4880, connected: false, mode: 'road', regionId: 'curated_kr_incheon' },
-      { id: 'yj_3', lat: 37.4860, lng: 126.4910, connected: false, mode: 'road', regionId: 'curated_kr_incheon' },
+      { id: 'ic_main_1', lat: 37.4736, lng: 126.6215, connected: true, mode: 'road', regionId: 'curated_kr_incheon_jung' },
+      { id: 'yj_1', lat: 37.4820, lng: 126.4850, connected: false, mode: 'road', regionId: 'curated_kr_incheon_jung' },
+      { id: 'yj_2', lat: 37.4840, lng: 126.4880, connected: false, mode: 'road', regionId: 'curated_kr_incheon_jung' },
+      { id: 'yj_3', lat: 37.4860, lng: 126.4910, connected: false, mode: 'road', regionId: 'curated_kr_incheon_jung' },
     ],
     [
       {
@@ -1608,7 +1679,7 @@ test('Detached island nodes within unlocked MultiPolygon region (Yeongjong insid
         buildCost: 40,
         baseIncomePerSec: 4,
         built: false,
-        regionId: 'curated_kr_incheon',
+        regionId: 'curated_kr_incheon_jung',
       },
       {
         id: 'e_yj_23',
@@ -1622,10 +1693,10 @@ test('Detached island nodes within unlocked MultiPolygon region (Yeongjong insid
         buildCost: 40,
         baseIncomePerSec: 4,
         built: false,
-        regionId: 'curated_kr_incheon',
+        regionId: 'curated_kr_incheon_jung',
       },
     ],
-    'curated_kr_incheon'
+    'curated_kr_incheon_jung'
   );
 
   const unseededIslandIds = getUnseededIslandNodeIds(state);
@@ -1645,7 +1716,7 @@ test('Detached island nodes within unlocked MultiPolygon region (Yeongjong insid
   assert.equal(buildIsland.builtCount, 2);
 });
 
-test('Rejects synthetic fallback regions and sub-district regions inside an existing province', () => {
+test('Rejects synthetic fallback regions, sub-county dong units, and coarse state containers over county regions', () => {
   const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
   let state = createInitialGameState(seoul);
   const initialCount = state.provincialRegions.length;
@@ -1664,39 +1735,52 @@ test('Rejects synthetic fallback regions and sub-district regions inside an exis
   });
   assert.equal(state.provincialRegions.length, initialCount);
 
-  // Sub-district (수원시, adminLevel '6') strictly inside Gyeonggi rejected
+  // Sub-county neighborhood (명동, adminLevel '8') strictly inside Seoul Jung-gu ('6') rejected
   state = registerDiscoveredProvincialRegion(state, {
     regionId: 'osm_rel_999001',
-    regionName: '수원시',
-    adminLevel: '6',
-    bbox: [37.23, 126.96, 37.31, 127.07],
-    centerLat: 37.2636,
-    centerLng: 127.0286,
+    regionName: '명동',
+    adminLevel: '8',
+    bbox: [37.558, 126.980, 37.565, 126.990],
+    centerLat: 37.561,
+    centerLng: 126.985,
   });
   assert.equal(
-    state.provincialRegions.some((r) => r.regionId === 'osm_rel_999001' || r.regionName === '수원시'),
+    state.provincialRegions.some((r) => r.regionId === 'osm_rel_999001' || r.regionName === '명동'),
     false,
-    'Sub-district 수원시 inside Gyeonggi must not create a separate region'
+    'Sub-county 명동 inside Seoul Jung-gu must not create a separate region'
   );
 
-  // Official modern variant 'Gangwon State' merges into curated_kr_gangwon instead of duplicating
+  // Coarse state-level 서울특별시 (adminLevel '4') covering existing county regions must be rejected
   state = registerDiscoveredProvincialRegion(state, {
-    regionId: 'osm_rel_2304591',
-    regionName: 'Gangwon State',
+    regionId: 'osm_rel_2297418',
+    regionName: '서울특별시',
     adminLevel: '4',
-    bbox: [37.02, 127.09, 38.61, 129.36],
+    bbox: [37.42, 126.76, 37.71, 127.19],
+    centerLat: 37.5665,
+    centerLng: 126.978,
+  });
+  assert.equal(
+    state.provincialRegions.some((r) => r.regionId === 'osm_rel_2297418'),
+    false,
+    'State/province level 서울특별시 must not override county-level regions'
+  );
+
+  // Adjacent non-curated county (e.g. 용인시, adminLevel '6') registers cleanly as its own county
+  state = registerDiscoveredProvincialRegion(state, {
+    regionId: 'osm_rel_yongin',
+    regionName: '용인시',
+    adminLevel: '6',
+    bbox: [37.15, 127.03, 37.38, 127.35],
     boundaryGeoJson: {
       type: 'Polygon',
-      coordinates: [[[127.1, 37.0], [129.3, 37.0], [129.3, 38.6], [127.1, 38.6], [127.1, 37.0]]],
+      coordinates: [[[127.03, 37.15], [127.35, 37.15], [127.35, 37.38], [127.03, 37.38], [127.03, 37.15]]],
     },
-    centerLat: 37.82,
-    centerLng: 128.15,
+    centerLat: 37.241,
+    centerLng: 127.177,
   });
-  const gangwonList = state.provincialRegions.filter(
-    (r) => r.regionId === 'curated_kr_gangwon' || r.regionName.includes('강원') || r.regionName.toLowerCase().includes('gangwon')
-  );
-  assert.equal(gangwonList.length, 1);
-  assert.equal(gangwonList[0].hasRealOsmBoundary, true);
+  const yongin = state.provincialRegions.find((r) => r.regionId === 'osm_rel_yongin');
+  assert.ok(yongin);
+  assert.equal(yongin.hasRealOsmBoundary, true);
 });
 
 test('Compact currency & income formatters render short units cleanly', () => {
@@ -1712,7 +1796,7 @@ test('adjustGameCapital & getRecommendedBalancedCapital cleanly reset legacy run
   const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
   let state = createInitialGameState(seoul);
   const { nodes, edges } = makeSampleOsmGrid();
-  state = mergeOsmChunk(state, 'seoul_core', nodes, edges, 'curated_kr_seoul');
+  state = mergeOsmChunk(state, 'seoul_core', nodes, edges, 'curated_kr_seoul_jung');
   state = {
     ...state,
     capital: 1e31,
@@ -1737,7 +1821,7 @@ test('mergeOsmChunk with skipEvaluate defers evaluation cleanly and getProximity
   const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
   let state = createInitialGameState(seoul);
   const { nodes, edges } = makeSampleOsmGrid();
-  state = mergeOsmChunk(state, '37.5667_126.9767', nodes, edges, 'curated_kr_seoul', {
+  state = mergeOsmChunk(state, '37.5667_126.9767', nodes, edges, 'curated_kr_seoul_jung', {
     skipEvaluate: true,
   });
   state = evaluateLinesAndAchievements(state).newState;
@@ -1824,26 +1908,26 @@ test('Rejects and strips country-level South Korea regions even if unlocked in l
     cleaned.provincialRegions.some((r) => r.regionId === 'osm_rel_307756' || r.regionName === '대한민국'),
     false
   );
-  assert.equal(cleaned.osmNodes[0].regionId, 'curated_kr_seoul');
-  assert.equal(cleaned.osmEdges[0].regionId, 'curated_kr_seoul');
+  assert.equal(cleaned.osmNodes[0].regionId, 'curated_kr_seoul_jung');
+  assert.equal(cleaned.osmEdges[0].regionId, 'curated_kr_seoul_jung');
 });
 
 test('mergeOsmChunk & boundary upgrade set hasRealOsmBoundary and re-tag __locked_outside__ nodes inside refined polygon', () => {
   const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
   let state = createInitialGameState(seoul);
 
-  // Place a node slightly outside Seoul's coarse curated polygon, then upgrade Seoul with a real OSM MultiPolygon covering it
+  // Place a node slightly outside Jung-gu's coarse curated polygon (and outside Jongno's), then upgrade Jung-gu with a refined MultiPolygon covering it
   state = {
     ...state,
     osmNodes: [
-      { id: 'n_edge_pocket', lat: 37.705, lng: 127.08, connected: false, mode: 'road', regionId: '__locked_outside__' },
+      { id: 'n_edge_pocket', lat: 37.543, lng: 127.005, connected: false, mode: 'road', regionId: '__locked_outside__' },
     ],
   };
 
   const refinedBoundary = {
     type: 'MultiPolygon' as const,
     coordinates: [
-      [[[126.76, 37.42], [127.19, 37.42], [127.19, 37.71], [126.76, 37.71], [126.76, 37.42]]],
+      [[[126.95, 37.54], [127.03, 37.54], [127.03, 37.575], [126.95, 37.575], [126.95, 37.54]]],
     ],
   };
 
@@ -1853,15 +1937,15 @@ test('mergeOsmChunk & boundary upgrade set hasRealOsmBoundary and re-tag __locke
     '37.550_126.975',
     [{ id: 'n_core', lat: 37.5665, lng: 126.978, connected: true, mode: 'road' }],
     [],
-    'curated_kr_seoul',
+    'curated_kr_seoul_jung',
     { boundaryGeoJson: refinedBoundary, skipEvaluate: false }
   );
 
-  const seoulReg = state.provincialRegions.find((r) => r.regionId === 'curated_kr_seoul')!;
+  const seoulReg = state.provincialRegions.find((r) => r.regionId === 'curated_kr_seoul_jung')!;
   assert.equal(seoulReg.hasRealOsmBoundary, true);
   assert.equal(
     state.osmNodes.find((n) => n.id === 'n_edge_pocket')?.regionId,
-    'curated_kr_seoul',
+    'curated_kr_seoul_jung',
     '__locked_outside__ node inside upgraded real boundary must re-tag to unlocked region'
   );
 });
@@ -1926,7 +2010,7 @@ test('mergeOsmChunksBatch matches sequential mergeOsmChunk and scales fast acros
       chunkKey: `chunk_${ci}`,
       osmNodes: chunkNodes,
       osmEdges: chunkEdges,
-      regionId: 'curated_kr_seoul',
+      regionId: 'curated_kr_seoul_jung',
     };
   });
 
@@ -1963,14 +2047,14 @@ test('A* findOsmRoadPath picks exact shortest path and connectOsmPath stays fast
   let state = createInitialGameState(seoul);
   state = { ...state, capital: 1e9 };
 
-  // Build a 100 x 50 grid (5,000 nodes, ~9,850 edges) inside Seoul bbox
+  // Build a 100 x 50 grid (5,000 nodes, ~9,850 edges) inside Seoul Jung-gu bbox
   const rows = 100;
   const cols = 50;
   const nodes: typeof state.osmNodes = [];
   const edges: typeof state.osmEdges = [];
-  const lat0 = 37.50;
-  const lng0 = 126.90;
-  const step = 0.0011; // ~100m spacing
+  const lat0 = 37.551;
+  const lng0 = 126.968;
+  const step = 0.00018;
 
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
@@ -1981,7 +2065,7 @@ test('A* findOsmRoadPath picks exact shortest path and connectOsmPath stays fast
         lng: lng0 + c * step,
         connected: r === 0 && c === 0,
         mode: 'road',
-        regionId: 'curated_kr_seoul',
+        regionId: 'curated_kr_seoul_jung',
       });
       if (c > 0) {
         const left = `g_${r}_${c - 1}`;
@@ -1996,11 +2080,11 @@ test('A* findOsmRoadPath picks exact shortest path and connectOsmPath stays fast
             [lat0 + r * step, lng0 + (c - 1) * step],
             [lat0 + r * step, lng0 + c * step],
           ],
-          distanceKm: 0.1,
+          distanceKm: 0.016,
           buildCost: 25,
           baseIncomePerSec: 1.5,
           built: false,
-          regionId: 'curated_kr_seoul',
+          regionId: 'curated_kr_seoul_jung',
         });
       }
       if (r > 0) {
@@ -2016,11 +2100,11 @@ test('A* findOsmRoadPath picks exact shortest path and connectOsmPath stays fast
             [lat0 + (r - 1) * step, lng0 + c * step],
             [lat0 + r * step, lng0 + c * step],
           ],
-          distanceKm: 0.122,
+          distanceKm: 0.02,
           buildCost: 25,
           baseIncomePerSec: 1.5,
           built: false,
-          regionId: 'curated_kr_seoul',
+          regionId: 'curated_kr_seoul_jung',
         });
       }
     }
@@ -2038,11 +2122,11 @@ test('A* findOsmRoadPath picks exact shortest path and connectOsmPath stays fast
   const warmDist = computeOsmFrontierDistancesForState(state);
   assert.ok(warmDist.size > 0);
 
-  // Optimal Manhattan path from (0,0) -> (4,4) = 4*0.1 + 4*0.122 = 0.888 km across 8 edges
+  // Optimal Manhattan path from (0,0) -> (4,4) = 4*0.016 + 4*0.02 = 0.144 km across 8 edges
   const path = findOsmRoadPath(state, 'g_0_0', 'g_4_4');
   assert.ok(path, 'A* must find road path in dense grid');
   assert.equal(path.edgeIds.length, 8);
-  assert.ok(Math.abs(path.totalDistanceKm - 0.888) < 1e-6);
+  assert.ok(Math.abs(path.totalDistanceKm - 0.144) < 1e-6);
 
   // Sequential click-connect benchmark: 10 path clicks in a row must average < 25ms each
   let cursor = 'g_0_0';
@@ -2083,23 +2167,26 @@ test('getFrontierVisualStyle LUT returns consistent immutable style properties a
   assert.ok(dimmed.fillOpacity < undimmed.fillOpacity * 0.45 && dimmed.fillOpacity < 0.36);
 });
 
-test('non-Korea curated regions (e.g. California) have realistic geographic boundaries instead of n-gon blobs', () => {
-  const ca = CURATED_PROVINCIAL_REGIONS.find((r) => r.regionId === 'curated_us_ca');
-  assert.ok(ca && ca.boundaryGeoJson, 'California should exist with GeoJSON boundary');
-  assert.equal(ca.boundaryGeoJson.type, 'Polygon');
-  const outer = (ca.boundaryGeoJson.coordinates as number[][][])[0];
-  assert.ok(outer.length >= 25, `California polygon should have >=25 vertices, got ${outer.length}`);
+test('curated county-level regions globally (US/JP/UK/FR/KR) have geographic boundaries instead of coarse state blobs', () => {
+  const manhattan = CURATED_PROVINCIAL_REGIONS.find((r) => r.regionId === 'curated_us_ny_manhattan');
+  assert.ok(manhattan && manhattan.boundaryGeoJson, 'New York County (Manhattan) should exist with GeoJSON boundary');
+  assert.equal(manhattan.adminLevel, '6');
+  assert.equal(manhattan.boundaryGeoJson.type, 'Polygon');
+  const outer = (manhattan.boundaryGeoJson.coordinates as number[][][])[0];
+  assert.ok(outer.length >= 8, `Manhattan county polygon should have >=8 vertices, got ${outer.length}`);
 
-  const caRegion = { ...ca, unlocked: false, isIsolated: false };
-  // San Francisco (37.7749, -122.4194) and Sacramento (38.5816, -121.4944) are inside California
-  assert.equal(isPointInRegionBoundary(37.7749, -122.4194, caRegion), true);
-  assert.equal(isPointInRegionBoundary(38.5816, -121.4944, caRegion), true);
-  // Reno NV (39.5296, -119.8138, east of Tahoe bend) & deep Pacific Ocean (36.5, -123.8) are outside
-  assert.equal(isPointInRegionBoundary(39.5296, -119.8138, caRegion), false);
-  assert.equal(isPointInRegionBoundary(36.5, -123.8, caRegion), false);
+  const manhattanRegion = { ...manhattan, unlocked: false, isIsolated: false };
+  // Times Square (40.758, -73.9855) & Central Park South (40.778, -73.968) are inside Manhattan
+  assert.equal(isPointInRegionBoundary(40.758, -73.9855, manhattanRegion), true);
+  assert.equal(isPointInRegionBoundary(40.778, -73.968, manhattanRegion), true);
+  // Brooklyn (40.6501, -73.9496) & Jersey City (40.728, -74.060) are outside New York County
+  assert.equal(isPointInRegionBoundary(40.6501, -73.9496, manhattanRegion), false);
+  assert.equal(isPointInRegionBoundary(40.728, -74.06, manhattanRegion), false);
 
-  const hyogo = CURATED_PROVINCIAL_REGIONS.find((r) => r.regionId === 'curated_jp_hyogo');
-  assert.equal(hyogo?.boundaryGeoJson?.type, 'MultiPolygon', 'Hyogo should include Awaji Island MultiPolygon');
+  const chiyoda = CURATED_PROVINCIAL_REGIONS.find((r) => r.regionId === 'curated_jp_tokyo_chiyoda');
+  assert.equal(chiyoda?.adminLevel, '7', 'Tokyo special ward Chiyoda should use county-equivalent adminLevel 7');
+  const incheonJung = CURATED_PROVINCIAL_REGIONS.find((r) => r.regionId === 'curated_kr_incheon_jung');
+  assert.equal(incheonJung?.boundaryGeoJson?.type, 'MultiPolygon', 'Incheon Jung-gu should include Yeongjong Island MultiPolygon');
 });
 
 test('isolated route nodes can self-link within their own exposed component while connected component unconnected pairs stay blocked', () => {
@@ -2110,12 +2197,12 @@ test('isolated route nodes can self-link within their own exposed component whil
     capital: 50000,
     pendingSeedRegionIds: [],
     osmNodes: [
-      { id: 'a1', lat: 37.566, lng: 126.978, connected: true, mode: 'road', regionId: 'curated_kr_seoul' },
-      { id: 'a2', lat: 37.5663, lng: 126.978, connected: false, mode: 'road', regionId: 'curated_kr_seoul' },
+      { id: 'a1', lat: 37.566, lng: 126.978, connected: true, mode: 'road', regionId: 'curated_kr_seoul_jung' },
+      { id: 'a2', lat: 37.5663, lng: 126.978, connected: false, mode: 'road', regionId: 'curated_kr_seoul_jung' },
       // Isolated route ~45m east of a1 (within ISOLATED_ROUTE_BRIDGE_MAX_KM=80m), service road
-      { id: 'b1', lat: 37.566, lng: 126.9785, connected: false, mode: 'road', regionId: 'curated_kr_seoul' },
-      { id: 'b2', lat: 37.5663, lng: 126.9785, connected: false, mode: 'road', regionId: 'curated_kr_seoul' },
-      { id: 'b3', lat: 37.5666, lng: 126.9785, connected: false, mode: 'road', regionId: 'curated_kr_seoul' },
+      { id: 'b1', lat: 37.566, lng: 126.9785, connected: false, mode: 'road', regionId: 'curated_kr_seoul_jung' },
+      { id: 'b2', lat: 37.5663, lng: 126.9785, connected: false, mode: 'road', regionId: 'curated_kr_seoul_jung' },
+      { id: 'b3', lat: 37.5666, lng: 126.9785, connected: false, mode: 'road', regionId: 'curated_kr_seoul_jung' },
     ],
     osmEdges: [
       {
@@ -2130,7 +2217,7 @@ test('isolated route nodes can self-link within their own exposed component whil
         buildCost: 25,
         baseIncomePerSec: 2,
         built: false,
-        regionId: 'curated_kr_seoul',
+        regionId: 'curated_kr_seoul_jung',
       },
       {
         id: 'eb1',
@@ -2144,7 +2231,7 @@ test('isolated route nodes can self-link within their own exposed component whil
         buildCost: 20,
         baseIncomePerSec: 1.5,
         built: false,
-        regionId: 'curated_kr_seoul',
+        regionId: 'curated_kr_seoul_jung',
       },
       {
         id: 'eb2',
@@ -2158,7 +2245,7 @@ test('isolated route nodes can self-link within their own exposed component whil
         buildCost: 20,
         baseIncomePerSec: 1.5,
         built: false,
-        regionId: 'curated_kr_seoul',
+        regionId: 'curated_kr_seoul_jung',
       },
     ],
   };
@@ -2212,15 +2299,15 @@ test('getOsmNodeConnectionFlags flags d=0 terminal nodes with unlocked unexplore
   const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
   let state = { ...createInitialGameState(seoul), capital: 500_000, pendingSeedRegionIds: [] };
 
-  // Build n1 -> n2 -> n3 inside Seoul; n4 is unexplored inside Seoul; n_locked is in locked Gyeonggi
+  // Build n1 -> n2 -> n3 inside Jung-gu; n4 is unexplored inside Jung-gu; n_locked is in locked Jongno-gu
   state = {
     ...state,
     osmNodes: [
-      { id: 'n1', lat: 37.5660, lng: 126.9780, connected: true, mode: 'road', regionId: 'curated_kr_seoul' },
-      { id: 'n2', lat: 37.5663, lng: 126.9780, connected: true, mode: 'road', regionId: 'curated_kr_seoul' },
-      { id: 'n3', lat: 37.5666, lng: 126.9780, connected: true, mode: 'road', regionId: 'curated_kr_seoul' },
-      { id: 'n4', lat: 37.5669, lng: 126.9780, connected: false, mode: 'road', regionId: 'curated_kr_seoul' },
-      { id: 'n_locked', lat: 37.7500, lng: 127.0500, connected: false, mode: 'road', regionId: 'curated_kr_gyeonggi' },
+      { id: 'n1', lat: 37.5660, lng: 126.9780, connected: true, mode: 'road', regionId: 'curated_kr_seoul_jung' },
+      { id: 'n2', lat: 37.5663, lng: 126.9780, connected: true, mode: 'road', regionId: 'curated_kr_seoul_jung' },
+      { id: 'n3', lat: 37.5666, lng: 126.9780, connected: true, mode: 'road', regionId: 'curated_kr_seoul_jung' },
+      { id: 'n4', lat: 37.5669, lng: 126.9780, connected: false, mode: 'road', regionId: 'curated_kr_seoul_jung' },
+      { id: 'n_locked', lat: 37.5800, lng: 126.9780, connected: false, mode: 'road', regionId: 'curated_kr_seoul_jongno' },
     ],
     osmEdges: [
       {
@@ -2235,7 +2322,7 @@ test('getOsmNodeConnectionFlags flags d=0 terminal nodes with unlocked unexplore
         buildCost: 30,
         baseIncomePerSec: 3,
         built: true,
-        regionId: 'curated_kr_seoul',
+        regionId: 'curated_kr_seoul_jung',
       },
       {
         id: 'e23',
@@ -2249,7 +2336,7 @@ test('getOsmNodeConnectionFlags flags d=0 terminal nodes with unlocked unexplore
         buildCost: 30,
         baseIncomePerSec: 3,
         built: true,
-        regionId: 'curated_kr_seoul',
+        regionId: 'curated_kr_seoul_jung',
       },
       // Optional parallel/shortcut unbuilt edge between already-connected n1 and n2
       {
@@ -2264,7 +2351,7 @@ test('getOsmNodeConnectionFlags flags d=0 terminal nodes with unlocked unexplore
         buildCost: 30,
         baseIncomePerSec: 2,
         built: false,
-        regionId: 'curated_kr_seoul',
+        regionId: 'curated_kr_seoul_jung',
       },
       // Unbuilt frontier edge from terminal n3 -> unexplored unlocked n4
       {
@@ -2279,22 +2366,22 @@ test('getOsmNodeConnectionFlags flags d=0 terminal nodes with unlocked unexplore
         buildCost: 30,
         baseIncomePerSec: 3,
         built: false,
-        regionId: 'curated_kr_seoul',
+        regionId: 'curated_kr_seoul_jung',
       },
       // Edge from n1 to locked node should NOT count as buildable unexplored neighbor
       {
         id: 'e1_locked',
-        wayName: '시외도로',
+        wayName: '종로연결로',
         highwayType: 'primary',
         mode: 'road',
         fromNodeId: 'n1',
         toNodeId: 'n_locked',
-        coordinates: [[37.5660, 126.9780], [37.7500, 127.0500]],
-        distanceKm: 21,
+        coordinates: [[37.5660, 126.9780], [37.5800, 126.9780]],
+        distanceKm: 1.56,
         buildCost: 100,
         baseIncomePerSec: 5,
         built: false,
-        regionId: 'curated_kr_gyeonggi',
+        regionId: 'curated_kr_seoul_jongno',
       },
     ],
     stats: { ...state.stats, connectedOsmNodes: 3, totalOsmEdgesBuilt: 2 },
@@ -2348,8 +2435,8 @@ test('getProximityAdjacentChunksToLoad discovers diagonal neighbor chunks up to 
     pendingSeedRegionIds: [],
     loadedOsmChunks: [centerKey],
     osmNodes: [
-      { id: 'c0', lat: 37.5667, lng: 126.9767, connected: true, mode: 'road' as const, regionId: 'curated_kr_seoul' },
-      { id: 'c1', lat: 37.5679, lng: 126.9781, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul' },
+      { id: 'c0', lat: 37.5667, lng: 126.9767, connected: true, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+      { id: 'c1', lat: 37.5679, lng: 126.9781, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
     ],
     osmEdges: [
       {
@@ -2364,7 +2451,7 @@ test('getProximityAdjacentChunksToLoad discovers diagonal neighbor chunks up to 
         buildCost: 25,
         baseIncomePerSec: 2,
         built: false,
-        regionId: 'curated_kr_seoul',
+        regionId: 'curated_kr_seoul_jung',
       },
     ],
     stats: { ...base.stats, connectedOsmNodes: 1 },
@@ -2389,7 +2476,7 @@ test('findIncompleteLoadedChunksInViewport detects already-loaded chunks with sp
     lng: 126.9767,
     connected: false,
     mode: 'road' as const,
-    regionId: 'curated_kr_seoul',
+    regionId: 'curated_kr_seoul_jung',
   }));
   const tipDenseNodes = Array.from({ length: 10 }, (_, idx) => ({
     id: `t_${idx}`,
@@ -2397,7 +2484,7 @@ test('findIncompleteLoadedChunksInViewport detects already-loaded chunks with sp
     lng: 126.9767,
     connected: idx <= 1,
     mode: 'road' as const,
-    regionId: 'curated_kr_seoul',
+    regionId: 'curated_kr_seoul_jung',
   }));
   const tipEdges = [
     {
@@ -2412,7 +2499,7 @@ test('findIncompleteLoadedChunksInViewport detects already-loaded chunks with sp
       buildCost: 20,
       baseIncomePerSec: 1,
       built: true,
-      regionId: 'curated_kr_seoul',
+      regionId: 'curated_kr_seoul_jung',
     },
   ];
 
@@ -2420,7 +2507,7 @@ test('findIncompleteLoadedChunksInViewport detects already-loaded chunks with sp
     ...base,
     loadedOsmChunks: [sparseKey, denseHealthyKey, tipTruncatedKey],
     osmNodes: [
-      { id: 'sp_1', lat: 37.5667, lng: 126.9767, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul' },
+      { id: 'sp_1', lat: 37.5667, lng: 126.9767, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
       ...healthyNodes,
       ...tipDenseNodes,
     ],
@@ -2448,11 +2535,11 @@ test('isOsmNodePedestrianOnly identifies pedestrian/footway/path nodes while kee
   const state = {
     ...createInitialGameState(seoul),
     osmNodes: [
-      { id: 'n_road', lat: 37.5660, lng: 126.9780, connected: true, mode: 'road' as const, regionId: 'curated_kr_seoul' },
-      { id: 'n_srv', lat: 37.5662, lng: 126.9780, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul' },
-      { id: 'n_junc', lat: 37.5664, lng: 126.9780, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul' },
-      { id: 'n_ped1', lat: 37.5666, lng: 126.9782, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul' },
-      { id: 'n_ped2', lat: 37.5668, lng: 126.9784, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul' },
+      { id: 'n_road', lat: 37.5660, lng: 126.9780, connected: true, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+      { id: 'n_srv', lat: 37.5662, lng: 126.9780, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+      { id: 'n_junc', lat: 37.5664, lng: 126.9780, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+      { id: 'n_ped1', lat: 37.5666, lng: 126.9782, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+      { id: 'n_ped2', lat: 37.5668, lng: 126.9784, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
     ],
     osmEdges: [
       {
@@ -2536,6 +2623,95 @@ test('isOsmNodePedestrianOnly identifies pedestrian/footway/path nodes while kee
   assert.equal(pedStyle.strokeColor, '#6ee7b7');
 });
 
+test('Legacy sub-county Miami save migrates cleanly into Miami-Dade County on load without losing unlock or nodes', () => {
+  const miamiCity = {
+    id: 'custom_miami',
+    name: 'Miami',
+    country: 'United States',
+    description: 'Miami',
+    lat: 25.7617,
+    lng: -80.1918,
+    zoom: 12,
+    isCustom: true,
+  };
+  const base = createInitialGameState(miamiCity);
+  assert.equal(
+    base.provincialRegions.find((r) => r.unlocked)?.regionId,
+    'curated_us_fl_miami_dade',
+    'New Miami start must default to Miami-Dade County'
+  );
 
+  const legacyRegionId = 'osm_rel_1216769';
+  const legacyState = {
+    ...base,
+    provincialRegions: [
+      {
+        regionId: legacyRegionId,
+        regionName: 'City of Miami',
+        adminLevel: '8',
+        bbox: [25.709, -80.319, 25.856, -80.139] as [number, number, number, number],
+        centerLat: 25.7617,
+        centerLng: -80.1918,
+        unlocked: true,
+        isStartingRegion: true,
+        isIsolated: false,
+      },
+    ],
+    osmNodes: [
+      { id: 'miami_n1', lat: 25.7617, lng: -80.1918, connected: true, mode: 'road' as const, regionId: legacyRegionId },
+      { id: 'miami_n2', lat: 25.7630, lng: -80.1918, connected: false, mode: 'road' as const, regionId: legacyRegionId },
+    ],
+    osmEdges: [
+      {
+        id: 'miami_e1',
+        wayName: 'Brickell Ave',
+        highwayType: 'primary',
+        mode: 'road' as const,
+        fromNodeId: 'miami_n1',
+        toNodeId: 'miami_n2',
+        coordinates: [[25.7617, -80.1918], [25.7630, -80.1918]] as [[number, number], [number, number]],
+        distanceKm: 0.14,
+        buildCost: 35,
+        baseIncomePerSec: 3,
+        built: false,
+        regionId: legacyRegionId,
+      },
+    ],
+    loadedOsmRegions: [legacyRegionId],
+    pendingSeedRegionIds: [legacyRegionId],
+  };
 
+  const migrated = scopeGameStateToStartingCity(legacyState);
+  const dade = migrated.provincialRegions.find((r) => r.regionId === 'curated_us_fl_miami_dade');
+  assert.ok(dade, 'Miami-Dade County must replace legacy City of Miami');
+  assert.equal(dade.unlocked, true);
+  assert.equal(dade.isStartingRegion, true);
+  assert.equal(dade.adminLevel, '6');
+  assert.equal(
+    migrated.provincialRegions.some((r) => r.regionId === legacyRegionId || r.regionName === 'City of Miami'),
+    false,
+    'Legacy City of Miami region entry must be removed after migration'
+  );
+  assert.equal(
+    migrated.osmNodes.every((n) => n.regionId === 'curated_us_fl_miami_dade'),
+    true,
+    'Existing nodes must retag to Miami-Dade County'
+  );
+  assert.equal(
+    migrated.osmEdges.every((e) => e.regionId === 'curated_us_fl_miami_dade'),
+    true,
+    'Existing edges must retag to Miami-Dade County'
+  );
+  assert.deepEqual(migrated.pendingSeedRegionIds, ['curated_us_fl_miami_dade']);
+  assert.equal(
+    (migrated.loadedOsmRegions || []).includes(legacyRegionId),
+    false,
+    'Legacy region ID must clear from loadedOsmRegions so full county OSM auto-loads'
+  );
 
+  // Also ensure hydrateRawGameState preserves the migration cleanly
+  const hydrated = hydrateRawGameState(legacyState);
+  assert.ok(hydrated);
+  assert.equal(hydrated.provincialRegions.some((r) => r.regionId === 'curated_us_fl_miami_dade' && r.unlocked), true);
+  assert.equal(hydrated.provincialRegions.some((r) => r.regionId === legacyRegionId), false);
+});

@@ -540,6 +540,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
               ['!=', ['get', 'highwayType'], 'path'],
               ['!=', ['get', 'highwayType'], 'cycleway'],
               ['!=', ['get', 'highwayType'], 'track'],
+              ['!=', ['get', 'highwayType'], 'steps'],
             ],
             layout: { 'line-cap': 'butt', 'line-join': 'round' },
             paint: {
@@ -561,6 +562,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
               ['==', ['get', 'highwayType'], 'path'],
               ['==', ['get', 'highwayType'], 'cycleway'],
               ['==', ['get', 'highwayType'], 'track'],
+              ['==', ['get', 'highwayType'], 'steps'],
             ],
             layout: { 'line-cap': 'butt', 'line-join': 'round' },
             paint: {
@@ -605,6 +607,8 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
                 '#022c22',
                 ['==', ['get', 'highwayType'], 'track'],
                 '#022c22',
+                ['==', ['get', 'highwayType'], 'steps'],
+                '#022c22',
                 '#291a05',
               ],
               'line-width': [
@@ -620,6 +624,8 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
                 ['==', ['get', 'highwayType'], 'cycleway'],
                 5.8,
                 ['==', ['get', 'highwayType'], 'track'],
+                5.8,
+                ['==', ['get', 'highwayType'], 'steps'],
                 5.8,
                 6.8,
               ],
@@ -647,6 +653,8 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
                 '#34d399',
                 ['==', ['get', 'highwayType'], 'track'],
                 '#34d399',
+                ['==', ['get', 'highwayType'], 'steps'],
+                '#34d399',
                 '#f59e0b',
               ],
               'line-width': [
@@ -662,6 +670,8 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
                 ['==', ['get', 'highwayType'], 'cycleway'],
                 3.0,
                 ['==', ['get', 'highwayType'], 'track'],
+                3.0,
+                ['==', ['get', 'highwayType'], 'steps'],
                 3.0,
                 4.2,
               ],

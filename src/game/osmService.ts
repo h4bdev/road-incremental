@@ -1159,8 +1159,9 @@ export async function fetchProvincialRegionInfo(
   }
 
   const nameParam = expectedRegionName ? `&name=${encodeURIComponent(expectedRegionName)}` : '';
+  const regionIdParam = knownRegionId ? `&regionId=${encodeURIComponent(knownRegionId)}` : '';
   const json = await tryFetchBackendJson<Partial<ProvincialRegionMeta>>(
-    `/api/osm-region-info?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}${nameParam}`,
+    `/api/osm-region-info?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}${nameParam}${regionIdParam}`,
     8000
   );
 
@@ -1192,7 +1193,7 @@ export async function fetchProvincialRegionInfo(
   }
 
   try {
-    const directMeta = await loadOsmRegionInfoDirect(lat, lng, expectedRegionName);
+    const directMeta = await loadOsmRegionInfoDirect(lat, lng, expectedRegionName, knownRegionId);
     if (
       !directMeta ||
       isCountryLevelOsmArea({
@@ -1222,34 +1223,42 @@ export async function fetchNearbyProvincialRegions(
   lat: number,
   lng: number
 ): Promise<ProvincialRegionMeta[]> {
+  const normalizeAndCache = (items: ProvincialRegionMeta[]): ProvincialRegionMeta[] =>
+    items
+      .filter(
+        (r) =>
+          !isCountryLevelOsmArea({
+            name: r.regionName,
+            regionId: r.regionId,
+            adminLevel: r.adminLevel,
+            bbox: r.bbox,
+          })
+      )
+      .map((r) => {
+        const normalized: ProvincialRegionMeta = {
+          ...r,
+          exactBoundaryVersion: r.boundaryGeoJson
+            ? r.exactBoundaryVersion || EXACT_BOUNDARY_CACHE_VERSION
+            : undefined,
+        };
+        if (normalized.boundaryGeoJson) {
+          void cacheValidRegionMeta(normalized);
+        }
+        return normalized;
+      });
+
   const json = await tryFetchBackendJson<{ regions?: ProvincialRegionMeta[] }>(
     `/api/osm-nearby-provinces?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`,
     14000
   );
 
   if (json && Array.isArray(json.regions) && json.regions.length > 0) {
-    return json.regions.filter(
-      (r) =>
-        !isCountryLevelOsmArea({
-          name: r.regionName,
-          regionId: r.regionId,
-          adminLevel: r.adminLevel,
-          bbox: r.bbox,
-        })
-    );
+    return normalizeAndCache(json.regions);
   }
 
   try {
     const direct = await loadNearbyProvincialRegionsDirect(lat, lng);
-    return direct.filter(
-      (r) =>
-        !isCountryLevelOsmArea({
-          name: r.regionName,
-          regionId: r.regionId,
-          adminLevel: r.adminLevel,
-          bbox: r.bbox,
-        })
-    );
+    return normalizeAndCache(direct);
   } catch {
     return [];
   }

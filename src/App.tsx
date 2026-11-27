@@ -767,9 +767,29 @@ export default function App() {
         : undefined;
       let fresh = createInitialGameState(city, customNetwork);
 
-      // Fast IndexedDB cache check (<15ms) so revisited starting cities open pre-populated
+      // Fast IndexedDB cache check (<15ms) so revisited starting cities open pre-populated with real boundaries
       const startTileKey = chunkKeyForCoords(city.lat, city.lng);
-      const cachedTiles = await readCachedOsmTilesForKeys([startTileKey]).catch(() => new Map());
+      const [cachedTiles, cachedInitBoundaries] = await Promise.all([
+        readCachedOsmTilesForKeys([startTileKey]).catch(() => new Map()),
+        hydrateProvincialRegionsFromCache(fresh.provincialRegions).catch(() => new Map()),
+      ]);
+      if (cachedInitBoundaries.size > 0) {
+        let withCachedBoundaries = fresh;
+        for (const meta of cachedInitBoundaries.values()) {
+          if (meta.regionId === fresh.provincialRegions.find((r) => r.isStartingRegion)?.regionId) {
+            withCachedBoundaries = registerStartingProvincialRegion(withCachedBoundaries, {
+              ...meta,
+              exactBoundaryVersion: EXACT_BOUNDARY_CACHE_VERSION,
+            });
+          } else {
+            withCachedBoundaries = registerDiscoveredProvincialRegion(withCachedBoundaries, {
+              ...meta,
+              exactBoundaryVersion: EXACT_BOUNDARY_CACHE_VERSION,
+            });
+          }
+        }
+        fresh = withCachedBoundaries;
+      }
       const cachedStartTile = cachedTiles.get(startTileKey);
       if (cachedStartTile && cachedStartTile.osmNodes.length > 0) {
         fresh = mergeOsmChunk(
@@ -803,17 +823,68 @@ export default function App() {
         setTutorialOpen(true);
       }
 
-      // Stream full administrative region & OSM street/rail network in background
+      // Immediately resolve starting & neighboring administrative boundaries in parallel, without blocking on full road download
       void (async () => {
         setIsLoadingOsm(true);
         try {
           const initStartRegion = fresh.provincialRegions.find((r) => r.isStartingRegion);
           const startGuessName = initStartRegion?.regionName || city.name.split(' ')[0];
-          const startKnownId = initStartRegion?.regionId.startsWith('curated_')
-            ? initStartRegion.regionId
-            : undefined;
-          const [fullCityData, startRegionInfo] = await Promise.all([
-            fetchOsmProvincialRegion(city.lat, city.lng, startGuessName, startKnownId, {
+          const startKnownId =
+            initStartRegion?.regionId &&
+            (initStartRegion.regionId.startsWith('curated_') ||
+              initStartRegion.regionId.startsWith('osm_rel_'))
+              ? initStartRegion.regionId
+              : undefined;
+
+          void discoverNearbyProvinces(city.lat, city.lng);
+
+          let resolvedStartBoundary: Awaited<ReturnType<typeof fetchProvincialRegionInfo>> = null;
+          const startRegionInfoPromise = fetchProvincialRegionInfo(
+            city.lat,
+            city.lng,
+            startKnownId,
+            startGuessName
+          )
+            .then((info) => {
+              resolvedStartBoundary = info;
+              if (
+                info &&
+                loadingSessionRef.current === sessionId &&
+                !isSyntheticFallbackRegion(info.regionId, info.regionName, info)
+              ) {
+                setGameState((prev) => {
+                  if (!prev || loadingSessionRef.current !== sessionId) return prev;
+                  let next = registerStartingProvincialRegion(prev, {
+                    ...info,
+                    exactBoundaryVersion:
+                      info.exactBoundaryVersion ||
+                      (info.boundaryGeoJson ? EXACT_BOUNDARY_CACHE_VERSION : undefined),
+                  });
+                  const hasUserSeeded =
+                    next.stats.connectedOsmNodes > 0 &&
+                    (next.pendingSeedRegionIds || []).length === 0;
+                  const sId = next.provincialRegions.find((r) => r.isStartingRegion)?.regionId;
+                  if (sId && !hasUserSeeded) {
+                    next = {
+                      ...next,
+                      pendingSeedRegionIds: Array.from(
+                        new Set([...(next.pendingSeedRegionIds || []), sId])
+                      ),
+                    };
+                  }
+                  return next;
+                });
+              }
+              return info;
+            })
+            .catch(() => null);
+
+          const fullCityData = await fetchOsmProvincialRegion(
+            city.lat,
+            city.lng,
+            startGuessName,
+            startKnownId,
+            {
               onProgress: (pct, lbl) => {
                 updateLoadingSession(
                   sessionId,
@@ -821,13 +892,15 @@ export default function App() {
                   lbl || `${city.name} 도로망 수신 중`
                 );
               },
-            }),
-            fetchProvincialRegionInfo(city.lat, city.lng, startKnownId, startGuessName).catch(
-              () => null
-            ),
-          ]);
+            }
+          );
           if (loadingSessionRef.current !== sessionId) return;
           updateLoadingSession(sessionId, 94, `${city.name} 교차로·철도 병합 중`);
+
+          const startRegionInfo = resolvedStartBoundary || (await Promise.race([
+            startRegionInfoPromise,
+            new Promise<null>((r) => setTimeout(() => r(null), 150)),
+          ]));
 
           let initialNodes = fullCityData.osmNodes;
           let initialEdges = fullCityData.osmEdges;
@@ -850,6 +923,9 @@ export default function App() {
               adminLevel: fullCityData.adminLevel,
               bbox: fullCityData.bbox,
               boundaryGeoJson: fullCityData.boundaryGeoJson,
+              exactBoundaryVersion: fullCityData.boundaryGeoJson
+                ? EXACT_BOUNDARY_CACHE_VERSION
+                : undefined,
               centerLat: city.lat,
               centerLng: city.lng,
               totalNodeCount: fullCityData.totalNodeCount ?? initialNodes.length,
@@ -865,6 +941,11 @@ export default function App() {
               next = registerStartingProvincialRegion(next, {
                 ...regionMeta,
                 boundaryGeoJson: regionMeta.boundaryGeoJson || fullCityData.boundaryGeoJson,
+                exactBoundaryVersion:
+                  regionMeta.exactBoundaryVersion ||
+                  (regionMeta.boundaryGeoJson || fullCityData.boundaryGeoJson
+                    ? EXACT_BOUNDARY_CACHE_VERSION
+                    : undefined),
                 totalNodeCount:
                   fullCityData.totalNodeCount > 0 ? fullCityData.totalNodeCount : initialNodes.length,
               });
@@ -883,7 +964,7 @@ export default function App() {
             if (initialNodes.length > 0 || initialEdges.length > 0) {
               next = mergeOsmChunk(next, initialChunkKey, initialNodes, initialEdges, startRegionId, {
                 skipAutoSeed: !hasUserSeeded,
-                boundaryGeoJson: fullCityData.boundaryGeoJson || startRegionInfo?.boundaryGeoJson,
+                boundaryGeoJson: startRegionInfo?.boundaryGeoJson || fullCityData.boundaryGeoJson,
                 totalNodeCount:
                   fullCityData.totalNodeCount > 0 ? fullCityData.totalNodeCount : initialNodes.length,
               });
@@ -891,7 +972,6 @@ export default function App() {
             return next;
           });
 
-          void discoverNearbyProvinces(city.lat, city.lng);
           completeLoadingSession(sessionId, `${city.name} 준비 완료`);
         } catch {
           completeLoadingSession(sessionId, '도로망 로드 완료');
@@ -977,8 +1057,40 @@ export default function App() {
       } catch {
         // Ignore storage errors
       }
+
+      // Immediately hydrate missing real administrative boundaries from IndexedDB + live discovery
+      const missingBoundaryRegions = (resumed.provincialRegions || []).filter(
+        (r) =>
+          !r.hasRealOsmBoundary ||
+          !r.boundaryGeoJson ||
+          (r.exactBoundaryVersion || 0) < EXACT_BOUNDARY_CACHE_VERSION
+      );
+      if (missingBoundaryRegions.length > 0) {
+        void hydrateProvincialRegionsFromCache(missingBoundaryRegions)
+          .then((cached) => {
+            if (cached.size === 0) return;
+            setGameState((prev) => {
+              if (!prev) return prev;
+              let next = prev;
+              for (const meta of cached.values()) {
+                next = registerDiscoveredProvincialRegion(next, {
+                  ...meta,
+                  exactBoundaryVersion: EXACT_BOUNDARY_CACHE_VERSION,
+                });
+              }
+              return next;
+            });
+          })
+          .catch(() => undefined);
+      }
+      const exactCount = (resumed.provincialRegions || []).filter(
+        (r) => r.hasRealOsmBoundary && r.boundaryGeoJson
+      ).length;
+      if (exactCount < 4) {
+        void discoverNearbyProvinces(resumed.startingCity.lat, resumed.startingCity.lng);
+      }
     },
-    []
+    [discoverNearbyProvinces]
   );
 
   // Helper: preserve live capital/ticks/skills accumulated since immediate entry when applying background graph hydration
@@ -1626,55 +1738,98 @@ export default function App() {
       })
       .filter((x): x is { regionId: string; regionName: string; lat: number; lng: number } => Boolean(x));
 
-    const items = allPending.slice(0, 3);
-
     void (async () => {
-      let needsNextPass = allPending.length > items.length;
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i];
+      // Fast IndexedDB cache pass across all pending regions before issuing network calls
+      const currentRegions = stateRef.current?.provincialRegions || [];
+      const pendingSet = new Set(allPending.map((p) => p.regionId));
+      const pendingTargets = currentRegions.filter((r) => pendingSet.has(r.regionId));
+      const idbHits =
+        pendingTargets.length > 0
+          ? await hydrateProvincialRegionsFromCache(pendingTargets).catch(() => new Map())
+          : new Map();
+      if (cancelled) return;
+
+      if (idbHits.size > 0) {
+        for (const rid of idbHits.keys()) {
+          hydratedRegionIdsRef.current.add(rid);
+        }
+        setGameState((prev) => {
+          if (!prev) return prev;
+          let next = prev;
+          for (const meta of idbHits.values()) {
+            next = registerDiscoveredProvincialRegion(next, {
+              ...meta,
+              exactBoundaryVersion: EXACT_BOUNDARY_CACHE_VERSION,
+            });
+          }
+          return next;
+        });
+      }
+
+      const netPending = allPending.filter((p) => !idbHits.has(p.regionId));
+      const items = netPending.slice(0, 4);
+      let needsNextPass = netPending.length > items.length;
+
+      if (items.length > 0) {
+        const results = await Promise.allSettled(
+          items.map(async (item) => {
+            const attempts = hydrateAttemptsRef.current.get(item.regionId) || 0;
+            hydrateAttemptsRef.current.set(item.regionId, attempts + 1);
+            const info = await fetchProvincialRegionInfo(
+              item.lat,
+              item.lng,
+              item.regionId,
+              item.regionName
+            );
+            return { item, attempts, info };
+          })
+        );
         if (cancelled) return;
-        const attempts = hydrateAttemptsRef.current.get(item.regionId) || 0;
-        hydrateAttemptsRef.current.set(item.regionId, attempts + 1);
-        try {
-          const info = await fetchProvincialRegionInfo(
-            item.lat,
-            item.lng,
-            item.regionId,
-            item.regionName
-          );
-          if (cancelled) return;
-          if (
-            info &&
-            info.boundaryGeoJson &&
-            !isSyntheticFallbackRegion(info.regionId, info.regionName, info)
-          ) {
-            hydratedRegionIdsRef.current.add(item.regionId);
-            setGameState((prev) => {
-              if (!prev) return prev;
-              return registerDiscoveredProvincialRegion(prev, {
+
+        const validUpdates: Array<{
+          item: { regionId: string; regionName: string };
+          info: NonNullable<Awaited<ReturnType<typeof fetchProvincialRegionInfo>>>;
+        }> = [];
+        for (const r of results) {
+          if (r.status === 'fulfilled') {
+            const { item, attempts, info } = r.value;
+            if (
+              info &&
+              info.boundaryGeoJson &&
+              !isSyntheticFallbackRegion(info.regionId, info.regionName, info)
+            ) {
+              hydratedRegionIdsRef.current.add(item.regionId);
+              validUpdates.push({ item, info });
+            } else if (attempts + 1 < 6) {
+              needsNextPass = true;
+            }
+          } else {
+            needsNextPass = true;
+          }
+        }
+
+        if (validUpdates.length > 0) {
+          setGameState((prev) => {
+            if (!prev) return prev;
+            let next = prev;
+            for (const { item, info } of validUpdates) {
+              next = registerDiscoveredProvincialRegion(next, {
                 ...info,
                 exactBoundaryVersion: info.exactBoundaryVersion || EXACT_BOUNDARY_CACHE_VERSION,
                 regionName: info.regionName || item.regionName,
               });
-            });
-          } else if (attempts + 1 < 6) {
-            needsNextPass = true;
-          }
-        } catch {
-          if (attempts + 1 < 6) {
-            needsNextPass = true;
-          }
-        }
-        if (i < items.length - 1 && !cancelled) {
-          await new Promise((r) => setTimeout(r, 350));
+            }
+            return next;
+          });
         }
       }
+
       if (needsNextPass && !cancelled) {
         retryTimer = setTimeout(() => {
           if (!cancelled) {
             setBoundaryRetryTick((t) => t + 1);
           }
-        }, 900);
+        }, 350);
       }
     })();
 

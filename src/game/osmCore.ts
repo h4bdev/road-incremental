@@ -95,6 +95,7 @@ const DRIVABLE_HIGHWAYS = new Set([
   'footway',
   'path',
   'cycleway',
+  'steps',
 ]);
 
 const RAILWAYS = new Set(['rail', 'subway', 'light_rail', 'tram', 'narrow_gauge']);
@@ -114,6 +115,10 @@ const MAX_CHUNK_CACHE_SIZE = 4000;
 const chunkCache = new Map<string, ChunkPayload>();
 const provinceCache = new Map<string, ProvincePayload>();
 const regionInfoCache = new Map<string, ResolvedAdminRegion>();
+const relationBoundaryCache = new Map<
+  number,
+  { bbox?: [number, number, number, number]; boundaryGeoJson?: GeoJsonBoundary; name?: string; adminLevel?: string }
+>();
 const inFlightChunks = new Map<string, Promise<ChunkPayload>>();
 const inFlightProvinces = new Map<string, Promise<ProvincePayload>>();
 const inFlightRegionInfo = new Map<string, Promise<ResolvedAdminRegion | null>>();
@@ -607,14 +612,73 @@ export function stitchOverpassWaysToGeoJson(
 export async function fetchOverpassRelationBoundary(
   relId: number
 ): Promise<{ bbox?: [number, number, number, number]; boundaryGeoJson?: GeoJsonBoundary } | null> {
+  const cached = relationBoundaryCache.get(relId);
+  if (cached?.boundaryGeoJson) {
+    return { bbox: cached.bbox, boundaryGeoJson: cached.boundaryGeoJson };
+  }
   try {
     const query = `[out:json][timeout:10];relation(${relId});out geom;`;
     const res = await fetchOverpassQuery(query, 9500);
     const stitched = stitchOverpassWaysToGeoJson((res.elements || []) as Array<OsmRawRelation | { type: string }>);
-    return stitched.boundaryGeoJson ? stitched : null;
+    if (stitched.boundaryGeoJson) {
+      relationBoundaryCache.set(relId, {
+        ...cached,
+        bbox: stitched.bbox || cached?.bbox,
+        boundaryGeoJson: stitched.boundaryGeoJson,
+      });
+      return stitched;
+    }
+    return null;
   } catch {
     return null;
   }
+}
+
+export async function fetchBatchOverpassRelationBoundaries(
+  relIds: number[]
+): Promise<Map<number, { bbox?: [number, number, number, number]; boundaryGeoJson?: GeoJsonBoundary }>> {
+  const out = new Map<number, { bbox?: [number, number, number, number]; boundaryGeoJson?: GeoJsonBoundary }>();
+  const missing: number[] = [];
+  const seen = new Set<number>();
+
+  for (const id of relIds) {
+    if (!Number.isFinite(id) || id <= 0 || seen.has(id)) continue;
+    seen.add(id);
+    const cached = relationBoundaryCache.get(id);
+    if (cached?.boundaryGeoJson) {
+      out.set(id, { bbox: cached.bbox, boundaryGeoJson: cached.boundaryGeoJson });
+    } else {
+      missing.push(id);
+    }
+  }
+
+  for (let i = 0; i < missing.length; i += 16) {
+    const batch = missing.slice(i, i + 16);
+    if (batch.length === 0) continue;
+    try {
+      const query = `[out:json][timeout:10];relation(id:${batch.join(',')});out geom;`;
+      const res = await fetchOverpassQuery(query, 10500);
+      const elements = (res.elements || []) as Array<OsmRawRelation | { type: string }>;
+      for (const el of elements) {
+        if (el.type !== 'relation' || !('id' in el)) continue;
+        const rel = el as OsmRawRelation;
+        const stitched = stitchOverpassWaysToGeoJson([rel]);
+        if (stitched.boundaryGeoJson) {
+          out.set(rel.id, stitched);
+          relationBoundaryCache.set(rel.id, {
+            bbox: stitched.bbox,
+            boundaryGeoJson: stitched.boundaryGeoJson,
+            name: rel.tags?.['name:ko'] || rel.tags?.name || rel.tags?.['name:en'],
+            adminLevel: rel.tags?.admin_level,
+          });
+        }
+      }
+    } catch {
+      // Keep partial batch results if Overpass errors
+    }
+  }
+
+  return out;
 }
 
 const KNOWN_COUNTRY_REL_IDS = new Set([
@@ -715,7 +779,7 @@ async function searchOsmProvinceByName(
     const res = await fetchWithTimeout(
       `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
         cleanQuery
-      )}&format=jsonv2&polygon_geojson=1&polygon_threshold=0&addressdetails=1&accept-language=ko,en&limit=6`,
+      )}&format=jsonv2&polygon_geojson=1&polygon_threshold=0.0004&addressdetails=1&accept-language=ko,en&limit=6`,
       { headers: buildRequestHeaders('application/json') },
       8500
     );
@@ -877,7 +941,7 @@ export async function resolveOsmProvincialRegion(
       try {
         const ids = distRelId && distRelId !== relId ? `R${relId},R${distRelId}` : `R${relId}`;
         const nomRes = await fetchWithTimeout(
-          `https://nominatim.openstreetmap.org/lookup?osm_ids=${ids}&format=json&polygon_geojson=1&polygon_threshold=0&accept-language=ko,en`,
+          `https://nominatim.openstreetmap.org/lookup?osm_ids=${ids}&format=json&polygon_geojson=1&polygon_threshold=0.0004&accept-language=ko,en`,
           { headers: buildRequestHeaders('application/json') },
           9500
         );
@@ -932,6 +996,14 @@ export async function resolveOsmProvincialRegion(
           bbox,
         })
       ) {
+        if (boundaryGeoJson) {
+          relationBoundaryCache.set(relId, {
+            bbox,
+            boundaryGeoJson,
+            name: displayName,
+            adminLevel,
+          });
+        }
         return {
           regionId: `osm_rel_${relId}`,
           relId,
@@ -951,7 +1023,7 @@ export async function resolveOsmProvincialRegion(
   for (const zoomLevel of [10, 8, 6]) {
     try {
       const revRes = await fetchWithTimeout(
-        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=${zoomLevel}&addressdetails=1&polygon_geojson=1&polygon_threshold=0&accept-language=ko,en`,
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=${zoomLevel}&addressdetails=1&polygon_geojson=1&polygon_threshold=0.0004&accept-language=ko,en`,
         { headers: buildRequestHeaders('application/json') },
         8500
       );
@@ -1254,32 +1326,42 @@ export function buildDenseRealOsmGraph(
 
   // Spatial grid keyed by `${mode}:${layerKey}` to collapse nearly-coincident (<=2.0m) duplicate OSM vertices
   // while strictly preserving parallel carriageways (>=6m apart) and stacked bridges/tunnels (different layerKey).
+  // Additionally, highway=steps specifically connect vertical layers (ground <-> bridge/tunnel/subway), so steps
+  // endpoints (i === 0 || i === densePts.length - 1) can bridge across road layerKeys within 2.8m.
   const SNAP_CELL_DEG = 0.0001;
   const SNAP_METERS = 2.0;
+  const STEPS_CROSS_LAYER_SNAP_METERS = 2.8;
   const snapGridByLayer = new Map<string, Map<string, Array<{ id: string; lat: number; lng: number }>>>();
+  const roadAllLayerGrid = new Map<string, Array<{ id: string; lat: number; lng: number }>>();
+  const stepsEndpointGrid = new Map<string, Array<{ id: string; lat: number; lng: number }>>();
+  const snappedAlias = new Map<string, { id: string; lat: number; lng: number }>();
 
-  const resolveOrRegisterSnapVertex = (
-    pt: { id: string; lat: number; lng: number; label: string },
-    mode: 'road' | 'rail',
-    layerKey: string
-  ): { id: string; lat: number; lng: number; label: string } => {
-    const existingNode = nodeMap.get(pt.id);
-    if (existingNode) {
-      return { id: existingNode.id, lat: existingNode.lat, lng: existingNode.lng, label: pt.label };
+  const pushGridPoint = (
+    targetGrid: Map<string, Array<{ id: string; lat: number; lng: number }>>,
+    cellKey: string,
+    vertex: { id: string; lat: number; lng: number }
+  ) => {
+    let b = targetGrid.get(cellKey);
+    if (!b) {
+      b = [];
+      targetGrid.set(cellKey, b);
     }
-    const groupKey = `${mode}:${layerKey}`;
-    let grid = snapGridByLayer.get(groupKey);
-    if (!grid) {
-      grid = new Map();
-      snapGridByLayer.set(groupKey, grid);
-    }
-    const gx = Math.floor(pt.lat / SNAP_CELL_DEG);
-    const gy = Math.floor(pt.lng / SNAP_CELL_DEG);
+    b.push(vertex);
+  };
+
+  const findNearestInGrid = (
+    targetGrid: Map<string, Array<{ id: string; lat: number; lng: number }>> | undefined,
+    gx: number,
+    gy: number,
+    pt: { lat: number; lng: number },
+    maxMeters: number
+  ): { id: string; lat: number; lng: number } | null => {
+    if (!targetGrid) return null;
     let bestMatch: { id: string; lat: number; lng: number } | null = null;
-    let bestDist = SNAP_METERS;
+    let bestDist = maxMeters;
     for (let dx = -1; dx <= 1; dx++) {
       for (let dy = -1; dy <= 1; dy++) {
-        const bucket = grid.get(`${gx + dx}_${gy + dy}`);
+        const bucket = targetGrid.get(`${gx + dx}_${gy + dy}`);
         if (!bucket) continue;
         for (let k = 0; k < bucket.length; k++) {
           const cand = bucket[k];
@@ -1291,16 +1373,56 @@ export function buildDenseRealOsmGraph(
         }
       }
     }
+    return bestMatch;
+  };
+
+  const resolveOrRegisterSnapVertex = (
+    pt: { id: string; lat: number; lng: number; label: string },
+    mode: 'road' | 'rail',
+    layerKey: string,
+    options?: { isStepsEndpoint?: boolean; isStepsWay?: boolean }
+  ): { id: string; lat: number; lng: number; label: string } => {
+    const existingNode = nodeMap.get(pt.id);
+    if (existingNode) {
+      return { id: existingNode.id, lat: existingNode.lat, lng: existingNode.lng, label: pt.label };
+    }
+    const aliased = snappedAlias.get(pt.id);
+    if (aliased) {
+      return { id: aliased.id, lat: aliased.lat, lng: aliased.lng, label: pt.label };
+    }
+
+    const groupKey = `${mode}:${layerKey}`;
+    let grid = snapGridByLayer.get(groupKey);
+    if (!grid) {
+      grid = new Map();
+      snapGridByLayer.set(groupKey, grid);
+    }
+    const gx = Math.floor(pt.lat / SNAP_CELL_DEG);
+    const gy = Math.floor(pt.lng / SNAP_CELL_DEG);
+    const cellKey = `${gx}_${gy}`;
+
+    let bestMatch = findNearestInGrid(grid, gx, gy, pt, SNAP_METERS);
+    if (!bestMatch && mode === 'road') {
+      if (options?.isStepsEndpoint) {
+        bestMatch = findNearestInGrid(roadAllLayerGrid, gx, gy, pt, STEPS_CROSS_LAYER_SNAP_METERS);
+      } else if (!options?.isStepsWay) {
+        bestMatch = findNearestInGrid(stepsEndpointGrid, gx, gy, pt, STEPS_CROSS_LAYER_SNAP_METERS);
+      }
+    }
+
     if (bestMatch) {
+      snappedAlias.set(pt.id, bestMatch);
       return { id: bestMatch.id, lat: bestMatch.lat, lng: bestMatch.lng, label: pt.label };
     }
-    const cellKey = `${gx}_${gy}`;
-    let bucket = grid.get(cellKey);
-    if (!bucket) {
-      bucket = [];
-      grid.set(cellKey, bucket);
+
+    const vertex = { id: pt.id, lat: pt.lat, lng: pt.lng };
+    pushGridPoint(grid, cellKey, vertex);
+    if (mode === 'road') {
+      pushGridPoint(roadAllLayerGrid, cellKey, vertex);
+      if (options?.isStepsEndpoint) {
+        pushGridPoint(stepsEndpointGrid, cellKey, vertex);
+      }
     }
-    bucket.push({ id: pt.id, lat: pt.lat, lng: pt.lng });
     return pt;
   };
 
@@ -1482,7 +1604,7 @@ export function buildDenseRealOsmGraph(
           ? 1.25
           : hwType.startsWith('tertiary')
           ? 1.1
-          : hwType === 'footway' || hwType === 'path' || hwType === 'cycleway'
+          : hwType === 'footway' || hwType === 'path' || hwType === 'cycleway' || hwType === 'steps'
           ? 0.75
           : hwType === 'service' || hwType === 'track' || hwType === 'pedestrian'
           ? 0.85
@@ -1491,7 +1613,13 @@ export function buildDenseRealOsmGraph(
       const layerKey = `${way.tags?.layer || '0'}_${
         way.tags?.tunnel === 'yes' ? 't' : way.tags?.bridge === 'yes' ? 'b' : 'g'
       }`;
-      const snappedPts = densePts.map((pt) => resolveOrRegisterSnapVertex(pt, mode, layerKey));
+      const isStepsWay = hwType === 'steps';
+      const snappedPts = densePts.map((pt, idx) =>
+        resolveOrRegisterSnapVertex(pt, mode, layerKey, {
+          isStepsWay,
+          isStepsEndpoint: isStepsWay && (idx === 0 || idx === densePts.length - 1),
+        })
+      );
 
       let wayAdded = 0;
       for (let i = 0; i < snappedPts.length - 1; i++) {
@@ -1561,12 +1689,119 @@ export function clampBbox(
   ];
 }
 
-export async function resolveRegionCached(
+async function resolveKnownOsmRelation(
+  relId: number,
   lat: number,
   lng: number,
   expectedRegionName?: string
 ): Promise<ResolvedAdminRegion | null> {
-  const key = expectedRegionName
+  const cachedRel = relationBoundaryCache.get(relId);
+  if (cachedRel?.boundaryGeoJson && cachedRel.bbox) {
+    const name = cachedRel.name || expectedRegionName || `Region #${relId}`;
+    const adminLevel = cachedRel.adminLevel || '6';
+    if (!isCountryLevelOsmArea({ name, relId, adminLevel, bbox: cachedRel.bbox })) {
+      return {
+        regionId: `osm_rel_${relId}`,
+        relId,
+        regionName: name,
+        adminLevel,
+        bbox: cachedRel.bbox,
+        boundaryGeoJson: cachedRel.boundaryGeoJson,
+        exactBoundaryVersion: 2,
+      };
+    }
+  }
+
+  let bbox: [number, number, number, number] | undefined = cachedRel?.bbox;
+  let boundaryGeoJson: GeoJsonBoundary | undefined = cachedRel?.boundaryGeoJson;
+  let regionName = cachedRel?.name || expectedRegionName || '';
+  let adminLevel = cachedRel?.adminLevel || '6';
+
+  try {
+    const nomRes = await fetchWithTimeout(
+      `https://nominatim.openstreetmap.org/lookup?osm_ids=R${relId}&format=json&polygon_geojson=1&polygon_threshold=0.0004&addressdetails=1&accept-language=ko,en`,
+      { headers: buildRequestHeaders('application/json') },
+      8000
+    );
+    if (nomRes.ok) {
+      const items = (await nomRes.json()) as Array<{
+        osm_id?: number;
+        name?: string;
+        display_name?: string;
+        addresstype?: string;
+        boundingbox?: [string, string, string, string];
+        geojson?: unknown;
+      }>;
+      const item = items.find((i) => i.osm_id === relId) || items[0];
+      if (item) {
+        if (item.boundingbox && item.boundingbox.length === 4) {
+          bbox = [
+            parseFloat(item.boundingbox[0]),
+            parseFloat(item.boundingbox[2]),
+            parseFloat(item.boundingbox[1]),
+            parseFloat(item.boundingbox[3]),
+          ];
+        }
+        const gj = normalizeExactGeoJsonBoundary(item.geojson);
+        if (gj) boundaryGeoJson = gj;
+        regionName = item.name || item.display_name?.split(',')[0] || regionName;
+        if (item.addresstype === 'state' || item.addresstype === 'province') adminLevel = '4';
+        else if (item.addresstype === 'borough' || item.addresstype === 'city_district') adminLevel = '8';
+      }
+    }
+  } catch {
+    // Fallback to Overpass below
+  }
+
+  if (!boundaryGeoJson) {
+    const opGeom = await fetchOverpassRelationBoundary(relId);
+    if (opGeom?.boundaryGeoJson) {
+      boundaryGeoJson = opGeom.boundaryGeoJson;
+    }
+    if (!bbox && opGeom?.bbox) {
+      bbox = opGeom.bbox;
+    }
+  }
+
+  if (!boundaryGeoJson) return null;
+  const finalBbox: [number, number, number, number] = bbox || [
+    lat - 0.055,
+    lng - 0.068,
+    lat + 0.055,
+    lng + 0.068,
+  ];
+  const finalName = regionName || `Region #${relId}`;
+  if (isCountryLevelOsmArea({ name: finalName, relId, adminLevel, bbox: finalBbox })) {
+    return null;
+  }
+  relationBoundaryCache.set(relId, {
+    bbox: finalBbox,
+    boundaryGeoJson,
+    name: finalName,
+    adminLevel,
+  });
+  return {
+    regionId: `osm_rel_${relId}`,
+    relId,
+    regionName: finalName,
+    adminLevel,
+    bbox: finalBbox,
+    boundaryGeoJson,
+    exactBoundaryVersion: 2,
+  };
+}
+
+export async function resolveRegionCached(
+  lat: number,
+  lng: number,
+  expectedRegionName?: string,
+  knownRegionId?: string
+): Promise<ResolvedAdminRegion | null> {
+  const relMatch = knownRegionId?.match(/^osm_rel_(\d+)$/);
+  const knownRelId = relMatch ? Number(relMatch[1]) : undefined;
+  const key = knownRelId
+    ? `rel:${knownRelId}`
+    : expectedRegionName
     ? `${quantizeChunkKey(lat, lng)}:${normalizeNameToken(expectedRegionName)}`
     : quantizeChunkKey(lat, lng);
   const cachedInfo = regionInfoCache.get(key);
@@ -1574,12 +1809,20 @@ export async function resolveRegionCached(
 
   let pendingInfo = inFlightRegionInfo.get(key);
   if (!pendingInfo) {
-    pendingInfo = resolveOsmProvincialRegion(lat, lng, expectedRegionName).then((resolved) => {
+    pendingInfo = (async () => {
+      if (knownRelId) {
+        const directRel = await resolveKnownOsmRelation(knownRelId, lat, lng, expectedRegionName);
+        if (directRel && directRel.boundaryGeoJson) {
+          regionInfoCache.set(key, directRel);
+          return directRel;
+        }
+      }
+      const resolved = await resolveOsmProvincialRegion(lat, lng, expectedRegionName);
       if (resolved && resolved.boundaryGeoJson && !isCountryLevelOsmArea(resolved)) {
         regionInfoCache.set(key, resolved);
       }
       return resolved;
-    });
+    })();
     inFlightRegionInfo.set(key, pendingInfo);
     pendingInfo.finally(() => inFlightRegionInfo.delete(key));
   }
@@ -1806,10 +2049,11 @@ export async function loadOsmRoadChunksBatchDirect(
 export async function loadOsmRegionInfoDirect(
   lat: number,
   lng: number,
-  expectedRegionName?: string
+  expectedRegionName?: string,
+  knownRegionId?: string
 ): Promise<ProvincialRegionMeta> {
   const chunkKey = quantizeChunkKey(lat, lng);
-  const region = await resolveRegionCached(lat, lng, expectedRegionName);
+  const region = await resolveRegionCached(lat, lng, expectedRegionName, knownRegionId);
   if (!region || isCountryLevelOsmArea(region)) {
     return {
       regionId: `osm_prov_${chunkKey}`,
@@ -1826,6 +2070,7 @@ export async function loadOsmRegionInfoDirect(
     adminLevel: region.adminLevel,
     bbox: region.bbox,
     boundaryGeoJson: region.boundaryGeoJson,
+    exactBoundaryVersion: region.exactBoundaryVersion || (region.boundaryGeoJson ? 2 : undefined),
     centerLat: (region.bbox[0] + region.bbox[2]) / 2,
     centerLng: (region.bbox[1] + region.bbox[3]) / 2,
   };
@@ -1914,25 +2159,54 @@ export async function loadNearbyProvincialRegionsDirect(
 
     if (filteredRels.length > 0) {
       const geoById = new Map<number, GeoJsonBoundary>();
-      try {
-        const osmIds = filteredRels.map((e) => `R${e.r.id}`).join(',');
-        const lookupRes = await fetchWithTimeout(
-          `https://nominatim.openstreetmap.org/lookup?osm_ids=${osmIds}&format=json&polygon_geojson=1&polygon_threshold=0&accept-language=ko,en`,
-          { headers: buildRequestHeaders('application/json') },
-          10000
-        );
-        if (lookupRes.ok) {
-          const items = (await lookupRes.json()) as Array<{
-            osm_id: number;
-            geojson?: unknown;
-          }>;
-          for (const item of items) {
-            const gj = normalizeExactGeoJsonBoundary(item.geojson);
-            if (gj) geoById.set(item.osm_id, gj);
+      const uncachedNomIds: number[] = [];
+      for (const { r } of filteredRels) {
+        const cached = relationBoundaryCache.get(r.id);
+        if (cached?.boundaryGeoJson) {
+          geoById.set(r.id, cached.boundaryGeoJson);
+        } else {
+          uncachedNomIds.push(r.id);
+        }
+      }
+
+      if (uncachedNomIds.length > 0) {
+        try {
+          const osmIds = uncachedNomIds.map((id) => `R${id}`).join(',');
+          const lookupRes = await fetchWithTimeout(
+            `https://nominatim.openstreetmap.org/lookup?osm_ids=${osmIds}&format=json&polygon_geojson=1&polygon_threshold=0.0004&accept-language=ko,en`,
+            { headers: buildRequestHeaders('application/json') },
+            9500
+          );
+          if (lookupRes.ok) {
+            const items = (await lookupRes.json()) as Array<{
+              osm_id: number;
+              geojson?: unknown;
+            }>;
+            for (const item of items) {
+              const gj = normalizeExactGeoJsonBoundary(item.geojson);
+              if (gj) {
+                geoById.set(item.osm_id, gj);
+                const prev = relationBoundaryCache.get(item.osm_id);
+                relationBoundaryCache.set(item.osm_id, {
+                  ...prev,
+                  boundaryGeoJson: gj,
+                });
+              }
+            }
+          }
+        } catch {
+          // Overpass batch relation stitching handles any missing boundaries below
+        }
+      }
+
+      const missingIds = filteredRels.map((e) => e.r.id).filter((id) => !geoById.has(id));
+      if (missingIds.length > 0) {
+        const opBatch = await fetchBatchOverpassRelationBoundaries(missingIds);
+        for (const [relId, geom] of opBatch.entries()) {
+          if (geom.boundaryGeoJson) {
+            geoById.set(relId, geom.boundaryGeoJson);
           }
         }
-      } catch {
-        // Bbox fallback remains valid even if Nominatim throttles
       }
 
       const metas: ProvincialRegionMeta[] = filteredRels.map(({ r, cLat, cLng }) => {
@@ -1940,6 +2214,14 @@ export async function loadNearbyProvincialRegionsDirect(
         const name = r.tags?.['name:ko'] || r.tags?.name || r.tags?.['name:en'] || `Region #${r.id}`;
         const adminLevel = r.tags?.admin_level || '6';
         const boundaryGeoJson = geoById.get(r.id);
+        if (boundaryGeoJson) {
+          relationBoundaryCache.set(r.id, {
+            bbox: [b.minlat, b.minlon, b.maxlat, b.maxlon],
+            boundaryGeoJson,
+            name,
+            adminLevel,
+          });
+        }
         return {
           regionId: `osm_rel_${r.id}`,
           regionName: name,
@@ -2057,8 +2339,8 @@ export async function loadOsmProvinceDirect(
 
       // Full-county query: load ALL drivable, residential, service, pedestrian, and rail ways in the county at once
       const fullAllRoadsFilter = region?.relId
-        ? `area(${3600000000 + region.relId})->.city;(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street|service|pedestrian|track|road|footway|path|cycleway).*$"](area.city);way["railway"~"^(rail|subway|light_rail|tram|narrow_gauge)$"](area.city););`
-        : `(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street|service|pedestrian|track|road|footway|path|cycleway).*$"](${cityBoxStr});way["railway"~"^(rail|subway|light_rail|tram|narrow_gauge)$"](${cityBoxStr}););`;
+        ? `area(${3600000000 + region.relId})->.city;(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street|service|pedestrian|track|road|footway|path|cycleway|steps).*$"](area.city);way["railway"~"^(rail|subway|light_rail|tram|narrow_gauge)$"](area.city););`
+        : `(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street|service|pedestrian|track|road|footway|path|cycleway|steps).*$"](${cityBoxStr});way["railway"~"^(rail|subway|light_rail|tram|narrow_gauge)$"](${cityBoxStr}););`;
 
       let currentPct = 30;
       const bump = (pct: number, lbl?: string) => {
@@ -2086,7 +2368,7 @@ export async function loadOsmProvinceDirect(
             return r;
           }),
           fetchOverpassQuery(
-            `[out:json][timeout:7];(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street|service|pedestrian|track|road|footway|path|cycleway).*$"](${distBoxStr});way["railway"](${distBoxStr}););out body;>;out skel qt;`,
+            `[out:json][timeout:7];(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street|service|pedestrian|track|road|footway|path|cycleway|steps).*$"](${distBoxStr});way["railway"](${distBoxStr}););out body;>;out skel qt;`,
             8500
           ).then((r) => {
             bump(56);

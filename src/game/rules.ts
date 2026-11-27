@@ -35,7 +35,7 @@ import {
 
 export const GLOBAL_OSM_NODE_TARGET = 450_000_000;
 export const MAX_OSM_FRONTIER_DISTANCE = 10;
-export const ISOLATED_ROUTE_BRIDGE_MAX_KM = 0.4; // 400m search radius to locate the single nearest bridgeable node from an isolated/dead-end route
+export const ISOLATED_ROUTE_BRIDGE_MAX_KM = 3.5; // 3.5km search radius to locate the single nearest bridgeable node from an isolated/dead-end route or transit network
 export const ISOLATED_ROUTE_BRIDGE_FRONTIER_CAP = 3; // Frontier horizon cap (d <= 3 around the single nearest bridge target)
 export const CROSS_BORDER_BRIDGE_MAX_KM = 0.45; // 450m radius across unlocked adjacent city borders
 
@@ -1132,15 +1132,21 @@ function mergeTwoProvincialRegions(
     (incomingReal && existingReal && Boolean(incoming.boundaryGeoJson)) ||
     (!existing.boundaryGeoJson && Boolean(incoming.boundaryGeoJson));
 
+  const mergedBoundary = useIncomingGeom
+    ? incoming.boundaryGeoJson || existing.boundaryGeoJson
+    : existing.boundaryGeoJson || incoming.boundaryGeoJson;
+  const mergedExactVersion = mergedBoundary
+    ? Math.max(existing.exactBoundaryVersion || 0, incoming.exactBoundaryVersion || 0) || undefined
+    : undefined;
+
   return {
     regionId: chosenId,
     regionName: chosenName,
     adminLevel: useIncomingGeom ? incoming.adminLevel : existing.adminLevel || incoming.adminLevel,
     bbox: useIncomingGeom ? incoming.bbox : existing.bbox,
-    boundaryGeoJson: useIncomingGeom
-      ? incoming.boundaryGeoJson || existing.boundaryGeoJson
-      : existing.boundaryGeoJson || incoming.boundaryGeoJson,
+    boundaryGeoJson: mergedBoundary,
     hasRealOsmBoundary: existingReal || incomingReal,
+    exactBoundaryVersion: mergedExactVersion,
     centerLat: useIncomingGeom ? incoming.centerLat : existing.centerLat,
     centerLng: useIncomingGeom ? incoming.centerLng : existing.centerLng,
     unlocked: existing.unlocked || incoming.unlocked,
@@ -1278,6 +1284,7 @@ export function registerStartingProvincialRegion(
     adminLevel: string;
     bbox: [number, number, number, number];
     boundaryGeoJson?: GeoJsonBoundary;
+    exactBoundaryVersion?: number;
     centerLat: number;
     centerLng: number;
     totalNodeCount?: number;
@@ -1341,7 +1348,7 @@ export function registerStartingProvincialRegion(
     boundaryGeoJson: meta.boundaryGeoJson || canonicalMatch?.boundaryGeoJson || existingStart?.boundaryGeoJson,
     hasRealOsmBoundary: isRealOsmBoundaryMeta(meta) || existingStart?.hasRealOsmBoundary || canonicalMatch?.hasRealOsmBoundary,
     exactBoundaryVersion:
-      (meta.boundaryGeoJson ? 2 : undefined) ||
+      meta.exactBoundaryVersion ||
       canonicalMatch?.exactBoundaryVersion ||
       existingStart?.exactBoundaryVersion,
     centerLat: meta.centerLat,
@@ -1566,6 +1573,7 @@ export function registerDiscoveredProvincialRegion(
     bbox: meta.bbox,
     boundaryGeoJson: meta.boundaryGeoJson,
     hasRealOsmBoundary: isIncomingRealOsm,
+    exactBoundaryVersion: meta.exactBoundaryVersion,
     centerLat: meta.centerLat,
     centerLng: meta.centerLng,
     unlocked: false,
@@ -2355,6 +2363,7 @@ const ISOLATED_PIONEER_HIGHWAYS = new Set([
   'footway',
   'path',
   'cycleway',
+  'steps',
   'road',
 ]);
 
@@ -2695,6 +2704,7 @@ export const PEDESTRIAN_HIGHWAY_TYPES = new Set([
   'path',
   'cycleway',
   'track',
+  'steps',
 ]);
 
 export function getOsmNodeMode(
@@ -2890,6 +2900,7 @@ function buildStaticComponentsInfo(
     let edgeCount = 0;
     let hasPedestrian = false;
     let allMinorRoad = true;
+    let hasRail = false;
     let head = 0;
 
     while (head < queue.length) {
@@ -2907,6 +2918,9 @@ function buildStaticComponentsInfo(
           const e = inc[j];
           if (e.fromNodeId === curr) {
             edgeCount++;
+            if (e.mode === 'rail') {
+              hasRail = true;
+            }
             if (e.highwayType === 'pedestrian') {
               hasPedestrian = true;
             }
@@ -2924,7 +2938,7 @@ function buildStaticComponentsInfo(
     }
     compNodeIdsById.set(cid, compNodeIds);
     compUnlockedEdgeDegreeSum.set(cid, unlockedDegSum);
-    if (hasUnlocked && edgeCount >= 1 && (hasPedestrian || allMinorRoad)) {
+    if (hasUnlocked && edgeCount >= 1 && (hasPedestrian || allMinorRoad || hasRail)) {
       compMinorCandidateIds.push(cid);
     }
   }
@@ -3166,7 +3180,8 @@ function findIsolatedMinorBridgePairs(
     list.push(cn);
   }
 
-  const cellSpan = Math.max(1, Math.ceil(ISOLATED_ROUTE_BRIDGE_MAX_KM / 55 / CELL_DEG) + 1);
+  const MINOR_BRIDGE_PROXIMITY_KM = 0.45;
+  const cellSpan = Math.max(1, Math.ceil(MINOR_BRIDGE_PROXIMITY_KM / 55 / CELL_DEG) + 1);
   const pairs: IsolatedBridgePair[] = [];
 
   for (const cid of isolatedMinorComps) {
@@ -3190,8 +3205,11 @@ function findIsolatedMinorBridgePairs(
           if (!bucket) continue;
           for (const cn of bucket) {
             const distKm = haversineKm(cn.lat, cn.lng, target.lat, target.lng);
-            if (distKm > ISOLATED_ROUTE_BRIDGE_MAX_KM) continue;
-            if (!areModesBridgeCompatible(deriveMode(cn), targetMode, distKm, transferDistanceKm)) {
+            if (distKm > MINOR_BRIDGE_PROXIMITY_KM) continue;
+            if (
+              !areModesBridgeCompatible(deriveMode(cn), targetMode, distKm, transferDistanceKm) &&
+              targetMode !== 'rail'
+            ) {
               continue;
             }
             if (distKm < bestDistKm) {
@@ -5523,10 +5541,15 @@ export function connectOsmNodesDirect(
       ? '철도 연결 링크'
       : '교차로 연결 링크';
 
+  const isPedestrianBridge =
+    edgeMode === 'road' &&
+    isOsmNodePedestrianOnly(state, fromNodeId) &&
+    isOsmNodePedestrianOnly(state, toNodeId);
+
   const customEdge: OsmEdge = {
     id: `oe_custom_${fromNodeId}_${toNodeId}`,
     wayName,
-    highwayType: edgeMode === 'rail' ? 'rail' : 'unclassified',
+    highwayType: edgeMode === 'rail' ? 'rail' : isPedestrianBridge ? 'pedestrian' : 'unclassified',
     mode: edgeMode,
     fromNodeId,
     toNodeId,

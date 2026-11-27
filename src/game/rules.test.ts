@@ -1027,10 +1027,10 @@ test('Node Tier Rank progresses cleanly with widened lower tiers and narrowed Ma
   assert.equal(getNodeTierRank(12000).label, 'Gold I');
   assert.equal(getNodeTierRank(65000).label, 'Platinum I');
   assert.equal(getNodeTierRank(270000).label, 'Diamond I');
-  assert.equal(getNodeTierRank(850000).label, 'Master I');
-  assert.equal(getNodeTierRank(1350000).label, 'Master V');
-  assert.equal(getNodeTierRank(1475000).label, 'Grandmaster I');
-  assert.equal(getNodeTierRank(2100000).label, 'Terra Challenger');
+  assert.equal(getNodeTierRank(1200000).label, 'Master I');
+  assert.equal(getNodeTierRank(3400000).label, 'Master V');
+  assert.equal(getNodeTierRank(4200000).label, 'Grandmaster I');
+  assert.equal(getNodeTierRank(10000000).label, 'Terra Challenger');
 
   // Verify tier progressPct has at most 3 decimal places cleanly
   const rank1 = getNodeTierRank(1);
@@ -2715,3 +2715,81 @@ test('Legacy sub-county Miami save migrates cleanly into Miami-Dade County on lo
   assert.equal(hydrated.provincialRegions.some((r) => r.regionId === 'curated_us_fl_miami_dade' && r.unlocked), true);
   assert.equal(hydrated.provincialRegions.some((r) => r.regionId === legacyRegionId), false);
 });
+
+test('highway=steps nodes register as pedestrian-only green paths, connect cleanly, and preserve exactBoundaryVersion across region registration', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  let state = { ...createInitialGameState(seoul), capital: 50000 };
+
+  state = mergeOsmChunk(
+    state,
+    '37.566_126.978',
+    [
+      { id: 'st_1', lat: 37.5660, lng: 126.9780, connected: true, mode: 'road' },
+      { id: 'st_2', lat: 37.5662, lng: 126.9780, connected: false, mode: 'road' },
+      { id: 'st_3', lat: 37.5663, lng: 126.9780, connected: false, mode: 'road' },
+    ],
+    [
+      {
+        id: 'oe_steps_1',
+        wayName: '남산 계단길',
+        highwayType: 'steps',
+        mode: 'road',
+        fromNodeId: 'st_1',
+        toNodeId: 'st_2',
+        coordinates: [[37.5660, 126.9780], [37.5662, 126.9780]],
+        distanceKm: 0.022,
+        buildCost: 25,
+        baseIncomePerSec: 1.5,
+        built: false,
+      },
+      {
+        id: 'oe_foot_2',
+        wayName: '보행로',
+        highwayType: 'footway',
+        mode: 'road',
+        fromNodeId: 'st_2',
+        toNodeId: 'st_3',
+        coordinates: [[37.5662, 126.9780], [37.5663, 126.9780]],
+        distanceKm: 0.011,
+        buildCost: 20,
+        baseIncomePerSec: 1.2,
+        built: false,
+      },
+    ],
+    undefined,
+    { skipAutoSeed: true }
+  );
+
+  assert.equal(isOsmNodePedestrianOnly(state, 'st_2'), true, 'Node between steps and footway must be pedestrian-only green');
+  const connected = connectOsmPath(state, 'st_1', 'st_3');
+  assert.equal(connected.success, true, 'Should connect across highway=steps into footway');
+  assert.equal(connected.builtCount, 2);
+
+  // Preserve exactBoundaryVersion when registering a newly discovered region with real boundaryGeoJson
+  const poly = {
+    type: 'Polygon' as const,
+    coordinates: [
+      [
+        [127.08, 37.42],
+        [127.14, 37.42],
+        [127.14, 37.47],
+        [127.08, 37.47],
+        [127.08, 37.42],
+      ],
+    ],
+  };
+  const withDiscovered = registerDiscoveredProvincialRegion(connected.newState, {
+    regionId: 'osm_rel_555666',
+    regionName: '테스트특례구',
+    adminLevel: '6',
+    bbox: [37.42, 127.08, 37.47, 127.14],
+    boundaryGeoJson: poly,
+    exactBoundaryVersion: 2,
+    centerLat: 37.445,
+    centerLng: 127.11,
+  });
+  const reg = withDiscovered.provincialRegions.find((r) => r.regionId === 'osm_rel_555666');
+  assert.ok(reg);
+  assert.equal(reg.exactBoundaryVersion, 2, 'New discovered region must preserve exactBoundaryVersion=2');
+});
+

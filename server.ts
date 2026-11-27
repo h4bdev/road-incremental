@@ -74,12 +74,13 @@ async function startServer() {
     const lat = Number(req.query.lat);
     const lng = Number(req.query.lng);
     const name = typeof req.query.name === 'string' ? req.query.name.trim() : undefined;
+    const regionId = typeof req.query.regionId === 'string' ? req.query.regionId.trim() : undefined;
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
       res.status(400).json({ error: 'Invalid lat/lng coordinates' });
       return;
     }
 
-    const info = await loadOsmRegionInfoDirect(lat, lng, name || undefined);
+    const info = await loadOsmRegionInfoDirect(lat, lng, name || undefined, regionId || undefined);
     res.json(info);
   });
 

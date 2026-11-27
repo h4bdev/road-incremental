@@ -653,7 +653,129 @@ test('resolveOsmProvincialRegion uses polygon_threshold=0 and preserves exact co
   }
 });
 
+test('buildDenseRealOsmGraph connects highway=steps across layerKey boundaries and disjoint <=2.5m endpoints', () => {
+  const centerLat = 37.55;
+  const centerLng = 126.99;
+  const raw = {
+    elements: [
+      // Ground footway at layer=0 -> shared OSM node 11 + nearby disjoint node 12 (~1.8m from steps start)
+      { type: 'node' as const, id: 10, lat: centerLat, lon: centerLng },
+      { type: 'node' as const, id: 11, lat: centerLat + 0.0002, lon: centerLng },
+      { type: 'node' as const, id: 12, lat: centerLat + 0.000215, lon: centerLng + 0.00001 },
+      // Elevated walkway at layer=1 bridge=yes
+      { type: 'node' as const, id: 13, lat: centerLat + 0.0004, lon: centerLng },
+      { type: 'node' as const, id: 14, lat: centerLat + 0.0006, lon: centerLng },
+      {
+        type: 'way' as const,
+        id: 701,
+        tags: { highway: 'footway', name: '지상 보행로' },
+        nodes: [10, 11],
+      },
+      {
+        type: 'way' as const,
+        id: 702,
+        tags: { highway: 'steps', layer: '1', incline: 'up', name: '육교 계단' },
+        nodes: [12, 13],
+      },
+      {
+        type: 'way' as const,
+        id: 703,
+        tags: { highway: 'footway', layer: '1', bridge: 'yes', name: '육교 상부' },
+        nodes: [13, 14],
+      },
+    ],
+  };
 
+  const graph = buildDenseRealOsmGraph(raw, '37.5500_126.9900', centerLat, centerLng);
+  assert.ok(graph.osmEdges.some((e) => e.highwayType === 'steps'), 'highway=steps edge must be emitted');
 
+  // Verify BFS reachability from osm_10 (ground) through steps to osm_14 (bridge layer=1)
+  const adj = new Map<string, string[]>();
+  for (const e of graph.osmEdges) {
+    if (!adj.has(e.fromNodeId)) adj.set(e.fromNodeId, []);
+    if (!adj.has(e.toNodeId)) adj.set(e.toNodeId, []);
+    adj.get(e.fromNodeId)!.push(e.toNodeId);
+    adj.get(e.toNodeId)!.push(e.fromNodeId);
+  }
+  const visited = new Set<string>(['osm_10']);
+  const q = ['osm_10'];
+  while (q.length > 0) {
+    const cur = q.shift()!;
+    for (const nxt of adj.get(cur) || []) {
+      if (!visited.has(nxt)) {
+        visited.add(nxt);
+        q.push(nxt);
+      }
+    }
+  }
+  assert.equal(visited.has('osm_14'), true, 'Ground footway -> steps -> elevated bridge footway must form a connected component');
+});
 
+test('loadNearbyProvincialRegionsDirect stitches real boundaries via batched Overpass fallback when Nominatim throttles', async () => {
+  const { loadNearbyProvincialRegionsDirect } = await import('./osmCore');
+  const originalFetch = globalThis.fetch;
 
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes('nominatim.openstreetmap.org')) {
+      return new Response('Too many requests', { status: 429 });
+    }
+    if (url.includes('overpass')) {
+      const bodyStr = typeof init?.body === 'string' ? decodeURIComponent(init.body) : '';
+      if (bodyStr.includes('out tags bb;')) {
+        return new Response(
+          JSON.stringify({
+            elements: [
+              {
+                type: 'relation',
+                id: 990101,
+                tags: { boundary: 'administrative', admin_level: '6', 'name:ko': '중구테스트' },
+                bounds: { minlat: 37.54, minlon: 126.96, maxlat: 37.57, maxlon: 127.01 },
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (bodyStr.includes('relation(id:990101)')) {
+        return new Response(
+          JSON.stringify({
+            elements: [
+              {
+                type: 'relation',
+                id: 990101,
+                bounds: { minlat: 37.54, minlon: 126.96, maxlat: 37.57, maxlon: 127.01 },
+                members: [
+                  {
+                    type: 'way',
+                    role: 'outer',
+                    geometry: [
+                      { lat: 37.54, lon: 126.96 },
+                      { lat: 37.54, lon: 127.01 },
+                      { lat: 37.57, lon: 127.01 },
+                      { lat: 37.57, lon: 126.96 },
+                      { lat: 37.54, lon: 126.96 },
+                    ],
+                  },
+                ],
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+    }
+    return new Response('Not found', { status: 404 });
+  }) as typeof fetch;
+
+  try {
+    const nearby = await loadNearbyProvincialRegionsDirect(37.55, 126.98);
+    assert.ok(nearby.length >= 1);
+    const target = nearby.find((r) => r.regionId === 'osm_rel_990101');
+    assert.ok(target);
+    assert.equal(target.boundaryGeoJson?.type, 'Polygon');
+    assert.equal(target.exactBoundaryVersion, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

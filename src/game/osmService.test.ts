@@ -779,3 +779,37 @@ test('loadNearbyProvincialRegionsDirect stitches real boundaries via batched Ove
     globalThis.fetch = originalFetch;
   }
 });
+
+test('buildDenseRealOsmGraph ingests railway=monorail (e.g. Miami Metromover) as rail edges and nodes', () => {
+  const centerLat = 25.774;
+  const centerLng = -80.190;
+  const raw = {
+    elements: [
+      { type: 'node' as const, id: 9001, lat: centerLat, lon: centerLng },
+      { type: 'node' as const, id: 9002, lat: centerLat + 0.001, lon: centerLng },
+      { type: 'node' as const, id: 9003, lat: centerLat + 0.002, lon: centerLng + 0.0005 },
+      { type: 'node' as const, id: 9004, lat: centerLat, lon: centerLng + 0.0008 },
+      { type: 'node' as const, id: 9005, lat: centerLat + 0.001, lon: centerLng + 0.0008 },
+      {
+        type: 'way' as const,
+        id: 8801,
+        tags: { railway: 'monorail', name: 'Metromover Omni Loop', layer: '1', bridge: 'yes' },
+        nodes: [9001, 9002, 9003],
+      },
+      {
+        type: 'way' as const,
+        id: 8802,
+        tags: { highway: 'primary', name: 'Biscayne Blvd' },
+        nodes: [9004, 9005],
+      },
+    ],
+  };
+
+  const graph = buildDenseRealOsmGraph(raw, '25.7733_-80.1900', centerLat, centerLng);
+  const monorailEdges = graph.osmEdges.filter((e) => e.wayName === 'Metromover Omni Loop');
+  assert.ok(monorailEdges.length >= 2, 'Should emit Metromover monorail edges');
+  assert.ok(monorailEdges.every((e) => e.mode === 'rail' && e.highwayType === 'monorail'));
+  assert.ok(graph.osmNodes.some((n) => n.id === 'osm_9001' && n.mode === 'rail'));
+  assert.ok(graph.osmNodes.some((n) => n.id === 'osm_9004' && n.mode === 'road'));
+});
+

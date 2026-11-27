@@ -102,6 +102,8 @@ import { EXACT_BOUNDARY_CACHE_VERSION } from './game/osmTileCache';
 import {
   applyRestoredGraphMarks,
   buildSummaryFromState,
+  collectMarksWithExistingState,
+  countSyntheticRestoredItems,
   countUnhydratedGraphMarks,
   DecodedImportPreview,
   deleteLocalSlotGameState,
@@ -1146,11 +1148,12 @@ export default function App() {
         startPct: number,
         endPct: number,
         labelPrefix: string
-      ) => {
-        if (chunkCoords.length === 0) return;
+      ): Promise<{ failedCount: number }> => {
+        if (chunkCoords.length === 0) return { failedCount: 0 };
         const retryQueue: Array<{ key: string; lat: number; lng: number }> = [];
         const total = chunkCoords.length;
         let done = 0;
+        let failedCount = 0;
 
         const runBatch = async (
           slice: Array<{ key: string; lat: number; lng: number }>,
@@ -1181,8 +1184,12 @@ export default function App() {
               } else {
                 retryQueue.push(pt);
               }
-            } else if (allowRetryQueue && (!res || !res.usedLiveOverpass)) {
-              retryQueue.push(pt);
+            } else if (!res || !res.usedLiveOverpass) {
+              if (allowRetryQueue) {
+                retryQueue.push(pt);
+              } else {
+                failedCount++;
+              }
             }
           }
 
@@ -1206,7 +1213,7 @@ export default function App() {
         };
 
         for (let i = 0; i < chunkCoords.length; i += 24) {
-          if (loadingSessionRef.current !== sessionId) return;
+          if (loadingSessionRef.current !== sessionId) return { failedCount };
           const slice = chunkCoords.slice(i, i + 24);
           await runBatch(slice, true);
           done += slice.length;
@@ -1218,21 +1225,25 @@ export default function App() {
         if (retryQueue.length > 0 && loadingSessionRef.current === sessionId) {
           await new Promise((r) => setTimeout(r, 200));
           for (let i = 0; i < retryQueue.length; i += 12) {
-            if (loadingSessionRef.current !== sessionId) return;
+            if (loadingSessionRef.current !== sessionId) return { failedCount };
             const slice = retryQueue.slice(i, i + 12);
             await runBatch(slice, false);
           }
         }
+        return { failedCount };
       };
 
       const localMarks = getLocalSlotGraphMarks(slotId);
       const connectedLocal = (localState.osmNodes || []).filter((n) => n.connected).length;
       const builtLocal = (localState.osmEdges || []).filter((e) => e.built).length;
+      const localSynthetic = countSyntheticRestoredItems(localState);
       pendingRestoredMarksRef.current =
         localMarks &&
         (localMarks.connectedNodeIds.size > connectedLocal ||
           localMarks.builtEdgeIds.size > builtLocal)
           ? localMarks
+          : localSynthetic.syntheticNodes > 0 || localSynthetic.syntheticEdges > 0
+          ? collectMarksWithExistingState(localState, localMarks)
           : null;
       const skeleton = getLocalSlotBuiltSkeleton(slotId);
       launchLoadedSlotState(localState, slotId, skeleton);
@@ -1247,6 +1258,13 @@ export default function App() {
           if (idbHydrated) {
             updateLoadingSession(sessionId, 45, '저장된 도로·철도 그래프 복원 완료');
             workingState = idbHydrated;
+            const idbSynthetic = countSyntheticRestoredItems(idbHydrated);
+            if (idbSynthetic.syntheticNodes > 0 || idbSynthetic.syntheticEdges > 0) {
+              pendingRestoredMarksRef.current = collectMarksWithExistingState(
+                idbHydrated,
+                pendingRestoredMarksRef.current || localMarks
+              );
+            }
             setGameState((prev) => {
               if (!prev) return prev;
               const merged = mergeHydratedGraphPreservingLiveProgress(prev, idbHydrated);
@@ -1261,6 +1279,16 @@ export default function App() {
             workingState.provincialRegions || []
           );
           if (loadingSessionRef.current !== sessionId) return;
+
+          const syntheticBefore = countSyntheticRestoredItems(workingState);
+          const hasSyntheticCorrupted =
+            syntheticBefore.syntheticNodes > 0 || syntheticBefore.syntheticEdges > 0;
+          if (hasSyntheticCorrupted && !pendingRestoredMarksRef.current) {
+            pendingRestoredMarksRef.current = collectMarksWithExistingState(
+              workingState,
+              localMarks
+            );
+          }
 
           // Collect ALL expected chunk keys from loadedOsmChunks + customBridgeEdges + viewport + city center
           const targetKeys = new Set<string>(workingState.loadedOsmChunks || []);
@@ -1289,14 +1317,18 @@ export default function App() {
 
           const representedChunks = new Set<string>();
           for (const n of workingState.osmNodes || []) {
+            if (n.label === '복원 연결점' || n.label === '복원 환승점') continue;
             representedChunks.add(chunkKeyForCoords(n.lat, n.lng));
           }
-          const missingTileKeys = Array.from(targetKeys).filter((k) => !representedChunks.has(k));
+          const missingTileKeys = hasSyntheticCorrupted
+            ? Array.from(targetKeys)
+            : Array.from(targetKeys).filter((k) => !representedChunks.has(k));
 
           const remainingMarks = pendingRestoredMarksRef.current
             ? countUnhydratedGraphMarks(workingState, pendingRestoredMarksRef.current)
             : { unhydratedNodes: 0, unhydratedEdges: 0 };
           const isGraphAlreadyComplete =
+            !hasSyntheticCorrupted &&
             (workingState.osmNodes || []).length > 0 &&
             remainingMarks.unhydratedNodes === 0 &&
             remainingMarks.unhydratedEdges === 0;
@@ -1354,24 +1386,38 @@ export default function App() {
                   return da - db;
                 });
 
+          let streamFailedCount = 0;
           if (uncachedMissingCoords.length > 0) {
             setIsLoadingOsm(true);
-            await streamMissingChunksProgressive(
+            const streamRes = await streamMissingChunksProgressive(
               sessionId,
               uncachedMissingCoords,
               62,
               96,
               '누락 도로 타일 복원 중'
             );
+            streamFailedCount = streamRes.failedCount;
           }
 
-          // Safety net if still 0 OSM nodes after tile streaming
+          // Region fallback when graph is empty OR synthetic placeholders / unhydrated marks still remain
           const afterCacheState = stateRef.current;
-          if (
+          const afterSynthetic = afterCacheState
+            ? countSyntheticRestoredItems(afterCacheState)
+            : { syntheticNodes: 0, syntheticEdges: 0 };
+          const afterRemaining =
+            afterCacheState && pendingRestoredMarksRef.current
+              ? countUnhydratedGraphMarks(afterCacheState, pendingRestoredMarksRef.current)
+              : { unhydratedNodes: 0, unhydratedEdges: 0 };
+          const needsProvinceHeal = Boolean(
             afterCacheState &&
-            (afterCacheState.osmNodes || []).length === 0 &&
-            (workingState.osmNodes || []).length === 0
-          ) {
+              (((afterCacheState.osmNodes || []).length === 0 &&
+                (workingState.osmNodes || []).length === 0) ||
+                afterSynthetic.syntheticNodes > 0 ||
+                afterSynthetic.syntheticEdges > 0 ||
+                afterRemaining.unhydratedNodes > 15)
+          );
+          let provinceHealFailed = false;
+          if (afterCacheState && needsProvinceHeal) {
             updateLoadingSession(sessionId, 82, '화면 주변 도로 데이터 수신 중');
             setIsLoadingOsm(true);
             const startRegion = afterCacheState.provincialRegions.find((r) => r.isStartingRegion);
@@ -1385,7 +1431,11 @@ export default function App() {
             let finalNodes = regionData.osmNodes;
             let finalEdges = regionData.osmEdges;
             let finalTotal = regionData.totalNodeCount ?? finalNodes.length;
-            if (finalNodes.length === 0 && !regionData.usedLiveOverpass) {
+            if (
+              finalNodes.length === 0 &&
+              !regionData.usedLiveOverpass &&
+              (afterCacheState.osmNodes || []).length === 0
+            ) {
               const fallbackChunk = await fetchOsmRoadChunk(
                 afterCacheState.startingCity.lat,
                 afterCacheState.startingCity.lng,
@@ -1395,6 +1445,9 @@ export default function App() {
               finalNodes = fallbackChunk.osmNodes;
               finalEdges = fallbackChunk.osmEdges;
               finalTotal = Math.max(finalTotal, finalNodes.length);
+            }
+            if (!regionData.usedLiveOverpass && finalNodes.length === 0) {
+              provinceHealFailed = true;
             }
             if (loadingSessionRef.current === sessionId && (finalNodes.length > 0 || finalEdges.length > 0)) {
               setGameState((prev) => {
@@ -1418,21 +1471,46 @@ export default function App() {
 
           const finalState = stateRef.current;
           if (finalState && loadingSessionRef.current === sessionId) {
-            const hadPendingMarks = Boolean(pendingRestoredMarksRef.current);
-            const healed = hadPendingMarks
-              ? applyRestoredGraphMarks(
-                  finalState,
-                  pendingRestoredMarksRef.current,
-                  { healGaps: true }
-                )
-              : finalState;
-            pendingRestoredMarksRef.current = null;
-            if (healed !== finalState) {
-              setGameState(healed);
-              saveLocalSlotGameState(slotId, healed, {
-                pendingMarks: null,
-              });
-              void saveLocalSlotGraphToIndexedDb(slotId, healed).catch(() => undefined);
+            const pendingMarks = pendingRestoredMarksRef.current;
+            const remainingFinal = countUnhydratedGraphMarks(finalState, pendingMarks);
+            const finalSynthetic = countSyntheticRestoredItems(finalState);
+            const hadAnyFetchFailure = streamFailedCount > 0 || provinceHealFailed;
+            const allMarksSatisfied =
+              remainingFinal.unhydratedNodes === 0 && remainingFinal.unhydratedEdges === 0;
+            const safeForMinorGapHeal =
+              Boolean(pendingMarks) &&
+              !hadAnyFetchFailure &&
+              remainingFinal.unhydratedNodes <= 15 &&
+              remainingFinal.unhydratedEdges <= 25 &&
+              finalSynthetic.syntheticNodes === 0;
+
+            if (allMarksSatisfied) {
+              pendingRestoredMarksRef.current = null;
+              const healedAnySynthetic =
+                hasSyntheticCorrupted &&
+                (finalSynthetic.syntheticNodes < syntheticBefore.syntheticNodes ||
+                  finalSynthetic.syntheticEdges < syntheticBefore.syntheticEdges);
+              if (healedAnySynthetic) {
+                saveLocalSlotGameState(slotId, finalState, { pendingMarks: null, forceGraphWrite: true });
+                void saveLocalSlotGraphToIndexedDb(slotId, finalState).catch(() => undefined);
+                setLocalSlots(listLocalSlotSummaries());
+              }
+            } else if (safeForMinorGapHeal && pendingMarks) {
+              const healed = applyRestoredGraphMarks(finalState, pendingMarks, { healGaps: true });
+              pendingRestoredMarksRef.current = null;
+              if (healed !== finalState) {
+                setGameState(healed);
+                saveLocalSlotGameState(slotId, healed, {
+                  pendingMarks: null,
+                  forceGraphWrite: true,
+                });
+                void saveLocalSlotGraphToIndexedDb(slotId, healed).catch(() => undefined);
+                setLocalSlots(listLocalSlotSummaries());
+              }
+            } else if (pendingMarks) {
+              // Keep pendingMarks safely in SLOT_CORE_V2 so panning or reload hydrates real 1:1 OSM data instead of synthesizing grid nodes
+              saveLocalSlotGameState(slotId, finalState, { pendingMarks });
+              void saveLocalSlotGraphToIndexedDb(slotId, finalState).catch(() => undefined);
               setLocalSlots(listLocalSlotSummaries());
             }
           }
@@ -2159,8 +2237,25 @@ export default function App() {
     if (!cur) return;
     settledEmptyChunkKeysRef.current.clear();
     chunkRetryCooldownRef.current.clear();
+    const syn = countSyntheticRestoredItems(cur);
+    if (syn.syntheticNodes > 0 || syn.syntheticEdges > 0) {
+      pendingRestoredMarksRef.current = collectMarksWithExistingState(
+        cur,
+        pendingRestoredMarksRef.current
+      );
+    }
+    const vp = viewportBoundsRef.current;
+    if (vp) {
+      const vpTiles = enumerateChunkKeysForBounds(vp, 12);
+      if (vpTiles.length > 0) {
+        handleLoadOsmChunksBatch(
+          vpTiles.map((t) => ({ lat: t.lat, lng: t.lng })),
+          { force: true, bypassCache: true }
+        );
+      }
+    }
     void loadFullStartingCityIntoState(cur.startingCity.lat, cur.startingCity.lng);
-  }, [loadFullStartingCityIntoState]);
+  }, [handleLoadOsmChunksBatch, loadFullStartingCityIntoState]);
 
   const handleOpenExpansionTab = useCallback(() => {
     setActiveModal('lines');

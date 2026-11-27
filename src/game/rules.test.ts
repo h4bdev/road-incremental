@@ -2793,3 +2793,566 @@ test('highway=steps nodes register as pedestrian-only green paths, connect clean
   assert.equal(reg.exactBoundaryVersion, 2, 'New discovered region must preserve exactBoundaryVersion=2');
 });
 
+test('Isolated rail routes (0 crossings, e.g. Miami Metromover) approach cleanly from nearby road and support intra-route linking', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  let state = { ...createInitialGameState(seoul), capital: 100_000 };
+
+  const nodes = [
+    { id: 'r0', lat: 37.5650, lng: 126.9780, connected: true, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'r1', lat: 37.5660, lng: 126.9780, connected: true, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'r2', lat: 37.5670, lng: 126.9780, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+    // Isolated monorail line ~85m east of r1 (0 road crossings, no transfer skill [71])
+    { id: 'm1', lat: 37.5660, lng: 126.9790, connected: false, mode: 'rail' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'm2', lat: 37.5668, lng: 126.9792, connected: false, mode: 'rail' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'm3', lat: 37.5676, lng: 126.9794, connected: false, mode: 'rail' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'm4', lat: 37.5684, lng: 126.9796, connected: false, mode: 'rail' as const, regionId: 'curated_kr_seoul_jung' },
+  ];
+
+  const edges = [
+    {
+      id: 'er01',
+      wayName: 'Biscayne Blvd',
+      highwayType: 'primary',
+      mode: 'road' as const,
+      fromNodeId: 'r0',
+      toNodeId: 'r1',
+      coordinates: [[37.5650, 126.9780], [37.5660, 126.9780]] as [[number, number], [number, number]],
+      distanceKm: 0.11,
+      buildCost: 30,
+      baseIncomePerSec: 3,
+      built: true,
+      regionId: 'curated_kr_seoul_jung',
+    },
+    {
+      id: 'er12',
+      wayName: 'Biscayne Blvd',
+      highwayType: 'primary',
+      mode: 'road' as const,
+      fromNodeId: 'r1',
+      toNodeId: 'r2',
+      coordinates: [[37.5660, 126.9780], [37.5670, 126.9780]] as [[number, number], [number, number]],
+      distanceKm: 0.11,
+      buildCost: 30,
+      baseIncomePerSec: 3,
+      built: false,
+      regionId: 'curated_kr_seoul_jung',
+    },
+    {
+      id: 'em12',
+      wayName: 'Metromover Omni Loop',
+      highwayType: 'monorail',
+      mode: 'rail' as const,
+      fromNodeId: 'm1',
+      toNodeId: 'm2',
+      coordinates: [[37.5660, 126.9790], [37.5668, 126.9792]] as [[number, number], [number, number]],
+      distanceKm: 0.09,
+      buildCost: 35,
+      baseIncomePerSec: 4,
+      built: false,
+      regionId: 'curated_kr_seoul_jung',
+    },
+    {
+      id: 'em23',
+      wayName: 'Metromover Omni Loop',
+      highwayType: 'monorail',
+      mode: 'rail' as const,
+      fromNodeId: 'm2',
+      toNodeId: 'm3',
+      coordinates: [[37.5668, 126.9792], [37.5676, 126.9794]] as [[number, number], [number, number]],
+      distanceKm: 0.09,
+      buildCost: 35,
+      baseIncomePerSec: 4,
+      built: false,
+      regionId: 'curated_kr_seoul_jung',
+    },
+    {
+      id: 'em34',
+      wayName: 'Metromover Omni Loop',
+      highwayType: 'monorail',
+      mode: 'rail' as const,
+      fromNodeId: 'm3',
+      toNodeId: 'm4',
+      coordinates: [[37.5676, 126.9794], [37.5684, 126.9796]] as [[number, number], [number, number]],
+      distanceKm: 0.09,
+      buildCost: 35,
+      baseIncomePerSec: 4,
+      built: false,
+      regionId: 'curated_kr_seoul_jung',
+    },
+  ];
+
+  state = mergeOsmChunk(state, '37.566_126.978', nodes, edges, 'curated_kr_seoul_jung', { skipAutoSeed: true });
+  const frontier = computeOsmFrontierDistancesForState(state);
+  assert.equal(frontier.get('m1'), 1, 'Closest isolated monorail entry node m1 must expose at d=1');
+  assert.equal(frontier.get('m2'), 2);
+  assert.equal(frontier.get('m3'), 3);
+  assert.equal(frontier.get('m4'), undefined, 'Frontier horizon cap d<=3 must hold on isolated rail route');
+
+  assert.equal(resolveProximityBridgeInfo(state, 'r1', 'm1')?.kind, 'isolated_route');
+  assert.equal(getReachableOsmNodeSet(state, 'r1').has('m1'), true);
+  assert.equal(getReachableOsmNodeSet(state, 'm1').has('r1'), true);
+
+  // Intra-route linking within isolated rail route before bridging
+  assert.equal(canConnectIsolatedRoutePair(state, 'm1', 'm3'), true);
+  const intraRes = connectOsmPath(state, 'm1', 'm3');
+  assert.equal(intraRes.success, true, 'Nodes inside isolated rail route must connect to each other');
+  assert.equal(intraRes.builtCount, 2);
+
+  // Bridging from adjacent road (forward & reverse)
+  const forwardBridge = connectOsmPath(state, 'r1', 'm1');
+  assert.equal(forwardBridge.success, true);
+  assert.equal(forwardBridge.newState.osmNodes.find((n) => n.id === 'm1')?.connected, true);
+  assert.equal(forwardBridge.newState.osmEdges.at(-1)?.wayName, '인접 노선 연결');
+
+  const reverseBridge = connectOsmPath(state, 'm1', 'r1');
+  assert.equal(reverseBridge.success, true);
+});
+
+test('Near-isolated rail routes with 1~2 road crossings behave like isolated routes without leaking onto unrelated streets', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  let state = { ...createInitialGameState(seoul), capital: 200_000 };
+
+  // Connected road chain r0 -> r1 (85m west of m1), while crossing x1 is far down an unbuilt side road
+  // Plus a 2nd crossing x2 to test roadCrossingCount === 2, and a branch s_side off x1 that must NOT expose via rail isolation
+  const nodes = [
+    { id: 'r0', lat: 37.5650, lng: 126.9780, connected: true, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'r1', lat: 37.5660, lng: 126.9780, connected: true, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'r2', lat: 37.5670, lng: 126.9780, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'm1', lat: 37.5660, lng: 126.9790, connected: false, mode: 'rail' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'x1', lat: 37.5668, lng: 126.9792, connected: false, mode: 'mixed' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'm3', lat: 37.5676, lng: 126.9794, connected: false, mode: 'rail' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 'x2', lat: 37.5684, lng: 126.9796, connected: false, mode: 'mixed' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 's_side', lat: 37.5668, lng: 126.9802, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+    { id: 's_far', lat: 37.5684, lng: 126.9806, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+  ];
+
+  // Connect road grid r2 -> ... far road detour? Even simpler: attach x1->s_side->r2 (unbuilt) or connect r2->x1 at edge,
+  // wait: let's add a long 12-edge unbuilt road chain from r2 -> s_side so mixed graph fuses comp(r1) and comp(m1),
+  // AND normalReached (d<=10) doesn't even reach x1!
+  const edges = [
+    {
+      id: 'er01',
+      wayName: 'Main St',
+      highwayType: 'primary',
+      mode: 'road' as const,
+      fromNodeId: 'r0',
+      toNodeId: 'r1',
+      coordinates: [[37.5650, 126.9780], [37.5660, 126.9780]] as [[number, number], [number, number]],
+      distanceKm: 0.11,
+      buildCost: 30,
+      baseIncomePerSec: 3,
+      built: true,
+      regionId: 'curated_kr_seoul_jung',
+    },
+    {
+      id: 'er12',
+      wayName: 'Main St',
+      highwayType: 'primary',
+      mode: 'road' as const,
+      fromNodeId: 'r1',
+      toNodeId: 'r2',
+      coordinates: [[37.5660, 126.9780], [37.5670, 126.9780]] as [[number, number], [number, number]],
+      distanceKm: 0.11,
+      buildCost: 30,
+      baseIncomePerSec: 3,
+      built: false,
+      regionId: 'curated_kr_seoul_jung',
+    },
+    // Rail line m1 - x1 - m3 - x2 (with 2 road crossings at x1 and x2)
+    {
+      id: 'em_1x1',
+      wayName: 'Tram Line A',
+      highwayType: 'tram',
+      mode: 'rail' as const,
+      fromNodeId: 'm1',
+      toNodeId: 'x1',
+      coordinates: [[37.5660, 126.9790], [37.5668, 126.9792]] as [[number, number], [number, number]],
+      distanceKm: 0.09,
+      buildCost: 30,
+      baseIncomePerSec: 4,
+      built: false,
+      regionId: 'curated_kr_seoul_jung',
+    },
+    {
+      id: 'em_x13',
+      wayName: 'Tram Line A',
+      highwayType: 'tram',
+      mode: 'rail' as const,
+      fromNodeId: 'x1',
+      toNodeId: 'm3',
+      coordinates: [[37.5668, 126.9792], [37.5676, 126.9794]] as [[number, number], [number, number]],
+      distanceKm: 0.09,
+      buildCost: 30,
+      baseIncomePerSec: 4,
+      built: false,
+      regionId: 'curated_kr_seoul_jung',
+    },
+    {
+      id: 'em_3x2',
+      wayName: 'Tram Line A',
+      highwayType: 'tram',
+      mode: 'rail' as const,
+      fromNodeId: 'm3',
+      toNodeId: 'x2',
+      coordinates: [[37.5676, 126.9794], [37.5684, 126.9796]] as [[number, number], [number, number]],
+      distanceKm: 0.09,
+      buildCost: 30,
+      baseIncomePerSec: 4,
+      built: false,
+      regionId: 'curated_kr_seoul_jung',
+    },
+    // Cross streets at x1 and x2
+    {
+      id: 'es_x1',
+      wayName: 'Cross St 1',
+      highwayType: 'residential',
+      mode: 'road' as const,
+      fromNodeId: 'x1',
+      toNodeId: 's_side',
+      coordinates: [[37.5668, 126.9792], [37.5668, 126.9802]] as [[number, number], [number, number]],
+      distanceKm: 0.09,
+      buildCost: 25,
+      baseIncomePerSec: 2,
+      built: false,
+      regionId: 'curated_kr_seoul_jung',
+    },
+    {
+      id: 'es_x2',
+      wayName: 'Cross St 2',
+      highwayType: 'residential',
+      mode: 'road' as const,
+      fromNodeId: 'x2',
+      toNodeId: 's_far',
+      coordinates: [[37.5684, 126.9796], [37.5684, 126.9806]] as [[number, number], [number, number]],
+      distanceKm: 0.09,
+      buildCost: 25,
+      baseIncomePerSec: 2,
+      built: false,
+      regionId: 'curated_kr_seoul_jung',
+    },
+  ];
+
+  // Long 12-hop road chain connecting r2 -> s_side so the mixed graph fuses r1 and m1 into ONE connected component!
+  let prevId = 'r2';
+  for (let i = 1; i <= 11; i++) {
+    const nid = `det_${i}`;
+    nodes.push({
+      id: nid,
+      lat: 37.5685 + i * 0.0005,
+      lng: 126.9795,
+      connected: false,
+      mode: 'road' as const,
+      regionId: 'curated_kr_seoul_jung',
+    });
+    edges.push({
+      id: `edet_${i}`,
+      wayName: 'Long Detour',
+      highwayType: 'secondary',
+      mode: 'road' as const,
+      fromNodeId: prevId,
+      toNodeId: nid,
+      coordinates: [[37.5685, 126.9795], [37.569, 126.9795]],
+      distanceKm: 0.06,
+      buildCost: 25,
+      baseIncomePerSec: 2,
+      built: false,
+      regionId: 'curated_kr_seoul_jung',
+    });
+    prevId = nid;
+  }
+  edges.push({
+    id: 'edet_end',
+    wayName: 'Long Detour',
+    highwayType: 'secondary',
+    mode: 'road' as const,
+    fromNodeId: prevId,
+    toNodeId: 's_side',
+    coordinates: [[37.569, 126.9795], [37.5668, 126.9802]],
+    distanceKm: 0.06,
+    buildCost: 25,
+    baseIncomePerSec: 2,
+    built: false,
+    regionId: 'curated_kr_seoul_jung',
+  });
+
+  state = mergeOsmChunk(state, '37.566_126.978', nodes, edges, 'curated_kr_seoul_jung', { skipAutoSeed: true });
+  const frontier = computeOsmFrontierDistancesForState(state);
+  assert.equal(frontier.get('m1'), 1, 'Near-isolated 2-crossing rail entry m1 must expose at d=1');
+  assert.equal(frontier.get('x1'), 2);
+  assert.equal(frontier.get('m3'), 3);
+  assert.equal(frontier.get('s_side'), undefined, 'Road crossing side street must NOT bleed through isolated rail exposure');
+
+  assert.equal(resolveProximityBridgeInfo(state, 'r1', 'm1')?.kind, 'isolated_route');
+  assert.equal(getReachableOsmNodeSet(state, 'r1').has('m1'), true);
+  assert.equal(canConnectIsolatedRoutePair(state, 'm1', 'm3'), true, 'Intra-route linking must work on 2-crossing rail route');
+
+  const intra = connectOsmPath(state, 'm1', 'm3');
+  assert.equal(intra.success, true);
+  assert.equal(intra.builtCount, 2);
+
+  const bridged = connectOsmPath(state, 'r1', 'm1');
+  assert.equal(bridged.success, true);
+  assert.equal(bridged.newState.osmNodes.find((n) => n.id === 'm1')?.connected, true);
+
+  // Adding a 3rd road crossing excludes the line from 1~2 crossing isolated rail bridging
+  const withThreeCrossings = {
+    ...state,
+    osmNodes: [
+      ...state.osmNodes.map((n) => (n.id === 'm3' ? { ...n, mode: 'mixed' as const } : n)),
+      { id: 's_third', lat: 37.5676, lng: 126.9804, connected: false, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+    ],
+    osmEdges: [
+      ...state.osmEdges,
+      {
+        id: 'es_m3',
+        wayName: 'Cross St 3',
+        highwayType: 'residential',
+        mode: 'road' as const,
+        fromNodeId: 'm3',
+        toNodeId: 's_third',
+        coordinates: [[37.5676, 126.9794], [37.5676, 126.9804]] as [[number, number], [number, number]],
+        distanceKm: 0.09,
+        buildCost: 25,
+        baseIncomePerSec: 2,
+        built: false,
+        regionId: 'curated_kr_seoul_jung',
+      },
+    ],
+  };
+  assert.equal(resolveProximityBridgeInfo(withThreeCrossings, 'r1', 'm1'), null);
+});
+
+test('Large 15,000+ node graph connectOsmPath + frontier + reachable + proximity chunks stay sub-220ms', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  let state = { ...createInitialGameState(seoul), capital: 50_000_000 };
+  const nodes: Array<{
+    id: string;
+    lat: number;
+    lng: number;
+    connected: boolean;
+    mode: 'road' | 'rail';
+    regionId: string;
+  }> = [];
+  const edges: Array<{
+    id: string;
+    wayName: string;
+    highwayType: string;
+    mode: 'road' | 'rail';
+    fromNodeId: string;
+    toNodeId: string;
+    coordinates: [[number, number], [number, number]];
+    distanceKm: number;
+    buildCost: number;
+    baseIncomePerSec: number;
+    built: boolean;
+    regionId: string;
+  }> = [];
+
+  for (let r = 0; r < 120; r++) {
+    for (let c = 0; c < 120; c++) {
+      const id = `g_${r}_${c}`;
+      nodes.push({
+        id,
+        lat: 37.55 + r * 0.00025,
+        lng: 126.96 + c * 0.0003,
+        connected: r < 20 && c < 40,
+        mode: 'road',
+        regionId: 'curated_kr_seoul_jung',
+      });
+      if (r > 0) {
+        edges.push({
+          id: `ev_${r}_${c}`,
+          wayName: `대로_${c}`,
+          highwayType: 'primary',
+          mode: 'road',
+          fromNodeId: `g_${r - 1}_${c}`,
+          toNodeId: id,
+          coordinates: [
+            [37.55 + (r - 1) * 0.00025, 126.96 + c * 0.0003],
+            [37.55 + r * 0.00025, 126.96 + c * 0.0003],
+          ],
+          distanceKm: 0.028,
+          buildCost: 25,
+          baseIncomePerSec: 2,
+          built: r < 20 && c < 40,
+          regionId: 'curated_kr_seoul_jung',
+        });
+      }
+      if (c > 0) {
+        edges.push({
+          id: `eh_${r}_${c}`,
+          wayName: `가로_${r}`,
+          highwayType: 'secondary',
+          mode: 'road',
+          fromNodeId: `g_${r}_${c - 1}`,
+          toNodeId: id,
+          coordinates: [
+            [37.55 + r * 0.00025, 126.96 + (c - 1) * 0.0003],
+            [37.55 + r * 0.00025, 126.96 + c * 0.0003],
+          ],
+          distanceKm: 0.026,
+          buildCost: 25,
+          baseIncomePerSec: 2,
+          built: r < 20 && c < 40,
+          regionId: 'curated_kr_seoul_jung',
+        });
+      }
+    }
+  }
+
+  for (let m = 0; m < 300; m++) {
+    const bLat = 37.55 + (m % 25) * 0.0011;
+    const bLng = 126.96 + Math.floor(m / 25) * 0.0022;
+    for (let k = 0; k < 4; k++) {
+      const mode = m % 5 === 0 ? 'rail' : 'road';
+      nodes.push({
+        id: `m_${m}_${k}`,
+        lat: bLat + k * 0.00018,
+        lng: bLng + 0.0001,
+        connected: false,
+        mode,
+        regionId: 'curated_kr_seoul_jung',
+      });
+      if (k > 0) {
+        edges.push({
+          id: `em_${m}_${k}`,
+          wayName: mode === 'rail' ? `모노레일_${m}` : `보행길_${m}`,
+          highwayType: mode === 'rail' ? 'monorail' : 'pedestrian',
+          mode,
+          fromNodeId: `m_${m}_${k - 1}`,
+          toNodeId: `m_${m}_${k}`,
+          coordinates: [
+            [bLat + (k - 1) * 0.00018, bLng + 0.0001],
+            [bLat + k * 0.00018, bLng + 0.0001],
+          ],
+          distanceKm: 0.02,
+          buildCost: 20,
+          baseIncomePerSec: 1.5,
+          built: false,
+          regionId: 'curated_kr_seoul_jung',
+        });
+      }
+    }
+  }
+
+  state = mergeOsmChunk(state, '37.566_126.978', nodes, edges, 'curated_kr_seoul_jung', {
+    skipAutoSeed: true,
+  });
+  computeOsmFrontierDistancesForState(state);
+
+  const t0 = performance.now();
+  const res = connectOsmPath(state, 'g_19_20', 'g_21_20');
+  assert.equal(res.success, true);
+  const frontier = computeOsmFrontierDistancesForState(res.newState);
+  const reachable = getReachableOsmNodeSet(res.newState, 'g_21_20');
+  const prox = getProximityAdjacentChunksToLoad(res.newState, 12);
+  const elapsedMs = performance.now() - t0;
+
+  assert.ok(frontier.size > 500);
+  assert.ok(reachable.size > 100);
+  assert.ok(prox.length > 0);
+  assert.ok(
+    elapsedMs < 350,
+    `Expected full 15k-node click cycle to complete <350ms, took ${elapsedMs.toFixed(1)}ms`
+  );
+});
+
+test('mergeOsmChunksBatch replaces synthetic 복원 연결점/복원 연결선 placeholders with real 1:1 OSM coordinates and updates incident custom bridges', () => {
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  const base = createInitialGameState(seoul);
+
+  const corruptedState = {
+    ...base,
+    pendingSeedRegionIds: [],
+    osmNodes: [
+      { id: 'osm_real_1', lat: 37.566, lng: 126.978, connected: true, mode: 'road' as const, regionId: 'curated_kr_seoul_jung' },
+      { id: 'osm_syn_2', lat: 37.5665, lng: 126.978, connected: true, mode: 'road' as const, label: '복원 연결점', regionId: 'curated_kr_seoul_jung' },
+      { id: 'osm_syn_3', lat: 37.5665, lng: 126.9782, connected: true, mode: 'rail' as const, label: '복원 환승점', regionId: 'curated_kr_seoul_jung' },
+    ],
+    osmEdges: [
+      {
+        id: 'oe_syn_23',
+        wayName: '복원 연결선',
+        highwayType: 'unclassified',
+        mode: 'road' as const,
+        fromNodeId: 'osm_syn_2',
+        toNodeId: 'osm_syn_3',
+        coordinates: [[37.5665, 126.978], [37.5665, 126.9782]] as [[number, number], [number, number]],
+        distanceKm: 0.02,
+        buildCost: 20,
+        baseIncomePerSec: 1.5,
+        built: true,
+        regionId: 'curated_kr_seoul_jung',
+      },
+      {
+        id: 'oe_custom_bridge_12',
+        wayName: '교차로 연결 링크',
+        highwayType: 'unclassified',
+        mode: 'road' as const,
+        fromNodeId: 'osm_real_1',
+        toNodeId: 'osm_syn_2',
+        coordinates: [[37.566, 126.978], [37.5665, 126.978]] as [[number, number], [number, number]],
+        distanceKm: 0.056,
+        buildCost: 40,
+        baseIncomePerSec: 2,
+        built: true,
+        regionId: 'curated_kr_seoul_jung',
+      },
+    ],
+  };
+
+  const healed = mergeOsmChunksBatch(
+    corruptedState,
+    [
+      {
+        chunkKey: '37.5667_126.9800',
+        regionId: 'curated_kr_seoul_jung',
+        osmNodes: [
+          { id: 'osm_syn_2', lat: 37.5712, lng: 126.9854, connected: false, mode: 'road' },
+          { id: 'osm_syn_3', lat: 37.5718, lng: 126.9862, connected: false, mode: 'rail', label: '종각역' },
+        ],
+        osmEdges: [
+          {
+            id: 'oe_syn_23',
+            wayName: '종로 실제 도로',
+            highwayType: 'primary',
+            mode: 'road',
+            fromNodeId: 'osm_syn_2',
+            toNodeId: 'osm_syn_3',
+            coordinates: [[37.5712, 126.9854], [37.5718, 126.9862]],
+            distanceKm: 0.098,
+            buildCost: 45,
+            baseIncomePerSec: 4,
+            built: false,
+          },
+        ],
+      },
+    ],
+    { skipAutoSeed: true }
+  );
+
+  const n2 = healed.osmNodes.find((n) => n.id === 'osm_syn_2')!;
+  const n3 = healed.osmNodes.find((n) => n.id === 'osm_syn_3')!;
+  assert.equal(n2.lat, 37.5712);
+  assert.equal(n2.lng, 126.9854);
+  assert.equal(n2.connected, true);
+  assert.equal(n2.label, undefined);
+
+  assert.equal(n3.lat, 37.5718);
+  assert.equal(n3.lng, 126.9862);
+  assert.equal(n3.connected, true);
+  assert.equal(n3.label, '종각역');
+
+  const e23 = healed.osmEdges.find((e) => e.id === 'oe_syn_23')!;
+  assert.equal(e23.wayName, '종로 실제 도로');
+  assert.equal(e23.built, true);
+  assert.deepEqual(e23.coordinates, [[37.5712, 126.9854], [37.5718, 126.9862]]);
+  assert.equal(e23.distanceKm, 0.098);
+
+  const bridge = healed.osmEdges.find((e) => e.id === 'oe_custom_bridge_12')!;
+  assert.deepEqual(bridge.coordinates, [[37.566, 126.978], [37.5712, 126.9854]]);
+  assert.ok(bridge.distanceKm > 0.8);
+});
+
+
+

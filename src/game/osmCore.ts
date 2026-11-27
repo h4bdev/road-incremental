@@ -98,7 +98,15 @@ const DRIVABLE_HIGHWAYS = new Set([
   'steps',
 ]);
 
-const RAILWAYS = new Set(['rail', 'subway', 'light_rail', 'tram', 'narrow_gauge']);
+const RAILWAYS = new Set([
+  'rail',
+  'subway',
+  'light_rail',
+  'tram',
+  'narrow_gauge',
+  'monorail',
+  'funicular',
+]);
 
 const OVERPASS_ENDPOINTS_SERVER = [
   'https://overpass-api.de/api/interpreter',
@@ -2339,8 +2347,8 @@ export async function loadOsmProvinceDirect(
 
       // Full-county query: load ALL drivable, residential, service, pedestrian, and rail ways in the county at once
       const fullAllRoadsFilter = region?.relId
-        ? `area(${3600000000 + region.relId})->.city;(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street|service|pedestrian|track|road|footway|path|cycleway|steps).*$"](area.city);way["railway"~"^(rail|subway|light_rail|tram|narrow_gauge)$"](area.city););`
-        : `(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street|service|pedestrian|track|road|footway|path|cycleway|steps).*$"](${cityBoxStr});way["railway"~"^(rail|subway|light_rail|tram|narrow_gauge)$"](${cityBoxStr}););`;
+        ? `area(${3600000000 + region.relId})->.city;(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street|service|pedestrian|track|road|footway|path|cycleway|steps).*$"](area.city);way["railway"~"^(rail|subway|light_rail|tram|narrow_gauge|monorail|funicular)$"](area.city););`
+        : `(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street|service|pedestrian|track|road|footway|path|cycleway|steps).*$"](${cityBoxStr});way["railway"~"^(rail|subway|light_rail|tram|narrow_gauge|monorail|funicular)$"](${cityBoxStr}););`;
 
       let currentPct = 30;
       const bump = (pct: number, lbl?: string) => {
@@ -2441,8 +2449,8 @@ export async function loadOsmProvinceDirect(
       } else {
         // Fallback for giant dense counties when all-roads query exceeds budget: arterial + residential full county + 3x3 dense tiles
         const majorResFilter = region?.relId
-          ? `area(${3600000000 + region.relId})->.city;(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street).*$"](area.city);way["railway"~"^(rail|subway|light_rail|tram)$"](area.city););`
-          : `(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street).*$"](${cityBoxStr});way["railway"~"^(rail|subway|light_rail|tram)$"](${cityBoxStr}););`;
+          ? `area(${3600000000 + region.relId})->.city;(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street).*$"](area.city);way["railway"~"^(rail|subway|light_rail|tram|narrow_gauge|monorail|funicular)$"](area.city););`
+          : `(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street).*$"](${cityBoxStr});way["railway"~"^(rail|subway|light_rail|tram|narrow_gauge|monorail|funicular)$"](${cityBoxStr}););`;
         try {
           const majorRaw = await fetchOverpassQuery(
             `[out:json][timeout:12];${majorResFilter}out body;>;out skel qt;`,

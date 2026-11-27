@@ -463,6 +463,51 @@ export function countUnhydratedGraphMarks(
   return { unhydratedNodes, unhydratedEdges };
 }
 
+export function countSyntheticRestoredItems(state: GameState): {
+  syntheticNodes: number;
+  syntheticEdges: number;
+} {
+  let syntheticNodes = 0;
+  for (const n of state.osmNodes || []) {
+    if (n.label === '복원 연결점' || n.label === '복원 환승점') {
+      syntheticNodes++;
+    }
+  }
+  let syntheticEdges = 0;
+  for (const e of state.osmEdges || []) {
+    if (e.wayName === '복원 연결선') {
+      syntheticEdges++;
+    }
+  }
+  return { syntheticNodes, syntheticEdges };
+}
+
+export function collectMarksWithExistingState(
+  state: GameState,
+  baseMarks?: RestoredGraphMarks | null
+): RestoredGraphMarks {
+  const connectedNodeIds = new Set<string>(baseMarks?.connectedNodeIds || []);
+  for (const n of state.osmNodes || []) {
+    if (n.connected) connectedNodeIds.add(n.id);
+  }
+  const builtEdgeIds = new Set<string>(baseMarks?.builtEdgeIds || []);
+  const customById = new Map<string, OsmEdge>();
+  for (const ce of baseMarks?.customBridgeEdges || []) {
+    customById.set(ce.id, ce);
+  }
+  for (const e of state.osmEdges || []) {
+    if (e.built) builtEdgeIds.add(e.id);
+    if (e.id.startsWith('oe_custom_') && !customById.has(e.id)) {
+      customById.set(e.id, e);
+    }
+  }
+  return {
+    connectedNodeIds,
+    builtEdgeIds,
+    customBridgeEdges: Array.from(customById.values()),
+  };
+}
+
 function packLocalCoreV2(
   state: GameState,
   pendingMarks?: RestoredGraphMarks | null
@@ -542,6 +587,15 @@ function packLocalCoreV2(
     totalOsmEdgesBuilt: Math.max(state.stats?.totalOsmEdgesBuilt || 0, builtEdgeIds.length),
   };
 
+  const chunkSet = new Set<string>(state.loadedOsmChunks || []);
+  for (let i = 0; i < osmNodes.length; i++) {
+    const n = osmNodes[i];
+    if (n.connected && n.label !== '복원 연결점' && n.label !== '복원 환승점') {
+      chunkSet.add(quantizeChunkKeyForSave(n.lat, n.lng));
+    }
+  }
+  const loadedOsmChunks = Array.from(chunkSet).slice(-1200);
+
   return {
     v: 2,
     capital: clampFinite(state.capital, 1200, 0),
@@ -552,7 +606,7 @@ function packLocalCoreV2(
     settings: state.settings,
     skillsMap,
     unlockedAchievementIds,
-    loadedOsmChunks: state.loadedOsmChunks || [],
+    loadedOsmChunks,
     loadedOsmRegions: state.loadedOsmRegions || [],
     pendingSeedRegionIds: state.pendingSeedRegionIds || [],
     completedOsmWays: state.completedOsmWays || [],
@@ -2421,31 +2475,67 @@ export function applyRestoredGraphMarks(
       } else if (parentAnchorPos.size > 0) {
         // Component has no direct missing-edge anchor, but has osm_sub parent coords
         const seeds = Array.from(parentAnchorPos.entries());
-        const baseLat = seeds[0][1].lat;
-        const baseLng = seeds[0][1].lng;
-        for (let i = 0; i < compMissing.length; i++) {
-          const mId = compMissing[i];
-          const pInfo = parentAnchorPos.get(mId);
-          compPos.set(mId, {
-            lat: pInfo ? pInfo.lat : baseLat + (i % 8) * 0.0002,
-            lng: pInfo ? pInfo.lng : baseLng + Math.floor(i / 8) * 0.0002,
-          });
-          compRegion.set(mId, pInfo?.regionId || seeds[0][1].regionId || defaultRegionId);
-          compMode.set(mId, pInfo?.mode || seeds[0][1].mode || 'road');
+        const bfsQueue: string[] = [];
+        const bfsSeen = new Set<string>();
+        for (const [mId, pInfo] of seeds) {
+          compPos.set(mId, { lat: pInfo.lat, lng: pInfo.lng });
+          compRegion.set(mId, pInfo.regionId || defaultRegionId);
+          compMode.set(mId, pInfo.mode);
+          bfsSeen.add(mId);
+          bfsQueue.push(mId);
+        }
+        for (let head = 0; head < bfsQueue.length; head++) {
+          const curr = bfsQueue[head];
+          const currPos = compPos.get(curr)!;
+          const nbrs = missingAdj.get(curr);
+          if (!nbrs) continue;
+          let branchIdx = 0;
+          for (const nbr of nbrs) {
+            if (!missingNodeIds.has(nbr) || bfsSeen.has(nbr)) continue;
+            bfsSeen.add(nbr);
+            const angle = (head * 0.65 + branchIdx * 1.1) % (Math.PI * 2);
+            compPos.set(nbr, {
+              lat: currPos.lat + Math.sin(angle) * 0.00012,
+              lng: currPos.lng + Math.cos(angle) * 0.00012,
+            });
+            compRegion.set(nbr, compRegion.get(curr) || defaultRegionId);
+            compMode.set(nbr, compMode.get(curr) || 'road');
+            bfsQueue.push(nbr);
+            branchIdx++;
+          }
         }
       } else {
-        // Truly unanchored orphan component: cluster cleanly locally instead of scattering across grid
+        // Truly unanchored orphan component: walk locally via BFS tree so edges stay short without grid-wrap sawtooth jumps
         orphanCompCounter++;
-        const baseLat = anchorLat + (orphanCompCounter % 32) * 0.00025;
-        const baseLng = anchorLng + Math.floor(orphanCompCounter / 32) * 0.00025;
-        for (let i = 0; i < compMissing.length; i++) {
-          const mId = compMissing[i];
-          compPos.set(mId, {
-            lat: baseLat + (i % 10) * 0.0002,
-            lng: baseLng + Math.floor(i / 10) * 0.0002,
-          });
-          compRegion.set(mId, defaultRegionId);
-          compMode.set(mId, 'road');
+        const ringAngle = orphanCompCounter * 2.39996;
+        const ringR = 0.00015 * Math.sqrt(orphanCompCounter);
+        const baseLat = anchorLat + Math.sin(ringAngle) * ringR;
+        const baseLng = anchorLng + Math.cos(ringAngle) * ringR;
+        const rootId = compMissing[0];
+        compPos.set(rootId, { lat: baseLat, lng: baseLng });
+        compRegion.set(rootId, defaultRegionId);
+        compMode.set(rootId, 'road');
+        const bfsQueue = [rootId];
+        const bfsSeen = new Set<string>([rootId]);
+        for (let head = 0; head < bfsQueue.length; head++) {
+          const curr = bfsQueue[head];
+          const currPos = compPos.get(curr)!;
+          const nbrs = missingAdj.get(curr);
+          if (!nbrs) continue;
+          let branchIdx = 0;
+          for (const nbr of nbrs) {
+            if (!missingNodeIds.has(nbr) || bfsSeen.has(nbr)) continue;
+            bfsSeen.add(nbr);
+            const angle = (head * 0.55 + branchIdx * 1.25) % (Math.PI * 2);
+            compPos.set(nbr, {
+              lat: currPos.lat + Math.sin(angle) * 0.00009,
+              lng: currPos.lng + Math.cos(angle) * 0.00009,
+            });
+            compRegion.set(nbr, defaultRegionId);
+            compMode.set(nbr, 'road');
+            bfsQueue.push(nbr);
+            branchIdx++;
+          }
         }
       }
 
@@ -2522,8 +2612,10 @@ export function applyRestoredGraphMarks(
         nodeMode = p.mode === 'rail' ? 'rail' : 'road';
       } else {
         isolatedCounter++;
-        sLat = anchorLat + (isolatedCounter % 50) * 0.0002;
-        sLng = anchorLng + Math.floor(isolatedCounter / 50) * 0.0002;
+        const angle = isolatedCounter * 2.39996;
+        const radius = 0.00005 * Math.sqrt(isolatedCounter);
+        sLat = anchorLat + Math.sin(angle) * radius;
+        sLng = anchorLng + Math.cos(angle) * radius;
       }
       nodeMap.set(nid, {
         id: nid,

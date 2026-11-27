@@ -1959,6 +1959,9 @@ export function scopeGameStateToStartingCity(
       : [],
     provincialRegions,
     pendingSeedRegionIds,
+    completedOsmWays: (state.completedOsmWays || []).filter(
+      (w) => !w.includes('복원 연결선')
+    ),
     achievements,
     minigames: backfillMinigamesState(state.minigames),
     stats: {
@@ -2353,6 +2356,7 @@ export const CUSTOM_BRIDGE_WAY_NAMES = new Set([
   '복합 환승 직결',
   '인접 시 경계 직결 링크',
   '인접 노선 연결',
+  '복원 연결선',
 ]);
 
 const ISOLATED_PIONEER_HIGHWAYS = new Set([
@@ -2367,6 +2371,8 @@ const ISOLATED_PIONEER_HIGHWAYS = new Set([
   'road',
 ]);
 
+const MINOR_BRIDGE_PROXIMITY_KM = 0.45;
+
 interface IsolatedBridgeCacheEntry {
   allowedTargetsByComp: Map<number, Set<string>>;
   allowedTargetsByOrigin: Map<string, Set<string>>;
@@ -2378,6 +2384,12 @@ interface StaticComponentsInfo {
   compNodeIdsById: Map<number, string[]>;
   compUnlockedEdgeDegreeSum: Map<number, number>;
   compMinorCandidateIds: number[];
+  compBboxById: Map<number, [number, number, number, number]>;
+  railCompIdByNode: Map<string, number>;
+  railCompNodeIdsById: Map<number, string[]>;
+  railMinorCandidateIds: number[];
+  railCompBboxById: Map<number, [number, number, number, number]>;
+  staticUnlockedGrid: Map<number, OsmNode[]>;
 }
 
 interface OsmStaticTopology {
@@ -2396,9 +2408,18 @@ interface OsmStaticTopology {
 interface UnlockedOsmTopology {
   compIdByNode: Map<string, number>;
   compNodesById: Map<number, OsmNode[]>;
+  compNodeIdsById: Map<number, string[]>;
+  compBboxById: Map<number, [number, number, number, number]>;
+  compHasUnbuiltStatic: Map<number, boolean>;
   deadEndOrigins: Set<string>;
   isolatedMinorComps: Set<number>;
   connectedCompIds: Set<number>;
+  railCompIdByNode: Map<string, number>;
+  railCompNodesById: Map<number, OsmNode[]>;
+  railCompBboxById: Map<number, [number, number, number, number]>;
+  isolatedRailComps: Set<number>;
+  connectedRailCompIds: Set<number>;
+  staticUnlockedGrid: Map<number, OsmNode[]>;
   frontierCache: Map<string, Map<string, number>>;
   isolatedBridgeCache: Map<string, IsolatedBridgeCacheEntry>;
   unseededIslandNodeIds?: Set<string>;
@@ -2622,6 +2643,27 @@ function getOsmGraphIndex(osmNodes: OsmNode[], osmEdges: OsmEdge[]): OsmGraphInd
 
 export function getBuiltOsmEdgesForState(state: GameState): OsmEdge[] {
   return getOsmGraphIndex(state.osmNodes || [], state.osmEdges || []).builtEdges;
+}
+
+export function getOsmEdgeById(state: GameState, edgeId: string): OsmEdge | undefined {
+  return getOsmGraphIndex(state.osmNodes || [], state.osmEdges || []).edgeById.get(edgeId);
+}
+
+export function getOsmGraphSummaryForState(state: GameState): {
+  nodeById: Map<string, OsmNode>;
+  edgeById: Map<string, OsmEdge>;
+  connectedNodes: OsmNode[];
+  connectedCount: number;
+  hasAnyConnected: boolean;
+} {
+  const graphIdx = getOsmGraphIndex(state.osmNodes || [], state.osmEdges || []);
+  return {
+    nodeById: graphIdx.nodeById,
+    edgeById: graphIdx.edgeById,
+    connectedNodes: graphIdx.connectedNodes,
+    connectedCount: graphIdx.connectedCount,
+    hasAnyConnected: graphIdx.hasAnyConnected,
+  };
 }
 
 export function getOsmNodeHasEdges(state: GameState, nodeId: string): boolean {
@@ -2886,10 +2928,24 @@ function buildStaticComponentsInfo(
   const compNodeIdsById = new Map<number, string[]>();
   const compUnlockedEdgeDegreeSum = new Map<number, number>();
   const compMinorCandidateIds: number[] = [];
+  const compBboxById = new Map<number, [number, number, number, number]>();
+  const staticUnlockedGrid = new Map<number, OsmNode[]>();
+  const CELL_DEG = 0.005;
   let nextCompId = 1;
 
   for (let i = 0; i < osmNodes.length; i++) {
     const n = osmNodes[i];
+    if (isUnlockedFn(n)) {
+      const gx = Math.floor(n.lat / CELL_DEG);
+      const gy = Math.floor(n.lng / CELL_DEG);
+      const k = (gx + 40000) * 100000 + (gy + 40000);
+      let bucket = staticUnlockedGrid.get(k);
+      if (!bucket) {
+        bucket = [];
+        staticUnlockedGrid.set(k, bucket);
+      }
+      bucket.push(n);
+    }
     if (compIdByNode.has(n.id)) continue;
     const cid = nextCompId++;
     const queue = [n.id];
@@ -2900,7 +2956,11 @@ function buildStaticComponentsInfo(
     let edgeCount = 0;
     let hasPedestrian = false;
     let allMinorRoad = true;
-    let hasRail = false;
+    let hasRoad = false;
+    let minLat = Infinity;
+    let maxLat = -Infinity;
+    let minLng = Infinity;
+    let maxLng = -Infinity;
     let head = 0;
 
     while (head < queue.length) {
@@ -2909,17 +2969,23 @@ function buildStaticComponentsInfo(
       const currNode = nodeMap.get(curr);
       const inc = adjEdgesAll.get(curr);
       const incLen = inc ? inc.length : 0;
-      if (currNode && isUnlockedFn(currNode)) {
-        hasUnlocked = true;
-        unlockedDegSum += incLen;
+      if (currNode) {
+        if (currNode.lat < minLat) minLat = currNode.lat;
+        if (currNode.lat > maxLat) maxLat = currNode.lat;
+        if (currNode.lng < minLng) minLng = currNode.lng;
+        if (currNode.lng > maxLng) maxLng = currNode.lng;
+        if (isUnlockedFn(currNode)) {
+          hasUnlocked = true;
+          unlockedDegSum += incLen;
+        }
       }
       if (inc) {
         for (let j = 0; j < incLen; j++) {
           const e = inc[j];
           if (e.fromNodeId === curr) {
             edgeCount++;
-            if (e.mode === 'rail') {
-              hasRail = true;
+            if (e.mode === 'road') {
+              hasRoad = true;
             }
             if (e.highwayType === 'pedestrian') {
               hasPedestrian = true;
@@ -2938,8 +3004,79 @@ function buildStaticComponentsInfo(
     }
     compNodeIdsById.set(cid, compNodeIds);
     compUnlockedEdgeDegreeSum.set(cid, unlockedDegSum);
-    if (hasUnlocked && edgeCount >= 1 && (hasPedestrian || allMinorRoad || hasRail)) {
+    compBboxById.set(cid, [minLat, maxLat, minLng, maxLng]);
+    // Pure rail components (no road edges) are handled cleanly by railMinorCandidateIds below
+    if (hasUnlocked && edgeCount >= 1 && hasRoad && (hasPedestrian || allMinorRoad)) {
       compMinorCandidateIds.push(cid);
+    }
+  }
+
+  // Rail-only components so pure isolated rail lines (0 road crossings) AND near-isolated
+  // rail lines with 1~2 road crossings can both be approached like isolated routes
+  const railCompIdByNode = new Map<string, number>();
+  const railCompNodeIdsById = new Map<number, string[]>();
+  const railMinorCandidateIds: number[] = [];
+  const railCompBboxById = new Map<number, [number, number, number, number]>();
+  let nextRailCompId = 1;
+
+  for (const startId of graphIdx.adjRail.keys()) {
+    if (railCompIdByNode.has(startId)) continue;
+    const rcid = nextRailCompId++;
+    const queue = [startId];
+    railCompIdByNode.set(startId, rcid);
+    const compNodeIds: string[] = [];
+    let hasUnlocked = false;
+    let railEdgeCount = 0;
+    let roadCrossingCount = 0;
+    let minLat = Infinity;
+    let maxLat = -Infinity;
+    let minLng = Infinity;
+    let maxLng = -Infinity;
+    let head = 0;
+
+    while (head < queue.length) {
+      const curr = queue[head++];
+      compNodeIds.push(curr);
+      const currNode = nodeMap.get(curr);
+      if (currNode) {
+        if (isUnlockedFn(currNode)) hasUnlocked = true;
+        if (currNode.lat < minLat) minLat = currNode.lat;
+        if (currNode.lat > maxLat) maxLat = currNode.lat;
+        if (currNode.lng < minLng) minLng = currNode.lng;
+        if (currNode.lng > maxLng) maxLng = currNode.lng;
+      }
+      const roadInc = graphIdx.adjRoad.get(curr);
+      if (roadInc && roadInc.length > 0) {
+        let hasNativeRoad = false;
+        for (let j = 0; j < roadInc.length; j++) {
+          if (!CUSTOM_BRIDGE_WAY_NAMES.has(roadInc[j].edge.wayName)) {
+            hasNativeRoad = true;
+            break;
+          }
+        }
+        if (hasNativeRoad) {
+          roadCrossingCount++;
+        }
+      }
+      const railInc = graphIdx.adjRail.get(curr);
+      if (railInc) {
+        for (let j = 0; j < railInc.length; j++) {
+          const item = railInc[j];
+          if (item.edge.fromNodeId === curr) {
+            railEdgeCount++;
+          }
+          if (!railCompIdByNode.has(item.nextId)) {
+            railCompIdByNode.set(item.nextId, rcid);
+            queue.push(item.nextId);
+          }
+        }
+      }
+    }
+
+    railCompNodeIdsById.set(rcid, compNodeIds);
+    railCompBboxById.set(rcid, [minLat, maxLat, minLng, maxLng]);
+    if (hasUnlocked && railEdgeCount >= 1 && roadCrossingCount <= 2) {
+      railMinorCandidateIds.push(rcid);
     }
   }
 
@@ -2948,6 +3085,12 @@ function buildStaticComponentsInfo(
     compNodeIdsById,
     compUnlockedEdgeDegreeSum,
     compMinorCandidateIds,
+    compBboxById,
+    railCompIdByNode,
+    railCompNodeIdsById,
+    railMinorCandidateIds,
+    railCompBboxById,
+    staticUnlockedGrid,
   };
 }
 
@@ -2970,7 +3113,18 @@ function analyzeRouteComponentsAndDeadEnds(
     }
   }
 
-  const { compIdByNode, compNodeIdsById, compUnlockedEdgeDegreeSum, compMinorCandidateIds } = staticComps;
+  const {
+    compIdByNode,
+    compNodeIdsById,
+    compUnlockedEdgeDegreeSum,
+    compMinorCandidateIds,
+    compBboxById,
+    railCompIdByNode,
+    railCompNodeIdsById,
+    railMinorCandidateIds,
+    railCompBboxById,
+    staticUnlockedGrid,
+  } = staticComps;
 
   // Compute dynamic built-edge counts in O(builtEdges) instead of scanning all 12,000+ edges!
   const builtDegree = new Map<string, number>();
@@ -2996,13 +3150,19 @@ function analyzeRouteComponentsAndDeadEnds(
   }
 
   const connectedCompIds = new Set<number>();
+  const connectedRailCompIds = new Set<number>();
   const deadEndOrigins = new Set<string>();
+  const compHasUnbuiltStatic = new Map<number, boolean>();
   const connNodes = graphIdx.connectedNodes;
   for (let i = 0; i < connNodes.length; i++) {
     const n = connNodes[i];
     const cid = compIdByNode.get(n.id);
     if (cid !== undefined) {
       connectedCompIds.add(cid);
+    }
+    const rcid = railCompIdByNode.get(n.id);
+    if (rcid !== undefined) {
+      connectedRailCompIds.add(rcid);
     }
     if (!isUnlockedFn(n)) continue;
     const tot = adjEdgesAll.get(n.id)?.length || 0;
@@ -3013,6 +3173,9 @@ function analyzeRouteComponentsAndDeadEnds(
     const totalUnlockedDeg = compUnlockedEdgeDegreeSum.get(compCid) || 0;
     const builtUnlockedDeg = compBuiltUnlockedDeg.get(compCid) || 0;
     const entireCompExhausted = totalUnlockedDeg - builtUnlockedDeg <= 0;
+    if (entireCompExhausted && cid !== undefined) {
+      compHasUnbuiltStatic.set(cid, false);
+    }
 
     if (entireCompExhausted || tot <= 1) {
       deadEndOrigins.add(n.id);
@@ -3037,7 +3200,40 @@ function analyzeRouteComponentsAndDeadEnds(
     }
   }
 
-  return { compIdByNode, compNodesById, deadEndOrigins, isolatedMinorComps, connectedCompIds };
+  const isolatedRailComps = new Set<number>();
+  const railCompNodesById = new Map<number, OsmNode[]>();
+  for (let i = 0; i < railMinorCandidateIds.length; i++) {
+    const rcid = railMinorCandidateIds[i];
+    if (!connectedRailCompIds.has(rcid)) {
+      isolatedRailComps.add(rcid);
+      const ids = railCompNodeIdsById.get(rcid);
+      if (ids) {
+        const list: OsmNode[] = [];
+        for (let j = 0; j < ids.length; j++) {
+          const node = nodeMap.get(ids[j]);
+          if (node) list.push(node);
+        }
+        railCompNodesById.set(rcid, list);
+      }
+    }
+  }
+
+  return {
+    compIdByNode,
+    compNodesById,
+    compNodeIdsById,
+    compBboxById,
+    compHasUnbuiltStatic,
+    deadEndOrigins,
+    isolatedMinorComps,
+    connectedCompIds,
+    railCompIdByNode,
+    railCompNodesById,
+    railCompBboxById,
+    isolatedRailComps,
+    connectedRailCompIds,
+    staticUnlockedGrid,
+  };
 }
 
 function areModesBridgeCompatible(
@@ -3058,55 +3254,51 @@ interface IsolatedBridgePair {
 }
 
 function findIsolatedBridgePairs(
-  osmNodes: OsmNode[],
-  osmEdges: OsmEdge[],
+  graphIdx: OsmGraphIndex,
   deadEndOrigins: Set<string>,
   compIdByNode: Map<string, number>,
+  compNodeIdsById: Map<number, string[]> | undefined,
+  compHasUnbuiltCache: Map<number, boolean> | undefined,
+  staticUnlockedGrid: Map<number, OsmNode[]>,
   deriveMode: (node: OsmNode) => 'road' | 'rail' | 'mixed',
   transferDistanceKm: number,
   excludeTargetIds: Set<string>,
   isUnlockedFn: (node: OsmNode) => boolean
 ): IsolatedBridgePair[] {
-  if (deadEndOrigins.size === 0) return [];
+  if (deadEndOrigins.size === 0 || staticUnlockedGrid.size === 0) return [];
 
-  const nodeMap = new Map(osmNodes.map((n) => [n.id, n]));
-  const unlockedUnconnected = osmNodes.filter(
-    (n) => !n.connected && !excludeTargetIds.has(n.id) && isUnlockedFn(n)
-  );
-  if (unlockedUnconnected.length === 0) return [];
-
-  const CELL_DEG = 0.005;
-  const grid = new Map<string, OsmNode[]>();
-  for (const u of unlockedUnconnected) {
-    const gx = Math.floor(u.lat / CELL_DEG);
-    const gy = Math.floor(u.lng / CELL_DEG);
-    const k = `${gx}_${gy}`;
-    let list = grid.get(k);
-    if (!list) {
-      list = [];
-      grid.set(k, list);
+  const nodeMap = graphIdx.nodeById;
+  const checkCompHasUnbuilt = (comp: number): boolean => {
+    const cached = compHasUnbuiltCache?.get(comp);
+    if (cached !== undefined) return cached;
+    const ids = compNodeIdsById?.get(comp);
+    if (!ids) return false;
+    let found = false;
+    for (let i = 0; i < ids.length && !found; i++) {
+      const inc = graphIdx.adjEdgesAll.get(ids[i]);
+      if (!inc) continue;
+      for (let j = 0; j < inc.length; j++) {
+        const e = inc[j];
+        if (e.built) continue;
+        const u = nodeMap.get(e.fromNodeId);
+        const v = nodeMap.get(e.toNodeId);
+        if (u && v && isUnlockedFn(u) && isUnlockedFn(v)) {
+          found = true;
+          break;
+        }
+      }
     }
-    list.push(u);
-  }
+    compHasUnbuiltCache?.set(comp, found);
+    return found;
+  };
 
   // Group dead-end nodes by their native component so each isolated route bridges only to its single nearest target node
-  const compHasUnbuilt = new Set<number>();
-  for (const e of osmEdges) {
-    if (e.built) continue;
-    const u = nodeMap.get(e.fromNodeId);
-    const v = nodeMap.get(e.toNodeId);
-    if (u && v && isUnlockedFn(u) && isUnlockedFn(v)) {
-      const c = compIdByNode.get(u.id);
-      if (c !== undefined) compHasUnbuilt.add(c);
-    }
-  }
-
   const originGroups = new Map<string, { comp: number; nodes: OsmNode[] }>();
   for (const oid of deadEndOrigins) {
     const cn = nodeMap.get(oid);
     if (!cn) continue;
     const comp = compIdByNode.get(oid) ?? -1;
-    const groupKey = !compHasUnbuilt.has(comp) ? `comp_${comp}` : `tip_${oid}`;
+    const groupKey = !checkCompHasUnbuilt(comp) ? `comp_${comp}` : `tip_${oid}`;
     let grp = originGroups.get(groupKey);
     if (!grp) {
       grp = { comp, nodes: [] };
@@ -3115,33 +3307,40 @@ function findIsolatedBridgePairs(
     grp.nodes.push(cn);
   }
 
+  const CELL_DEG = 0.005;
   const pairs: IsolatedBridgePair[] = [];
-  const cellSpan = Math.max(1, Math.ceil(ISOLATED_ROUTE_BRIDGE_MAX_KM / 111 / CELL_DEG) + 1);
+  const latSpan = Math.max(1, Math.ceil(ISOLATED_ROUTE_BRIDGE_MAX_KM / 111 / CELL_DEG) + 1);
+  const maxLatDelta = ISOLATED_ROUTE_BRIDGE_MAX_KM / 110.5 + 0.001;
 
   for (const { comp, nodes } of originGroups.values()) {
     let bestOriginId: string | null = null;
     let bestTargetId: string | null = null;
     let bestDistKm = Infinity;
 
-    for (const cn of nodes) {
+    for (let ni = 0; ni < nodes.length; ni++) {
+      const cn = nodes[ni];
       const cnMode = deriveMode(cn);
       const gx = Math.floor(cn.lat / CELL_DEG);
       const gy = Math.floor(cn.lng / CELL_DEG);
+      const cosLat = Math.max(0.25, Math.cos((cn.lat * Math.PI) / 180));
+      const lngSpan = Math.max(1, Math.ceil(ISOLATED_ROUTE_BRIDGE_MAX_KM / (111 * cosLat) / CELL_DEG) + 1);
 
-      for (let dx = -cellSpan; dx <= cellSpan; dx++) {
-        for (let dy = -cellSpan; dy <= cellSpan; dy++) {
-          const bucket = grid.get(`${gx + dx}_${gy + dy}`);
+      for (let dx = -latSpan; dx <= latSpan; dx++) {
+        const rowBase = (gx + dx + 40000) * 100000;
+        for (let dy = -lngSpan; dy <= lngSpan; dy++) {
+          const bucket = staticUnlockedGrid.get(rowBase + (gy + dy + 40000));
           if (!bucket) continue;
-          for (const n of bucket) {
+          for (let bi = 0; bi < bucket.length; bi++) {
+            const n = bucket[bi];
+            if (n.connected || excludeTargetIds.has(n.id)) continue;
+            if (Math.abs(cn.lat - n.lat) > maxLatDelta) continue;
             if (compIdByNode.get(n.id) === comp) continue;
             const distKm = haversineKm(cn.lat, cn.lng, n.lat, n.lng);
-            if (distKm > ISOLATED_ROUTE_BRIDGE_MAX_KM) continue;
+            if (distKm > ISOLATED_ROUTE_BRIDGE_MAX_KM || distKm >= bestDistKm) continue;
             if (!areModesBridgeCompatible(cnMode, deriveMode(n), distKm, transferDistanceKm)) continue;
-            if (distKm < bestDistKm) {
-              bestDistKm = distKm;
-              bestOriginId = cn.id;
-              bestTargetId = n.id;
-            }
+            bestDistKm = distKm;
+            bestOriginId = cn.id;
+            bestTargetId = n.id;
           }
         }
       }
@@ -3157,21 +3356,33 @@ function findIsolatedBridgePairs(
 
 function findIsolatedMinorBridgePairs(
   connectedUnlockedNodes: OsmNode[],
-  isolatedMinorComps: Set<number>,
+  compIds: Set<number>,
   compNodesById: Map<number, OsmNode[]>,
+  compBboxById: Map<number, [number, number, number, number]> | undefined,
   deriveMode: (node: OsmNode) => 'road' | 'rail' | 'mixed',
   transferDistanceKm: number,
-  excludeTargetIds: Set<string>,
-  isUnlockedFn: (node: OsmNode) => boolean
+  skipCompIfAnyNodeInSet: Set<string> | undefined,
+  isUnlockedFn: (node: OsmNode) => boolean,
+  allowCrossModeRail: boolean
 ): IsolatedBridgePair[] {
-  if (connectedUnlockedNodes.length === 0 || isolatedMinorComps.size === 0) return [];
+  if (connectedUnlockedNodes.length === 0 || compIds.size === 0) return [];
 
   const CELL_DEG = 0.005;
-  const connGrid = new Map<string, OsmNode[]>();
-  for (const cn of connectedUnlockedNodes) {
+  const connGrid = new Map<number, OsmNode[]>();
+  let connMinLat = Infinity;
+  let connMaxLat = -Infinity;
+  let connMinLng = Infinity;
+  let connMaxLng = -Infinity;
+
+  for (let i = 0; i < connectedUnlockedNodes.length; i++) {
+    const cn = connectedUnlockedNodes[i];
+    if (cn.lat < connMinLat) connMinLat = cn.lat;
+    if (cn.lat > connMaxLat) connMaxLat = cn.lat;
+    if (cn.lng < connMinLng) connMinLng = cn.lng;
+    if (cn.lng > connMaxLng) connMaxLng = cn.lng;
     const gx = Math.floor(cn.lat / CELL_DEG);
     const gy = Math.floor(cn.lng / CELL_DEG);
-    const k = `${gx}_${gy}`;
+    const k = (gx + 40000) * 100000 + (gy + 40000);
     let list = connGrid.get(k);
     if (!list) {
       list = [];
@@ -3180,43 +3391,72 @@ function findIsolatedMinorBridgePairs(
     list.push(cn);
   }
 
-  const MINOR_BRIDGE_PROXIMITY_KM = 0.45;
-  const cellSpan = Math.max(1, Math.ceil(MINOR_BRIDGE_PROXIMITY_KM / 55 / CELL_DEG) + 1);
+  const padLat = 0.0045;
+  const cosMin = Math.max(0.25, Math.cos((Math.max(Math.abs(connMinLat), Math.abs(connMaxLat)) * Math.PI) / 180));
+  const padLng = MINOR_BRIDGE_PROXIMITY_KM / (111 * cosMin) + 0.001;
   const pairs: IsolatedBridgePair[] = [];
 
-  for (const cid of isolatedMinorComps) {
+  for (const cid of compIds) {
+    if (compBboxById) {
+      const bb = compBboxById.get(cid);
+      if (
+        bb &&
+        (bb[1] < connMinLat - padLat ||
+          bb[0] > connMaxLat + padLat ||
+          bb[3] < connMinLng - padLng ||
+          bb[2] > connMaxLng + padLng)
+      ) {
+        continue;
+      }
+    }
+
     const compNodes = compNodesById.get(cid);
     if (!compNodes || compNodes.length === 0) continue;
-    if (compNodes.some((n) => excludeTargetIds.has(n.id))) continue;
+    if (skipCompIfAnyNodeInSet && skipCompIfAnyNodeInSet.size > 0) {
+      let skip = false;
+      for (let i = 0; i < compNodes.length; i++) {
+        if (skipCompIfAnyNodeInSet.has(compNodes[i].id)) {
+          skip = true;
+          break;
+        }
+      }
+      if (skip) continue;
+    }
 
     let bestOriginId: string | null = null;
     let bestTargetId: string | null = null;
     let bestDistKm = Infinity;
 
-    for (const target of compNodes) {
+    for (let ti = 0; ti < compNodes.length; ti++) {
+      const target = compNodes[ti];
       if (target.connected || !isUnlockedFn(target)) continue;
       const targetMode = deriveMode(target);
       const gx = Math.floor(target.lat / CELL_DEG);
       const gy = Math.floor(target.lng / CELL_DEG);
+      const lngSpan = Math.abs(target.lat) > 35 ? 2 : 1;
 
-      for (let dx = -cellSpan; dx <= cellSpan; dx++) {
-        for (let dy = -cellSpan; dy <= cellSpan; dy++) {
-          const bucket = connGrid.get(`${gx + dx}_${gy + dy}`);
+      for (let dx = -1; dx <= 1; dx++) {
+        const rowBase = (gx + dx + 40000) * 100000;
+        for (let dy = -lngSpan; dy <= lngSpan; dy++) {
+          const bucket = connGrid.get(rowBase + (gy + dy + 40000));
           if (!bucket) continue;
-          for (const cn of bucket) {
+          for (let ci = 0; ci < bucket.length; ci++) {
+            const cn = bucket[ci];
+            if (Math.abs(cn.lat - target.lat) > padLat || Math.abs(cn.lng - target.lng) > padLng) {
+              continue;
+            }
             const distKm = haversineKm(cn.lat, cn.lng, target.lat, target.lng);
-            if (distKm > MINOR_BRIDGE_PROXIMITY_KM) continue;
+            if (distKm > MINOR_BRIDGE_PROXIMITY_KM || distKm >= bestDistKm) continue;
             if (
+              !allowCrossModeRail &&
               !areModesBridgeCompatible(deriveMode(cn), targetMode, distKm, transferDistanceKm) &&
               targetMode !== 'rail'
             ) {
               continue;
             }
-            if (distKm < bestDistKm) {
-              bestDistKm = distKm;
-              bestOriginId = cn.id;
-              bestTargetId = target.id;
-            }
+            bestDistKm = distKm;
+            bestOriginId = cn.id;
+            bestTargetId = target.id;
           }
         }
       }
@@ -3239,20 +3479,15 @@ function getUnlockedOsmTopology(state: GameState): UnlockedOsmTopology {
   let topo = graphIdx.unlockedCache.get(regions);
   if (topo) return topo;
 
-  const { compIdByNode, compNodesById, deadEndOrigins, isolatedMinorComps, connectedCompIds } =
-    analyzeRouteComponentsAndDeadEnds(
-      osmNodes,
-      osmEdges,
-      (n) => isNodeInUnlockedRegion(state, n),
-      graphIdx,
-      regions
-    );
+  const analyzed = analyzeRouteComponentsAndDeadEnds(
+    osmNodes,
+    osmEdges,
+    (n) => isNodeInUnlockedRegion(state, n),
+    graphIdx,
+    regions
+  );
   topo = {
-    compIdByNode,
-    compNodesById,
-    deadEndOrigins,
-    isolatedMinorComps,
-    connectedCompIds,
+    ...analyzed,
     frontierCache: new Map(),
     isolatedBridgeCache: new Map(),
   };
@@ -3278,8 +3513,15 @@ export function canConnectIsolatedRoutePair(
   const topo = getUnlockedOsmTopology(state);
   const compA = topo.compIdByNode.get(fromNodeId);
   const compB = topo.compIdByNode.get(toNodeId);
-  if (compA === undefined || compA !== compB) return false;
-  if (topo.connectedCompIds.has(compA)) return false;
+  const sameIsolatedMixedComp =
+    compA !== undefined && compA === compB && !topo.connectedCompIds.has(compA);
+
+  const rcidA = topo.railCompIdByNode.get(fromNodeId);
+  const rcidB = topo.railCompIdByNode.get(toNodeId);
+  const sameIsolatedRailComp =
+    rcidA !== undefined && rcidA === rcidB && topo.isolatedRailComps.has(rcidA);
+
+  if (!sameIsolatedMixedComp && !sameIsolatedRailComp) return false;
 
   const frontier = computeOsmFrontierDistancesForState(state);
   return frontier.has(fromNodeId) && frontier.has(toNodeId);
@@ -3297,11 +3539,25 @@ function getIsolatedBridgeCacheEntry(
   const cached = topo.isolatedBridgeCache.get(key);
   if (cached) return cached;
 
+  // Populate both frontierCache & isolatedBridgeCache in a single unified pass when transferDistanceKm matches active skills
+  const skillTransferKm =
+    (state.skills.find((s) => s.id === 'sk_infra_4')?.level || 0) > 0 ? 0.035 : 0;
+  if (transferDistanceKm === skillTransferKm) {
+    computeOsmFrontierDistancesForState(state, MAX_OSM_FRONTIER_DISTANCE);
+    const populated = topo.isolatedBridgeCache.get(key);
+    if (populated) return populated;
+  }
+
   const allowedTargetsByComp = new Map<number, Set<string>>();
   const allowedTargetsByOrigin = new Map<string, Set<string>>();
   const minorTargetIds = new Set<string>();
 
-  if ((topo.deadEndOrigins.size > 0 || topo.isolatedMinorComps.size > 0) && graphIdx.hasAnyConnected) {
+  if (
+    (topo.deadEndOrigins.size > 0 ||
+      topo.isolatedMinorComps.size > 0 ||
+      topo.isolatedRailComps.size > 0) &&
+    graphIdx.hasAnyConnected
+  ) {
     const isUnlockedFn = (n: OsmNode) => isNodeInUnlockedRegion(state, n);
     const deriveMode = (node: OsmNode): 'road' | 'rail' | 'mixed' =>
       graphIdx.nodeModeMap.get(node.id) || node.mode || 'road';
@@ -3333,10 +3589,12 @@ function getIsolatedBridgeCacheEntry(
 
     if (topo.deadEndOrigins.size > 0) {
       const pairs = findIsolatedBridgePairs(
-        osmNodes,
-        osmEdges,
+        graphIdx,
         topo.deadEndOrigins,
         topo.compIdByNode,
+        topo.compNodeIdsById,
+        topo.compHasUnbuiltStatic,
+        topo.staticUnlockedGrid,
         deriveMode,
         transferDistanceKm,
         normalReached,
@@ -3368,12 +3626,31 @@ function getIsolatedBridgeCacheEntry(
         connectedUnlockedNodes,
         topo.isolatedMinorComps,
         topo.compNodesById,
+        topo.compBboxById,
         deriveMode,
         transferDistanceKm,
         normalReached,
-        isUnlockedFn
+        isUnlockedFn,
+        false
       );
       for (const p of minorPairs) {
+        minorTargetIds.add(p.targetId);
+      }
+    }
+
+    if (topo.isolatedRailComps.size > 0) {
+      const railPairs = findIsolatedMinorBridgePairs(
+        connectedUnlockedNodes,
+        topo.isolatedRailComps,
+        topo.railCompNodesById,
+        topo.railCompBboxById,
+        deriveMode,
+        transferDistanceKm,
+        minorTargetIds,
+        isUnlockedFn,
+        true
+      );
+      for (const p of railPairs) {
         minorTargetIds.add(p.targetId);
       }
     }
@@ -3394,12 +3671,8 @@ export function computeOsmFrontierDistances(
   maxDist = MAX_OSM_FRONTIER_DISTANCE,
   transferDistanceKm = 0,
   isUnlockedFn: (node: OsmNode) => boolean = () => true,
-  precomputedTopo?: {
-    compIdByNode: Map<string, number>;
-    compNodesById?: Map<number, OsmNode[]>;
-    deadEndOrigins: Set<string>;
-    isolatedMinorComps?: Set<number>;
-  }
+  precomputedTopo?: UnlockedOsmTopology,
+  outBridgeCache?: IsolatedBridgeCacheEntry
 ): Map<string, number> {
   const distances = new Map<string, number>();
   if (osmNodes.length === 0) return distances;
@@ -3511,48 +3784,96 @@ export function computeOsmFrontierDistances(
     }
   }
 
-  // Isolated/dead-end & unconnected minor/pedestrian routes:
+  // Isolated/dead-end, minor road, and isolated/near-isolated rail routes:
   // Bridge to the single nearest compatible entry node and expose d <= 3 (2~3 hop horizon) around it.
   const isolatedCap = Math.min(maxDist, ISOLATED_ROUTE_BRIDGE_FRONTIER_CAP);
-  const hasMinorTargets = Boolean(topo.isolatedMinorComps && topo.isolatedMinorComps.size > 0 && connectedNodes.length > 0);
-  if (isolatedCap >= 1 && (deadEndOrigins.size > 0 || hasMinorTargets)) {
-    const alreadyReached = new Set(distances.keys());
+  const hasMinorTargets = Boolean(topo.isolatedMinorComps.size > 0 && connectedNodes.length > 0);
+  const hasRailMinorTargets = Boolean(topo.isolatedRailComps.size > 0 && connectedNodes.length > 0);
+  if (isolatedCap >= 1 && (deadEndOrigins.size > 0 || hasMinorTargets || hasRailMinorTargets)) {
+    const normalReached = new Set(distances.keys());
     const localQueue: string[] = [];
+    const railLocalQueue: string[] = [];
 
     if (deadEndOrigins.size > 0) {
       const pairs = findIsolatedBridgePairs(
-        osmNodes,
-        osmEdges,
+        graphIdx,
         deadEndOrigins,
         compIdByNode,
+        topo.compNodeIdsById,
+        topo.compHasUnbuiltStatic,
+        topo.staticUnlockedGrid,
         deriveMode,
         transferDistanceKm,
-        alreadyReached,
+        normalReached,
         isUnlockedFn
       );
       for (const p of pairs) {
+        if (outBridgeCache) {
+          let byOrigin = outBridgeCache.allowedTargetsByOrigin.get(p.originId);
+          if (!byOrigin) {
+            byOrigin = new Set();
+            outBridgeCache.allowedTargetsByOrigin.set(p.originId, byOrigin);
+          }
+          byOrigin.add(p.targetId);
+          const comp = compIdByNode.get(p.originId);
+          if (comp !== undefined) {
+            let byComp = outBridgeCache.allowedTargetsByComp.get(comp);
+            if (!byComp) {
+              byComp = new Set();
+              outBridgeCache.allowedTargetsByComp.set(comp, byComp);
+            }
+            byComp.add(p.targetId);
+          }
+        }
         if (!distances.has(p.targetId)) {
           distances.set(p.targetId, 1);
           localQueue.push(p.targetId);
-          alreadyReached.add(p.targetId);
         }
       }
     }
 
-    if (hasMinorTargets && topo.compNodesById && topo.isolatedMinorComps) {
+    const bridgedMinorTargets = new Set<string>();
+    if (hasMinorTargets) {
       const minorPairs = findIsolatedMinorBridgePairs(
         connectedNodes,
         topo.isolatedMinorComps,
         topo.compNodesById,
+        topo.compBboxById,
         deriveMode,
         transferDistanceKm,
-        alreadyReached,
-        isUnlockedFn
+        normalReached,
+        isUnlockedFn,
+        false
       );
       for (const p of minorPairs) {
-        if (!distances.has(p.targetId)) {
+        bridgedMinorTargets.add(p.targetId);
+        outBridgeCache?.minorTargetIds.add(p.targetId);
+        const existingDist = distances.get(p.targetId);
+        if (existingDist === undefined || existingDist > 1) {
           distances.set(p.targetId, 1);
           localQueue.push(p.targetId);
+        }
+      }
+    }
+
+    if (hasRailMinorTargets) {
+      const railPairs = findIsolatedMinorBridgePairs(
+        connectedNodes,
+        topo.isolatedRailComps,
+        topo.railCompNodesById,
+        topo.railCompBboxById,
+        deriveMode,
+        transferDistanceKm,
+        bridgedMinorTargets,
+        isUnlockedFn,
+        true
+      );
+      for (const p of railPairs) {
+        outBridgeCache?.minorTargetIds.add(p.targetId);
+        const existingDist = distances.get(p.targetId);
+        if (existingDist === undefined || existingDist > 1) {
+          distances.set(p.targetId, 1);
+          railLocalQueue.push(p.targetId);
         }
       }
     }
@@ -3570,6 +3891,24 @@ export function computeOsmFrontierDistances(
         if (existing === undefined || existing > dCurr + 1) {
           distances.set(nextId, dCurr + 1);
           localQueue.push(nextId);
+        }
+      }
+    }
+
+    // Expand isolated/near-isolated rail routes strictly along adjRail so 1~2 road crossings do not bleed onto unrelated streets
+    let railHead = 0;
+    while (railHead < railLocalQueue.length) {
+      const curr = railLocalQueue[railHead++];
+      const dCurr = distances.get(curr) ?? 1;
+      if (dCurr >= isolatedCap) continue;
+      for (const item of graphIdx.adjRail.get(curr) || []) {
+        const nextId = item.nextId;
+        const nextNode = nodeMap.get(nextId);
+        if (!nextNode || !isUnlockedFn(nextNode)) continue;
+        const existing = distances.get(nextId);
+        if (existing === undefined || existing > dCurr + 1) {
+          distances.set(nextId, dCurr + 1);
+          railLocalQueue.push(nextId);
         }
       }
     }
@@ -3727,16 +4066,29 @@ export function computeOsmFrontierDistancesForState(
   const cached = topo.frontierCache.get(cacheKey);
   if (cached) return cached;
 
+  const bridgeCacheEntry: IsolatedBridgeCacheEntry | undefined =
+    maxDist === MAX_OSM_FRONTIER_DISTANCE
+      ? {
+          allowedTargetsByComp: new Map(),
+          allowedTargetsByOrigin: new Map(),
+          minorTargetIds: new Set(),
+        }
+      : undefined;
+
   const computed = computeOsmFrontierDistances(
     state.osmNodes || [],
     state.osmEdges || [],
     maxDist,
     transferDistanceKm,
     (node) => isNodeInUnlockedRegion(state, node),
-    topo
+    topo,
+    bridgeCacheEntry
   );
 
   topo.frontierCache.set(cacheKey, computed);
+  if (bridgeCacheEntry) {
+    topo.isolatedBridgeCache.set(String(transferDistanceKm), bridgeCacheEntry);
+  }
   return computed;
 }
 
@@ -3799,9 +4151,9 @@ export function getProximityAdjacentChunksToLoad(
 
   const STEP = 1 / 300; // ~0.00333333 deg
   const candidateChunks = new Map<string, { key: string; lat: number; lng: number; minDistKm: number }>();
-  const unlockedCellCache = new Map<string, boolean>();
-  const quantizedKey = (latIdx: number, lngIdx: number): string =>
-    `${(latIdx / 300).toFixed(4)}_${(lngIdx / 300).toFixed(4)}`;
+  const keyStrCache = new Map<number, string>();
+  const skipCellSet = new Set<number>();
+  const unlockedCellCache = new Map<number, boolean>();
 
   for (let i = 0; i < activeNodes.length; i++) {
     const n = activeNodes[i];
@@ -3812,26 +4164,39 @@ export function getProximityAdjacentChunksToLoad(
       const cLatIdx = qLatIdx + dy;
       const cLat = cLatIdx * STEP;
       if (Math.abs(n.lat - cLat) > 0.0045) continue;
+      const rowBase = (cLatIdx + 60000) * 120000;
 
       for (let dx = -1; dx <= 1; dx++) {
         const cLngIdx = qLngIdx + dx;
+        const cellInt = rowBase + (cLngIdx + 60000);
+        if (skipCellSet.has(cellInt)) continue;
         const cLng = cLngIdx * STEP;
         if (Math.abs(n.lng - cLng) > 0.0065) continue;
 
-        const key = quantizedKey(cLatIdx, cLngIdx);
-        if (loadedSet.has(key)) continue;
+        let key = keyStrCache.get(cellInt);
+        if (key === undefined) {
+          key = `${(cLatIdx / 300).toFixed(4)}_${(cLngIdx / 300).toFixed(4)}`;
+          if (loadedSet.has(key)) {
+            skipCellSet.add(cellInt);
+            continue;
+          }
+          keyStrCache.set(cellInt, key);
+        }
 
         const distKm = haversineKm(n.lat, n.lng, cLat, cLng);
         // Self chunk: <= 0.35km, Adjacent (including diagonal): <= 0.55km
         const thresholdKm = dy === 0 && dx === 0 ? 0.35 : 0.55;
         if (distKm > thresholdKm) continue;
 
-        let inUnlocked = unlockedCellCache.get(key);
+        let inUnlocked = unlockedCellCache.get(cellInt);
         if (inUnlocked === undefined) {
           inUnlocked = unlockedRegions.some((ur) =>
             isPointInRegionBoundary(cLat, cLng, ur, 0.005)
           );
-          unlockedCellCache.set(key, inUnlocked);
+          unlockedCellCache.set(cellInt, inUnlocked);
+          if (!inUnlocked) {
+            skipCellSet.add(cellInt);
+          }
         }
         if (!inUnlocked) continue;
 
@@ -4197,6 +4562,13 @@ export function mergeOsmChunksBatch(
   >();
   let lastTargetRegionId: string | undefined;
 
+  const replacedSyntheticNodeIds = new Set<string>();
+  const freshlyReplacedEdgeIds = new Set<string>();
+  const isSyntheticRestoredNode = (node?: OsmNode): boolean =>
+    Boolean(node && (node.label === '복원 연결점' || node.label === '복원 환승점'));
+  const isSyntheticRestoredEdge = (edge?: OsmEdge): boolean =>
+    Boolean(edge && edge.wayName === '복원 연결선');
+
   for (let c = 0; c < chunks.length; c++) {
     const ch = chunks[c];
     const chRegionId = ch.regionId;
@@ -4215,6 +4587,18 @@ export function mergeOsmChunksBatch(
         prev?.regionId && prev.regionId !== '__locked_outside__' ? prev.regionId : undefined;
       if (!prev) {
         existingNodeMap.set(n.id, { ...n, regionId: resolvedRegionId });
+      } else if (isSyntheticRestoredNode(prev) && !isSyntheticRestoredNode(n)) {
+        // Real 1:1 OSM node replaces synthetic placeholder coordinates while preserving connection state
+        replacedSyntheticNodeIds.add(n.id);
+        existingNodeMap.set(n.id, {
+          ...n,
+          connected: Boolean(prev.connected || n.connected),
+          mode:
+            n.mode && prev.mode && prev.mode !== n.mode
+              ? 'mixed'
+              : n.mode || prev.mode,
+          regionId: resolvedRegionId || keepPrevRegion,
+        });
       } else if (n.mode && prev.mode && prev.mode !== n.mode) {
         existingNodeMap.set(n.id, {
           ...prev,
@@ -4238,7 +4622,8 @@ export function mergeOsmChunksBatch(
     const inEdges = ch.osmEdges;
     for (let i = 0; i < inEdges.length; i++) {
       const e = inEdges[i];
-      if (!existingEdgeMap.has(e.id)) {
+      const prevEdge = existingEdgeMap.get(e.id);
+      if (!prevEdge) {
         const nFrom = existingNodeMap.get(e.fromNodeId);
         const nTo = existingNodeMap.get(e.toNodeId);
         const resolvedEdgeRegionId =
@@ -4248,6 +4633,23 @@ export function mergeOsmChunksBatch(
           chRegionId ||
           chunkDefaultUnlocked?.regionId;
         existingEdgeMap.set(e.id, { ...e, regionId: resolvedEdgeRegionId });
+        freshlyReplacedEdgeIds.add(e.id);
+      } else if (isSyntheticRestoredEdge(prevEdge) && !isSyntheticRestoredEdge(e)) {
+        const nFrom = existingNodeMap.get(e.fromNodeId);
+        const nTo = existingNodeMap.get(e.toNodeId);
+        const resolvedEdgeRegionId =
+          e.regionId ||
+          nFrom?.regionId ||
+          nTo?.regionId ||
+          prevEdge.regionId ||
+          chRegionId ||
+          chunkDefaultUnlocked?.regionId;
+        existingEdgeMap.set(e.id, {
+          ...e,
+          built: Boolean(prevEdge.built || e.built),
+          regionId: resolvedEdgeRegionId,
+        });
+        freshlyReplacedEdgeIds.add(e.id);
       }
     }
 
@@ -4267,6 +4669,30 @@ export function mergeOsmChunksBatch(
         totalNodeCount: Math.max(prevUpd?.totalNodeCount || 0, ch.totalNodeCount || 0),
         hasIncomingNodes: Boolean(prevUpd?.hasIncomingNodes || inNodes.length > 0),
       });
+    }
+  }
+
+  if (replacedSyntheticNodeIds.size > 0) {
+    for (const [eid, edge] of existingEdgeMap.entries()) {
+      if (freshlyReplacedEdgeIds.has(eid)) continue;
+      if (
+        replacedSyntheticNodeIds.has(edge.fromNodeId) ||
+        replacedSyntheticNodeIds.has(edge.toNodeId)
+      ) {
+        const nFrom = existingNodeMap.get(edge.fromNodeId);
+        const nTo = existingNodeMap.get(edge.toNodeId);
+        if (nFrom && nTo && edge.coordinates.length === 2) {
+          const distKm = Math.max(0.008, haversineKm(nFrom.lat, nFrom.lng, nTo.lat, nTo.lng));
+          existingEdgeMap.set(eid, {
+            ...edge,
+            coordinates: [
+              [nFrom.lat, nFrom.lng],
+              [nTo.lat, nTo.lng],
+            ],
+            distanceKm: Number(distKm.toFixed(3)),
+          });
+        }
+      }
     }
   }
 
@@ -4963,11 +5389,10 @@ export function resolveProximityBridgeInfo(
   if (!isNodeInUnlockedRegion(state, nA) || !isNodeInUnlockedRegion(state, nB)) return null;
 
   const compat = resolveCompatibleOsmMode(state, fromNodeId, toNodeId);
-  if (!compat) return null;
-
   const distKm = haversineKm(nA.lat, nA.lng, nB.lat, nB.lng);
 
   if (
+    compat &&
     nA.regionId &&
     nB.regionId &&
     nA.regionId !== nB.regionId &&
@@ -4982,15 +5407,25 @@ export function resolveProximityBridgeInfo(
     const originNode = nA.connected ? nA : nB;
     const targetNode = nA.connected ? nB : nA;
 
-    if (topo.compIdByNode.get(originNode.id) !== topo.compIdByNode.get(targetNode.id)) {
-      const transferUnlocked = (state.skills.find((s) => s.id === 'sk_infra_4')?.level || 0) > 0;
-      const transferDistanceKm = transferUnlocked ? 0.035 : 0;
-      const cache = getIsolatedBridgeCacheEntry(state, transferDistanceKm);
+    const transferUnlocked = (state.skills.find((s) => s.id === 'sk_infra_4')?.level || 0) > 0;
+    const transferDistanceKm = transferUnlocked ? 0.035 : 0;
+    const cache = getIsolatedBridgeCacheEntry(state, transferDistanceKm);
 
-      if (cache.minorTargetIds.has(targetNode.id)) {
-        return { kind: 'isolated_route', maxKm: ISOLATED_ROUTE_BRIDGE_MAX_KM, distKm };
+    if (distKm <= MINOR_BRIDGE_PROXIMITY_KM && cache.minorTargetIds.has(targetNode.id)) {
+      const diffMixedComp =
+        topo.compIdByNode.get(originNode.id) !== topo.compIdByNode.get(targetNode.id);
+      const originRcid = topo.railCompIdByNode.get(originNode.id);
+      const targetRcid = topo.railCompIdByNode.get(targetNode.id);
+      const diffIsolatedRailComp =
+        targetRcid !== undefined &&
+        originRcid !== targetRcid &&
+        topo.isolatedRailComps.has(targetRcid);
+      if (diffMixedComp || diffIsolatedRailComp) {
+        return { kind: 'isolated_route', maxKm: MINOR_BRIDGE_PROXIMITY_KM, distKm };
       }
+    }
 
+    if (compat && topo.compIdByNode.get(originNode.id) !== topo.compIdByNode.get(targetNode.id)) {
       if (topo.deadEndOrigins.has(originNode.id)) {
         const originComp = topo.compIdByNode.get(originNode.id);
         const matchesOrigin = cache.allowedTargetsByOrigin.get(originNode.id)?.has(targetNode.id);
@@ -5484,7 +5919,8 @@ export function connectOsmNodesDirect(
   }
 
   const compat = resolveCompatibleOsmMode(state, fromNodeId, toNodeId);
-  if (!compat) {
+  const bridgeInfo = resolveProximityBridgeInfo(state, fromNodeId, toNodeId);
+  if (!compat && bridgeInfo?.kind !== 'isolated_route') {
     return {
       success: false,
       newState: state,
@@ -5496,8 +5932,7 @@ export function connectOsmNodesDirect(
     };
   }
 
-  const bridgeInfo = resolveProximityBridgeInfo(state, fromNodeId, toNodeId);
-  if (compat !== 'transfer' && !bridgeInfo) {
+  if (compat && compat !== 'transfer' && !bridgeInfo) {
     const fromHasEdges = graphIdx.hasEdgesSet.has(fromNodeId);
     const toHasEdges = graphIdx.hasEdgesSet.has(toNodeId);
     if (fromHasEdges && toHasEdges) {
@@ -5529,7 +5964,10 @@ export function connectOsmNodesDirect(
     };
   }
 
-  const edgeMode: 'road' | 'rail' = compat === 'rail' ? 'rail' : 'road';
+  const modeFrom = graphIdx.nodeModeMap.get(fromNodeId) || nA.mode || 'road';
+  const modeTo = graphIdx.nodeModeMap.get(toNodeId) || nB.mode || 'road';
+  const edgeMode: 'road' | 'rail' =
+    compat === 'rail' || (!compat && (modeFrom === 'rail' || modeTo === 'rail')) ? 'rail' : 'road';
   const wayName =
     compat === 'transfer'
       ? '복합 환승 직결'

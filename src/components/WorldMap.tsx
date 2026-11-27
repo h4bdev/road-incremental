@@ -30,6 +30,8 @@ import {
   getFrontierOsmEdgesForState,
   getFrontierVisualStyle,
   getOsmEdgeBuildCost,
+  getOsmEdgeById,
+  getOsmGraphSummaryForState,
   getOsmNodeConnectionFlags,
   getOsmNodeHasEdges,
   getOsmNodeMode,
@@ -238,37 +240,24 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
   gameStateRef.current = gameState;
 
   const osmNodeIndex = useMemo(() => {
-    const byId = new Map<string, (typeof gameState.osmNodes)[number]>();
-    let connectedCount = 0;
+    const summary = getOsmGraphSummaryForState(gameState);
     let connectedHash = 0;
-    const nodes = gameState.osmNodes || [];
-    for (let i = 0; i < nodes.length; i++) {
-      const n = nodes[i];
-      byId.set(n.id, n);
-      if (n.connected) {
-        connectedCount++;
-        for (let j = 0; j < n.id.length; j++) {
-          connectedHash = (connectedHash * 31 + n.id.charCodeAt(j)) | 0;
-        }
+    const connected = summary.connectedNodes;
+    for (let i = 0; i < connected.length; i++) {
+      const id = connected[i].id;
+      for (let j = 0; j < id.length; j++) {
+        connectedHash = (connectedHash * 31 + id.charCodeAt(j)) | 0;
       }
     }
     return {
-      byId,
-      hasAnyConnected: connectedCount > 0,
-      connectedSig: `${connectedCount}:${connectedHash}`,
+      byId: summary.nodeById,
+      hasAnyConnected: summary.hasAnyConnected,
+      connectedSig: `${summary.connectedCount}:${connectedHash}`,
     };
-  }, [gameState.osmNodes]);
+  }, [gameState.osmNodes, gameState.osmEdges]);
 
   const osmNodeIndexRef = useRef(osmNodeIndex);
   osmNodeIndexRef.current = osmNodeIndex;
-
-  const osmEdgeById = useMemo(() => {
-    const map = new Map<string, (typeof gameState.osmEdges)[number]>();
-    for (const e of gameState.osmEdges || []) {
-      map.set(e.id, e);
-    }
-    return map;
-  }, [gameState.osmEdges]);
 
   const isTouchRef = useRef(
     typeof window !== 'undefined' &&
@@ -1093,9 +1082,12 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
           return;
         }
 
+        const isReachableTarget = Boolean(reachableOsmNodeSetRef.current?.has(nodeId));
         const canLink =
-          resolveCompatibleOsmMode(gameStateRef.current, currentStart, nodeId) !== null &&
-          Boolean(reachableOsmNodeSetRef.current?.has(nodeId));
+          isReachableTarget &&
+          (resolveCompatibleOsmMode(gameStateRef.current, currentStart, nodeId) !== null ||
+            resolveProximityBridgeInfo(gameStateRef.current, currentStart, nodeId)?.kind ===
+              'isolated_route');
         if (canLink) {
           callbacksRef.current.onConnectOsmPath(currentStart, nodeId);
           setSelectedOsmNodeId(nodeId);
@@ -1390,9 +1382,6 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       };
     }
 
-    const compat = resolveCompatibleOsmMode(gameState, selectedOsmNodeId, hoverOsmNodeId);
-    if (!compat) return null;
-
     const bridgeInfo = resolveProximityBridgeInfo(gameState, selectedOsmNodeId, hoverOsmNodeId);
     if (bridgeInfo) {
       const m = calculateMultipliers(gameState);
@@ -1406,6 +1395,9 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
         cost: rawCost,
       };
     }
+
+    const compat = resolveCompatibleOsmMode(gameState, selectedOsmNodeId, hoverOsmNodeId);
+    if (!compat) return null;
 
     // Never preview a fake bridge across two separate 2-lane road/rail ways
     if (compat !== 'transfer') {
@@ -1458,7 +1450,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       if (previewResult.kind === 'path') {
         const previewColor = affordable ? '#10b981' : '#f43f5e';
         previewResult.edgeIds.forEach((eid) => {
-          const edge = osmEdgeById.get(eid);
+          const edge = getOsmEdgeById(gameStateRef.current, eid);
           if (!edge || edge.coordinates.length < 2) return;
           features.push({
             type: 'Feature',
@@ -1494,7 +1486,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
     const fc = { type: 'FeatureCollection', features } as unknown as GeoJsonData;
     previewGeoJsonRef.current = fc;
     syncSourceData('osm-preview', fc);
-  }, [previewResult, previewAffordable, osmEdgeById]);
+  }, [previewResult, previewAffordable]);
 
   // Update Built OSM Road/Rail Edges + Overview Zoom Simplified Curves GeoJSON (never triggered by capital ticks or hover)
   const unlockedRegionsKey = useMemo(
@@ -1807,7 +1799,6 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
       if (
         viewportBounds &&
         !isSelected &&
-        !(selectedOsmNodeId && isReachable) &&
         !isNodeInViewport(node.lat, node.lng, viewportBounds)
       ) {
         return;
@@ -1845,10 +1836,7 @@ const WorldMapComponent: React.FC<WorldMapProps> = ({
         return;
       }
 
-      const canTarget =
-        !selectedOsmNodeId ||
-        isSelected ||
-        (isReachable && resolveCompatibleOsmMode(gameState, selectedOsmNodeId, node.id) !== null);
+      const canTarget = isReachable;
       const dimForSelection =
         !isPendingSeed && Boolean(selectedOsmNodeId) && !isSelected && !canTarget;
 

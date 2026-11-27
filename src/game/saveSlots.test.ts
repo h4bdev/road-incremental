@@ -6,7 +6,9 @@ import {
   applyRestoredGraphMarks,
   clearCloudSyncBaseline,
   CloudChunkPayloadRecord,
+  collectMarksWithExistingState,
   computeCloudGraphStructureSig,
+  countSyntheticRestoredItems,
   countUnhydratedGraphMarks,
   decodeCloudGraphChunks,
   decodeImportedSaveString,
@@ -1276,6 +1278,71 @@ test('decodeImportedSaveString supports raw JSON fallback and rejects invalid/co
   await assert.rejects(() => decodeImportedSaveString('TERRALINE1:not-valid-gzip-data!!!'), /압축 해제|Base64/);
   await assert.rejects(() => decodeImportedSaveString('{"foo":"bar"}'), /세이브 데이터/);
 });
+
+test('countSyntheticRestoredItems, collectMarksWithExistingState, and CORE_V2 chunk tracking avoid sawtooth grid wraps', () => {
+  const storage = createMemoryStorage();
+  const seoul = PRESET_CITIES.find((c) => c.id === 'seoul')!;
+  const state = createInitialGameState(seoul);
+
+  const corrupted = {
+    ...state,
+    loadedOsmChunks: [],
+    osmNodes: [
+      { id: 'real_gangnam', lat: 37.498, lng: 127.028, connected: true, mode: 'road' as const },
+      { id: 'syn_1', lat: 37.5665, lng: 126.978, connected: true, mode: 'road' as const, label: '복원 연결점' },
+      { id: 'syn_2', lat: 37.5666, lng: 126.9781, connected: true, mode: 'rail' as const, label: '복원 환승점' },
+    ],
+    osmEdges: [
+      {
+        id: 'oe_syn_1_2',
+        wayName: '복원 연결선',
+        highwayType: 'unclassified',
+        mode: 'road' as const,
+        fromNodeId: 'syn_1',
+        toNodeId: 'syn_2',
+        coordinates: [[37.5665, 126.978], [37.5666, 126.9781]] as [[number, number], [number, number]],
+        distanceKm: 0.02,
+        buildCost: 20,
+        baseIncomePerSec: 1.5,
+        built: true,
+      },
+    ],
+  };
+
+  assert.deepEqual(countSyntheticRestoredItems(corrupted), {
+    syntheticNodes: 2,
+    syntheticEdges: 1,
+  });
+
+  const collected = collectMarksWithExistingState(corrupted);
+  assert.equal(collected.connectedNodeIds.has('real_gangnam'), true);
+  assert.equal(collected.connectedNodeIds.has('syn_1'), true);
+  assert.equal(collected.builtEdgeIds.has('oe_syn_1_2'), true);
+
+  saveLocalSlotGameState('slot_2', corrupted, { storage });
+  const rawCore = JSON.parse(storage.getItem('ROAD_INC_SAVE_SLOT_CORE_V2_slot_2')!);
+  assert.equal(rawCore.loadedOsmChunks.includes(chunkKeyForCoords(37.498, 127.028)), true);
+  assert.equal(rawCore.loadedOsmChunks.includes(chunkKeyForCoords(37.5665, 126.978)), false);
+
+  const emptyState = { ...createInitialGameState(seoul), osmNodes: [], osmEdges: [] };
+  const orphanNodeIds = Array.from({ length: 40 }, (_, i) => `orphan_${i}`);
+  const orphanEdgeIds = Array.from({ length: 39 }, (_, i) => `oe_orphan_${i}_orphan_${i + 1}`);
+  const orphanMarks: RestoredGraphMarks = {
+    connectedNodeIds: new Set(orphanNodeIds),
+    builtEdgeIds: new Set(orphanEdgeIds),
+    customBridgeEdges: [],
+  };
+
+  const healedOrphan = applyRestoredGraphMarks(emptyState, orphanMarks, { healGaps: true });
+  assert.equal(healedOrphan.osmEdges.length, 39);
+  for (const edge of healedOrphan.osmEdges) {
+    assert.ok(
+      edge.distanceKm <= 0.05,
+      `Orphan healed edge ${edge.id} jumped ${edge.distanceKm}km (sawtooth column-wrap regression)`
+    );
+  }
+});
+
 
 
 
